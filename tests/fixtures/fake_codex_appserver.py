@@ -3,8 +3,9 @@
 
 Speaks newline-delimited JSON-RPC 2.0 on stdio, mimicking the surface
 nerve's CodexAppServerClient uses (schema shapes from codex-cli 0.144.1,
-see tests/fixtures/codex_schema_meta.json). Behavior is selected via the
-FAKE_CODEX_MODE env var:
+see tests/fixtures/codex_schema_meta.json). Behavior is selected via
+``FAKE_CODEX_MODE`` or, for clients that sanitize child environments,
+``$CODEX_HOME/fake_codex_mode``:
 
   basic        — one text turn: deltas → tokenUsage → turn/completed
   tools        — command + multi-file fileChange + mcp tool items
@@ -21,6 +22,8 @@ FAKE_CODEX_MODE env var:
                  turn/completed with status=interrupted
   die_mid_turn — emits one delta then exits(1) mid-turn
   failed_turn  — emits an error notification then turn/completed(failed)
+  memory       — emits prompt-dependent authoritative agentMessage output
+                 plus sanitized request/environment metadata for memory tests
   big_line     — mcpToolCall item/completed whose result is ~2 MiB on a
                  single JSONL line (asyncio 64 KiB StreamReader-limit
                  regression: one large MCP response must not kill the
@@ -43,18 +46,38 @@ import os
 import sys
 import threading
 import time
+from pathlib import Path
 
 if "--version" in sys.argv:
     print("codex-cli 0.144.1")
     raise SystemExit(0)
 
-MODE = os.environ.get("FAKE_CODEX_MODE", "basic")
+
+def _resolve_mode() -> str:
+    """Resolve fake behavior even when the tested child sanitizes its env."""
+    env_mode = os.environ.get("FAKE_CODEX_MODE")
+    if env_mode:
+        return env_mode
+    codex_home = os.environ.get("CODEX_HOME")
+    if codex_home:
+        try:
+            file_mode = (Path(codex_home) / "fake_codex_mode").read_text().strip()
+        except OSError:
+            pass
+        else:
+            if file_mode:
+                return file_mode
+    return "basic"
+
+
+MODE = _resolve_mode()
 
 _out_lock = threading.Lock()
 _pending_approval_answer = threading.Event()
 _approval_decision: dict = {}
 _interrupted = threading.Event()
 _active_turn: dict = {"threadId": None, "turnId": None}
+_thread_params: dict[str, dict] = {}
 
 
 def send(payload: dict) -> None:
@@ -124,8 +147,67 @@ def _completed(turn_id: str, thread_id: str, status: str = "completed",
     notify("turn/completed", {"threadId": thread_id, "turn": turn})
 
 
-def run_turn(thread_id: str, turn_id: str) -> None:
+def run_turn(
+    thread_id: str,
+    turn_id: str,
+    turn_params: dict | None = None,
+) -> None:
     """Emit the scripted turn for the current MODE (worker thread)."""
+    if MODE == "memory":
+        params = turn_params or {}
+        inputs = params.get("input") or []
+        prompt = ""
+        for item in inputs:
+            if isinstance(item, dict) and item.get("type") == "text":
+                prompt = str(item.get("text") or "")
+                break
+
+        notify("turn/started", {
+            "threadId": thread_id,
+            "turn": {"id": turn_id, "status": "inProgress", "items": []},
+        })
+        # Deliberately wrong streaming text: item/completed must win.
+        notify("item/agentMessage/delta", {
+            "threadId": thread_id,
+            "turnId": turn_id,
+            "itemId": "memory-message",
+            "delta": "non-authoritative delta",
+        })
+        # Keep both workers occupied long enough for pool tests to overlap.
+        time.sleep(0.1)
+        sensitive_names = (
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "AWS_SECRET_ACCESS_KEY",
+            "NERVE_MCP_TOKEN",
+            "GITHUB_TOKEN",
+            "CUSTOM_SECRET",
+        )
+        result = json.dumps({
+            "prompt": prompt,
+            "pid": os.getpid(),
+            "threadParams": _thread_params.get(thread_id, {}),
+            "turnParams": params,
+            "configOverrides": _config_overrides(),
+            "codexHome": os.environ.get("CODEX_HOME", ""),
+            "sensitiveEnvPresent": {
+                name: name in os.environ for name in sensitive_names
+            },
+        }, sort_keys=True)
+        notify("item/completed", {
+            "threadId": thread_id,
+            "turnId": turn_id,
+            "item": {
+                "id": "memory-message",
+                "type": "agentMessage",
+                "text": result,
+                "status": "completed",
+            },
+        })
+        _usage(turn_id, thread_id)
+        _completed(turn_id, thread_id)
+        return
+
     if MODE in ("basic", "approval", "tools", "failed_turn"):
         notify("turn/started", {"threadId": thread_id,
                                 "turn": {"id": turn_id, "status": "inProgress", "items": []}})
@@ -329,7 +411,9 @@ def main() -> None:
                 respond(req_id, {"thread": {"id": msg["params"]["threadId"]}})
         elif method == "thread/start":
             threads_started += 1
-            respond(req_id, {"thread": {"id": f"th_fake_{threads_started}"}})
+            thread_id = f"th_fake_{threads_started}"
+            _thread_params[thread_id] = dict(msg.get("params") or {})
+            respond(req_id, {"thread": {"id": thread_id}})
         elif method in ("thread/resume", "thread/fork"):
             if MODE == "resume_fail":
                 respond_error(req_id, -32600, "no rollout found for thread")
@@ -346,7 +430,9 @@ def main() -> None:
             respond(req_id, {"turn": {"id": turn_id, "status": "inProgress",
                                       "items": []}})
             threading.Thread(
-                target=run_turn, args=(thread_id, turn_id), daemon=True,
+                target=run_turn,
+                args=(thread_id, turn_id, dict(msg.get("params") or {})),
+                daemon=True,
             ).start()
         elif method == "turn/interrupt":
             respond(req_id, {})

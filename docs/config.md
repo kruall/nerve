@@ -226,13 +226,50 @@ Sources pull data from external services on a schedule. See [sources.md](sources
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `memory.recall_model` | string | `claude-sonnet-4-6` | Model for recall routing |
-| `memory.memorize_model` | string | `claude-sonnet-4-6` | Model for extraction & preprocessing |
-| `memory.fast_model` | string | `claude-haiku-4-5-20251001` | Model for categorization, date resolution, knowledge filtering |
-| `memory.embed_model` | string | *(empty)* | Embedding model (only used when `openai_api_key` is set, e.g. `text-embedding-3-small`) |
+| `memory.provider` | string | `inherit` | Chat provider for memU: `inherit`, `anthropic`, `bedrock`, or `codex`. `inherit` follows the top-level `provider.type` and preserves the previous behavior. |
+| `memory.recall_model` | string | `claude-sonnet-4-6` | Model for LLM recall routing/ranking when embeddings are disabled |
+| `memory.memorize_model` | string | `claude-sonnet-4-6` | Model for memory extraction when embeddings are enabled |
+| `memory.fast_model` | string | `claude-haiku-4-5-20251001` | Model for preprocessing, categorization, category summaries, date resolution, and knowledge filtering. Also used for extraction and recall ranking when embeddings are disabled. |
+| `memory.embed_model` | string | *(empty)* | Independent OpenAI embedding model. Requires top-level `openai_api_key` (for example, `text-embedding-3-small`). |
+| `memory.codex_workers` | int | `2` | Number of isolated Codex app-server workers. Values are clamped to `1`–`4`; each worker handles one memory turn at a time. |
+| `memory.codex_effort` | string | `low` | Codex reasoning effort for memory writes and, without embeddings, LLM recall: `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`. |
 | `memory.semantic_dedup_threshold` | float | `0.85` | Cosine similarity threshold for semantic deduplication (0 to disable) |
-| `memory.knowledge_filter` | bool | `false` | Post-extraction LLM filter that deletes generic knowledge items (extra Haiku API call per memorize) |
+| `memory.knowledge_filter` | bool | `false` | Post-extraction LLM filter that deletes generic knowledge items (one extra `fast_model` call per memorize) |
 | `memory.categories` | list | `[]` | Seed categories — each entry has `name` and `description` fields. Used for semantic routing when memorizing and recalling facts. `nerve init` populates mode-appropriate defaults (personal: relationships, finances, health, etc.; worker: patterns, procedures, approvals, etc.). |
+
+Provider behavior:
+
+- `inherit` resolves to `bedrock` when `provider.type: bedrock`, otherwise to
+  `anthropic`.
+- `anthropic` uses the configured Anthropic-compatible API or CLIProxyAPI.
+- `bedrock` requires the top-level `provider.type: bedrock` configuration.
+- `codex` sends chat work through isolated, ephemeral `codex app-server`
+  sessions. It uses `codex.home_dir`, `codex.auth`, and the existing ChatGPT
+  login or explicitly configured `codex.api_key`; the top-level
+  `openai_api_key` is never reused as Codex chat authentication. Native
+  command/file, app, browser, computer-use, plugin, collaboration, MCP, and
+  dynamic tool paths are disabled for memory workers.
+
+With `memory.provider: codex`, all three memory model fields must contain Codex
+model IDs available to the authenticated account:
+
+```yaml
+memory:
+  provider: codex
+  recall_model: gpt-5.6-terra
+  memorize_model: gpt-5.6-terra
+  fast_model: gpt-5.6-terra
+  codex_workers: 2
+  codex_effort: low
+  embed_model: text-embedding-3-small
+```
+
+When both `openai_api_key` and `memory.embed_model` are configured, memU uses
+OpenAI to produce vectors and performs retrieval/ranking against its local
+SQLite-backed vector index. Normal recall therefore does not spend a Codex
+turn; Codex handles the write-side extraction, preprocessing, categorization,
+date resolution, and optional knowledge filtering. Without embeddings, recall
+falls back to LLM ranking through the selected memory provider.
 
 ## xmemory (optional, alongside memU)
 
@@ -321,8 +358,8 @@ Nerve automatically discovers MCP servers from Claude Code's enabled plugins. An
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `anthropic_api_key` | string | Anthropic API key (agent + memU chat). Not required when proxy is enabled. |
-| `openai_api_key` | string | OpenAI API key (optional — enables vector-based memory search via embeddings; without it, LLM-based recall is used) |
+| `anthropic_api_key` | string | Anthropic API key for Claude agent sessions and `anthropic` memory chat. Not required for paths using CLIProxyAPI, Bedrock, or Codex. |
+| `openai_api_key` | string | OpenAI API key for memU embeddings. Independent of `memory.provider` and never implicitly used for Codex chat authentication. Requires `memory.embed_model`; without both settings, LLM-based recall is used. |
 | `brave_search_api_key` | string | Brave Search API key (optional) |
 
 ## Proxy (CLIProxyAPI)

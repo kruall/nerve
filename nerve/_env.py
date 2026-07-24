@@ -1,4 +1,4 @@
-"""Process-wide environment defaults — import before numpy loads.
+"""Process-wide environment and TLS defaults — import as early as possible.
 
 This module is imported for its side effects at the top of Nerve's entry
 points (``nerve.cli``) and before the first ``import numpy`` in the
@@ -41,7 +41,11 @@ environment always wins over these defaults.
 
 from __future__ import annotations
 
+import logging
 import os
+
+
+logger = logging.getLogger(__name__)
 
 
 def apply_env_defaults() -> None:
@@ -58,4 +62,25 @@ def apply_env_defaults() -> None:
     os.environ.setdefault("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", "1")
 
 
+def apply_system_truststore() -> None:
+    """Make Python HTTPS clients use the operating-system CA store.
+
+    ``certifi`` cannot see enterprise roots installed in the macOS Keychain or
+    Windows certificate store.  OpenAI/httpx then fails with
+    ``CERTIFICATE_VERIFY_FAILED`` even though system curl and browsers work.
+    ``truststore`` delegates verification to the native store while preserving
+    normal hostname and certificate validation.
+    """
+    try:
+        import truststore
+
+        truststore.inject_into_ssl()
+    except ImportError:
+        # Keep source-tree utilities usable before dependencies are installed.
+        logger.debug("truststore is not installed; using Python SSL defaults")
+    except Exception as e:  # pragma: no cover - platform-specific defensive path
+        logger.warning("Could not enable the system TLS trust store: %s", e)
+
+
 apply_env_defaults()
+apply_system_truststore()

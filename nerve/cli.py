@@ -795,44 +795,140 @@ def doctor_report(config, config_source: str = "", check_api: bool = False) -> s
         except Exception:
             warnings.append("[WARN] Proxy not running (starts with Nerve)")
 
-    # Check API keys / provider
-    if config.provider.is_bedrock:
-        region = config.provider.aws_region or "(default)"
-        lines.append(f"[OK] Provider: AWS Bedrock, region {region}")
-        # Inference-profile prefix must match the region's geography
-        # (us./eu./apac.) — a mismatch means instant 400s.
-        from nerve.bootstrap import bedrock_geo_prefix
-        expected = bedrock_geo_prefix(config.provider.aws_region)
-        for label, model in (
-            ("agent.model", config.agent.model),
-            ("agent.cron_model", config.agent.cron_model),
-        ):
-            geo = model.split(".", 1)[0] if "." in model else ""
-            if geo in ("us", "eu", "apac", "global") and geo not in (expected, "global"):
-                warnings.append(
-                    f"[WARN] {label} '{model}' uses the '{geo}.' inference profile "
-                    f"but region {region} is '{expected}.' — expect 400 errors"
+    # Check only providers actually used by the selected agent/memory paths.
+    agent_backends = {
+        config.agent.backend,
+        config.agent.resolved_cron_backend,
+    }
+    memory_provider = config.resolved_memory_provider
+    claude_required = "claude" in agent_backends
+    anthropic_required = (
+        claude_required
+        or memory_provider in {"anthropic", "bedrock"}
+    )
+    codex_required = (
+        "codex" in agent_backends
+        or memory_provider == "codex"
+    )
+
+    if anthropic_required:
+        if config.provider.is_bedrock:
+            region = config.provider.aws_region or "(default)"
+            lines.append(f"[OK] Provider: AWS Bedrock, region {region}")
+            # Inference-profile prefix must match the region's geography
+            # (us./eu./apac.) — a mismatch means instant 400s.
+            from nerve.bootstrap import bedrock_geo_prefix
+            expected = bedrock_geo_prefix(config.provider.aws_region)
+            for label, model in (
+                ("agent.model", config.agent.model),
+                ("agent.cron_model", config.agent.cron_model),
+            ):
+                geo = model.split(".", 1)[0] if "." in model else ""
+                if (
+                    geo in ("us", "eu", "apac", "global")
+                    and geo not in (expected, "global")
+                ):
+                    warnings.append(
+                        f"[WARN] {label} '{model}' uses the '{geo}.' "
+                        f"inference profile but region {region} is "
+                        f"'{expected}.' — expect 400 errors"
+                    )
+        elif config.proxy.enabled:
+            if config.anthropic_api_key:
+                lines.append(
+                    "[--] Anthropic API key set (proxy takes precedence)"
                 )
-    elif config.proxy.enabled:
-        if config.anthropic_api_key:
-            lines.append("[--] Anthropic API key set (proxy takes precedence)")
+            else:
+                lines.append("[--] Anthropic API key not set (using proxy)")
+        elif config.anthropic_api_key:
+            lines.append(
+                f"[OK] Anthropic API key: ...{config.anthropic_api_key[-4:]}"
+            )
         else:
-            lines.append("[--] Anthropic API key not set (using proxy)")
-    elif config.anthropic_api_key:
-        lines.append(f"[OK] Anthropic API key: ...{config.anthropic_api_key[-4:]}")
+            errors.append(
+                "[ERR] Anthropic API key not set and proxy not enabled "
+                "(required by the selected agent or memory provider)"
+            )
+
+        # Live connectivity probe (CLI only — see check_api docstring note).
+        if check_api and (
+            config.provider.is_bedrock or config.anthropic_api_key
+        ):
+            ok, detail = _check_api_connectivity(config)
+            if ok:
+                lines.append(f"[OK] Claude API: {detail}")
+            else:
+                errors.append(f"[ERR] Claude API: {detail}")
     else:
-        errors.append("[ERR] Anthropic API key not set and proxy not enabled (config.local.yaml)")
+        lines.append("[--] Anthropic provider not required")
 
-    # Live connectivity probe (CLI only — see check_api docstring note)
-    if check_api and (config.provider.is_bedrock or config.anthropic_api_key):
-        ok, detail = _check_api_connectivity(config)
-        if ok:
-            lines.append(f"[OK] Claude API: {detail}")
-        else:
-            errors.append(f"[ERR] Claude API: {detail}")
+    if memory_provider == "codex":
+        lines.append(
+            "[OK] Memory chat provider: Codex "
+            f"({config.memory.memorize_model}, "
+            f"{config.memory.codex_workers} worker(s))"
+        )
+    else:
+        lines.append(f"[OK] Memory chat provider: {memory_provider}")
 
-    if config.openai_api_key:
-        lines.append(f"[OK] OpenAI API key: ...{config.openai_api_key[-4:]} (vector embeddings enabled)")
+    if codex_required and check_api:
+        try:
+            from types import SimpleNamespace
+
+            from nerve.agent.backends.codex.backend import CodexBackend
+
+            backend = CodexBackend(SimpleNamespace(config=config))
+            status = asyncio.run(backend.preflight(force=True))
+            if not status.get("available"):
+                errors.append(
+                    "[ERR] Codex preflight: "
+                    f"{status.get('reason', 'failed')}"
+                )
+            elif status.get("auth_mismatch"):
+                errors.append(
+                    "[ERR] Codex auth mismatch: configured "
+                    f"{status.get('configured_auth')}, authenticated as "
+                    f"{status.get('auth')}"
+                )
+            else:
+                models = set(status.get("models") or [])
+                required_models: set[str] = set()
+                if "codex" in agent_backends:
+                    required_models.add(config.codex.model)
+                    if config.codex.cron_model:
+                        required_models.add(config.codex.cron_model)
+                if memory_provider == "codex":
+                    required_models.update({
+                        config.memory.recall_model,
+                        config.memory.memorize_model,
+                        config.memory.fast_model,
+                    })
+                missing = sorted(
+                    model for model in required_models
+                    if models and model not in models
+                )
+                if missing:
+                    errors.append(
+                        "[ERR] Codex model(s) unavailable: "
+                        + ", ".join(missing)
+                    )
+                else:
+                    lines.append(
+                        f"[OK] Codex: {status.get('version')} "
+                        f"({status.get('auth')})"
+                    )
+        except Exception as e:
+            errors.append(f"[ERR] Codex preflight: {e}")
+
+    if config.openai_api_key and config.memory.embed_model:
+        lines.append(
+            f"[OK] OpenAI API key: ...{config.openai_api_key[-4:]} "
+            f"(vector embeddings: {config.memory.embed_model})"
+        )
+    elif config.openai_api_key:
+        errors.append(
+            "[ERR] OpenAI API key is set but memory.embed_model is empty"
+        )
     else:
         lines.append("[--] OpenAI API key not set (using LLM-based memory recall)")
 

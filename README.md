@@ -52,7 +52,8 @@ nerve restart
 
 Runs `git pull`, reinstalls Python deps, and rebuilds the web UI in one shot. Use `--no-pull`, `--no-deps`, or `--no-frontend` to skip steps. For Docker deployments, rebuild the image instead: `git pull && docker compose build && docker compose up -d`.
 
-**No API key?** Use your Claude subscription instead
+**No API key?** Use a Claude subscription through CLIProxyAPI, or authenticate
+the Codex backend and memory provider with a ChatGPT subscription.
 
 ## Two Modes
 
@@ -155,7 +156,7 @@ Two layers, one seamless experience.
 Curated facts injected into every system prompt. Active projects, current deadlines, operational lessons. Tagged with dates, automatically evicted when stale.
 
 **L2 — Deep Memory (memU)**
-Semantic search over everything — conversations, facts, preferences, events. SQLite-persisted. Uses vector embeddings when an OpenAI key is configured, or LLM-based ranking with Anthropic models only.
+Semantic search over everything — conversations, facts, preferences, events. SQLite-persisted. Memory chat can use Anthropic, Bedrock, or an isolated Codex app-server authenticated through ChatGPT. OpenAI embeddings enable local vector RAG, so normal recall stays in the local index while Codex, when selected, handles memory writes; without embeddings, recall falls back to the selected LLM provider.
 
 - Four memory types: `profile`, `event`, `knowledge`, `behavior`
 - Automatic conversation indexing on session close
@@ -262,8 +263,8 @@ See [docs/config.md](docs/config.md) for all options.
 - [uv](https://docs.astral.sh/uv/) (recommended package manager)
 - [Node.js](https://nodejs.org/) 18+ (for web UI build)
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview) (bundled with `claude-agent-sdk`)
-- Anthropic API key **or** Claude subscription via [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) proxy
-- Optional: OpenAI API key (for vector-based memory search — without it, LLM-based recall is used), Telegram bot token, [gog](https://github.com/googleworkspace/cli) CLI, [gh](https://cli.github.com/) CLI
+- A chat provider for the selected paths: Anthropic API key or Claude subscription via [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), AWS Bedrock credentials, or an authenticated Codex CLI/ChatGPT account
+- Optional: OpenAI API key for independent memory embeddings and local vector RAG (without it, recall uses the selected memory LLM), Telegram bot token, [gog](https://github.com/googleworkspace/cli) CLI, [gh](https://cli.github.com/) CLI
 
 ## Documentation
 

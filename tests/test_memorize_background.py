@@ -113,7 +113,7 @@ class TestMemorizeSessionOverride:
         """Frozen bound still indexes messages after the live column is gone."""
         engine = _make_engine()
         bridge = MagicMock(available=True)
-        bridge.memorize_conversation = AsyncMock()
+        bridge.memorize_conversation = AsyncMock(return_value=True)
         engine._memory_bridge = bridge
         # Live column already cleared (e.g. mark_error / rotation ran first)
         engine.db.get_session = AsyncMock(return_value={
@@ -136,10 +136,48 @@ class TestMemorizeSessionOverride:
         )
 
     @pytest.mark.asyncio
+    async def test_false_result_does_not_advance_watermark(self):
+        engine = _make_engine()
+        bridge = MagicMock(available=True)
+        bridge.memorize_conversation = AsyncMock(return_value=False)
+        engine._memory_bridge = bridge
+        engine.db.get_session = AsyncMock(return_value={
+            "connected_at": _CONNECTED_AT, "last_memorized_at": None,
+        })
+        engine.db.get_messages = AsyncMock(return_value=[
+            {"created_at": "2026-01-01 00:05:00", "role": "user", "content": "hi"},
+        ])
+
+        await engine._memorize_session("s1")
+
+        bridge.memorize_conversation.assert_awaited_once()
+        engine.db.update_session_fields.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_exception_does_not_advance_watermark(self):
+        engine = _make_engine()
+        bridge = MagicMock(available=True)
+        bridge.memorize_conversation = AsyncMock(
+            side_effect=RuntimeError("memory down"),
+        )
+        engine._memory_bridge = bridge
+        engine.db.get_session = AsyncMock(return_value={
+            "connected_at": _CONNECTED_AT, "last_memorized_at": None,
+        })
+        engine.db.get_messages = AsyncMock(return_value=[
+            {"created_at": "2026-01-01 00:05:00", "role": "user", "content": "hi"},
+        ])
+
+        await engine._memorize_session("s1")
+
+        bridge.memorize_conversation.assert_awaited_once()
+        engine.db.update_session_fields.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_no_override_and_no_connected_at_skips(self):
         engine = _make_engine()
         bridge = MagicMock(available=True)
-        bridge.memorize_conversation = AsyncMock()
+        bridge.memorize_conversation = AsyncMock(return_value=True)
         engine._memory_bridge = bridge
         engine.db.get_session = AsyncMock(return_value={"connected_at": None})
 
@@ -157,7 +195,7 @@ class TestMemorizeSessionOverride:
         """
         engine = _make_engine()
         bridge = MagicMock(available=True)
-        bridge.memorize_conversation = AsyncMock()
+        bridge.memorize_conversation = AsyncMock(return_value=True)
         engine._memory_bridge = bridge
 
         watermark = {"value": None}
@@ -187,6 +225,50 @@ class TestMemorizeSessionOverride:
         # finds nothing new.
         bridge.memorize_conversation.assert_awaited_once()
         assert watermark["value"] == "2026-01-01 00:06:00"
+
+
+# ---------------------------------------------------------------------------
+# _memorize_incremental — watermark advances only after successful indexing
+# ---------------------------------------------------------------------------
+
+class TestMemorizeIncrementalWatermark:
+    @staticmethod
+    def _engine(result: bool | Exception) -> AgentEngine:
+        engine = _make_engine()
+        bridge = MagicMock(available=True)
+        if isinstance(result, Exception):
+            bridge.memorize_conversation = AsyncMock(side_effect=result)
+        else:
+            bridge.memorize_conversation = AsyncMock(return_value=result)
+        engine._memory_bridge = bridge
+        engine.db.get_session = AsyncMock(return_value={
+            "last_memorized_at": "2026-01-01 00:00:00",
+        })
+        engine.db.get_messages = AsyncMock(return_value=[
+            {"created_at": "2026-01-01 00:05:00", "role": "user", "content": "hi"},
+        ])
+        return engine
+
+    @pytest.mark.asyncio
+    async def test_success_advances_watermark(self):
+        engine = self._engine(True)
+
+        count = await engine._memorize_incremental("s1")
+
+        assert count == 1
+        engine.db.update_session_fields.assert_awaited_once_with(
+            "s1", {"last_memorized_at": "2026-01-01 00:05:00"},
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("result", [False, RuntimeError("memory down")])
+    async def test_failure_does_not_advance_watermark(self, result):
+        engine = self._engine(result)
+
+        count = await engine._memorize_incremental("s1")
+
+        assert count == 0
+        engine.db.update_session_fields.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

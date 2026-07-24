@@ -101,8 +101,19 @@ sync:
 
 # Memory (memU)
 memory:
-  chat_model: claude-sonnet-4-6
-  # embed_model: text-embedding-3-small  # Only needed with openai_api_key
+  provider: inherit                       # inherit | anthropic | bedrock | codex
+  recall_model: claude-sonnet-4-6         # LLM ranking when embeddings are disabled
+  memorize_model: claude-sonnet-4-6       # Fact extraction
+  fast_model: claude-haiku-4-5-20251001   # Preprocessing, categories, dates, filtering
+  # embed_model: text-embedding-3-small    # Requires top-level openai_api_key
+  # codex_workers: 2                       # 1-4 isolated app-server workers
+  # codex_effort: low                      # low | medium | high | xhigh | max | ultra
+
+  # With provider: codex, use Codex model IDs available to the authenticated
+  # account for all three profiles, for example:
+  # recall_model: gpt-5.6-terra
+  # memorize_model: gpt-5.6-terra
+  # fast_model: gpt-5.6-terra
 
 # Cron
 cron:
