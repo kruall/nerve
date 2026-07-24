@@ -104,3 +104,127 @@ def test_codex_auth_mismatch_is_an_error(tmp_path):
         "[ERR] Codex auth mismatch: configured chatgpt, "
         "authenticated as api_key"
     ) in report
+
+
+def test_memory_only_codex_uses_inventory_preflight_and_model_fallbacks(
+    tmp_path,
+):
+    config = _codex_config(tmp_path)
+    config.agent.backend = "claude"
+    config.agent.cron_backend = "claude"
+    config.anthropic_api_key = "test-anthropic-key"
+    config.codex.model = "unused-agent-model"
+    config.memory.memorize_model = ""
+    config.memory.fast_model = "   "
+    status = {
+        "available": True,
+        "version": "codex-cli 0.144.6",
+        "auth": "chatgpt",
+        "configured_auth": "chatgpt",
+        "auth_mismatch": False,
+        "models": [config.memory.recall_model],
+    }
+    preflight = AsyncMock(return_value=status)
+
+    with (
+        patch(
+            "nerve.agent.backends.codex.backend.CodexBackend.preflight",
+            new=preflight,
+        ),
+        patch(
+            "nerve.cli._check_api_connectivity",
+            return_value=(True, "ok"),
+        ),
+    ):
+        report = doctor_report(config, check_api=True)
+
+    preflight.assert_awaited_once_with(
+        force=True,
+        validate_default_model=False,
+    )
+    assert "[OK] Codex: codex-cli 0.144.6 (chatgpt)" in report
+    assert "[ERR] Codex model(s) unavailable" not in report
+
+
+def test_codex_agent_model_is_still_validated_by_doctor(tmp_path):
+    config = _codex_config(tmp_path)
+    status = {
+        "available": True,
+        "version": "codex-cli 0.144.6",
+        "auth": "chatgpt",
+        "configured_auth": "chatgpt",
+        "auth_mismatch": False,
+        "models": [
+            config.memory.recall_model,
+            config.memory.memorize_model,
+            config.memory.fast_model,
+        ],
+    }
+
+    with patch(
+        "nerve.agent.backends.codex.backend.CodexBackend.preflight",
+        new=AsyncMock(return_value=status),
+    ):
+        report = doctor_report(config, check_api=True)
+
+    assert (
+        f"[ERR] Codex model(s) unavailable: {config.codex.model}"
+        in report
+    )
+
+
+def test_doctor_rejects_empty_active_codex_agent_model(tmp_path):
+    config = _codex_config(tmp_path)
+    config.codex.model = "   "
+    status = {
+        "available": True,
+        "version": "codex-cli 0.144.6",
+        "auth": "chatgpt",
+        "configured_auth": "chatgpt",
+        "auth_mismatch": False,
+        "models": [
+            config.memory.recall_model,
+            config.memory.memorize_model,
+            config.memory.fast_model,
+        ],
+    }
+
+    with patch(
+        "nerve.agent.backends.codex.backend.CodexBackend.preflight",
+        new=AsyncMock(return_value=status),
+    ):
+        report = doctor_report(config, check_api=True)
+
+    assert "[ERR] codex.model is empty" in report
+    assert "[OK] Codex:" not in report
+
+
+def test_doctor_rejects_empty_memory_recall_model(tmp_path):
+    config = _codex_config(tmp_path)
+    config.agent.backend = "claude"
+    config.agent.cron_backend = "claude"
+    config.anthropic_api_key = "test-anthropic-key"
+    config.memory.recall_model = "   "
+    status = {
+        "available": True,
+        "version": "codex-cli 0.144.6",
+        "auth": "chatgpt",
+        "configured_auth": "chatgpt",
+        "auth_mismatch": False,
+        "models": [],
+    }
+
+    with (
+        patch(
+            "nerve.agent.backends.codex.backend.CodexBackend.preflight",
+            new=AsyncMock(return_value=status),
+        ),
+        patch(
+            "nerve.cli._check_api_connectivity",
+            return_value=(True, "ok"),
+        ),
+    ):
+        report = doctor_report(config, check_api=True)
+
+    assert "[ERR] memory.recall_model is empty" in report
+    assert "[OK] Codex:" not in report

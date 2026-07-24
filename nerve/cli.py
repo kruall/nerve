@@ -878,7 +878,13 @@ def doctor_report(config, config_source: str = "", check_api: bool = False) -> s
             from nerve.agent.backends.codex.backend import CodexBackend
 
             backend = CodexBackend(SimpleNamespace(config=config))
-            status = asyncio.run(backend.preflight(force=True))
+            # Doctor validates the exact active agent/memory models below.
+            # Keep this probe inventory-only so an unused codex.model cannot
+            # break a memory-only Codex configuration.
+            status = asyncio.run(backend.preflight(
+                force=True,
+                validate_default_model=False,
+            ))
             if not status.get("available"):
                 errors.append(
                     "[ERR] Codex preflight: "
@@ -892,22 +898,61 @@ def doctor_report(config, config_source: str = "", check_api: bool = False) -> s
                 )
             else:
                 models = set(status.get("models") or [])
-                required_models: set[str] = set()
-                if "codex" in agent_backends:
-                    required_models.add(config.codex.model)
-                    if config.codex.cron_model:
-                        required_models.add(config.codex.cron_model)
+                configured_models: list[str] = []
+                model_config_errors: list[str] = []
+                default_model = str(config.codex.model or "").strip()
+                if config.agent.backend == "codex":
+                    if default_model:
+                        configured_models.append(default_model)
+                    else:
+                        model_config_errors.append(
+                            "[ERR] codex.model is empty but the Codex agent "
+                            "backend is active"
+                        )
+                if config.agent.resolved_cron_backend == "codex":
+                    cron_model = (
+                        str(config.codex.cron_model or "").strip()
+                        or default_model
+                    )
+                    if cron_model:
+                        configured_models.append(cron_model)
+                    else:
+                        model_config_errors.append(
+                            "[ERR] No Codex model is configured for cron"
+                        )
                 if memory_provider == "codex":
-                    required_models.update({
-                        config.memory.recall_model,
-                        config.memory.memorize_model,
-                        config.memory.fast_model,
-                    })
+                    recall_model = str(
+                        config.memory.recall_model or "",
+                    ).strip()
+                    if not recall_model:
+                        model_config_errors.append(
+                            "[ERR] memory.recall_model is empty but the "
+                            "Codex memory provider is active"
+                        )
+                    else:
+                        configured_models.extend((
+                            recall_model,
+                            (
+                                str(config.memory.memorize_model or "").strip()
+                                or recall_model
+                            ),
+                            (
+                                str(config.memory.fast_model or "").strip()
+                                or recall_model
+                            ),
+                        ))
+                required_models = {
+                    model
+                    for model in configured_models
+                    if model
+                }
                 missing = sorted(
                     model for model in required_models
                     if models and model not in models
                 )
-                if missing:
+                if model_config_errors:
+                    errors.extend(model_config_errors)
+                elif missing:
                     errors.append(
                         "[ERR] Codex model(s) unavailable: "
                         + ", ".join(missing)

@@ -1437,7 +1437,7 @@ class MemUBridge:
                 "default": {
                     "base_url": chat_base_url,
                     "api_key": chat_api_key,
-                    "chat_model": self.config.memory.recall_model,
+                    "chat_model": self._recall_model_name(),
                     "client_backend": "sdk",
                 },
             }
@@ -1455,22 +1455,26 @@ class MemUBridge:
 
             # Fast model for category summaries and date resolution (Haiku).
             fast_profile = "default"
-            if self.config.memory.fast_model:
+            fast_model = str(self.config.memory.fast_model or "").strip()
+            if fast_model:
                 llm_profiles["fast"] = {
                     "base_url": chat_base_url,
                     "api_key": chat_api_key,
-                    "chat_model": self.config.memory.fast_model,
+                    "chat_model": fast_model,
                     "client_backend": "sdk",
                 }
                 fast_profile = "fast"
 
             # Memorize model for extraction & preprocessing (Sonnet).
             memorize_profile = "default"
-            if self.config.memory.memorize_model:
+            memorize_model = str(
+                self.config.memory.memorize_model or "",
+            ).strip()
+            if memorize_model:
                 llm_profiles["memorize"] = {
                     "base_url": chat_base_url,
                     "api_key": chat_api_key,
-                    "chat_model": self.config.memory.memorize_model,
+                    "chat_model": memorize_model,
                     "client_backend": "sdk",
                 }
                 memorize_profile = "memorize"
@@ -1676,7 +1680,7 @@ class MemUBridge:
             # connection can hang (HTTP/2 negotiation issue with Cloudflare,
             # or cold Bedrock endpoint).  A cheap throwaway call here forces
             # the connection open so real memorize calls don't stall.
-            for profile in ("memorize", "fast", "default"):
+            for profile in self._configured_memory_profiles():
                 try:
                     client = self._service._get_llm_base_client(profile)
                     if isinstance(client, _BedrockLLMClient):
@@ -1898,6 +1902,47 @@ class MemUBridge:
             aws_secret_access_key=self.config.provider.aws_secret_access_key,
         )
 
+    def _fast_profile_name(self) -> str:
+        """Return the profile created for fast tasks."""
+        return (
+            "fast"
+            if str(self.config.memory.fast_model or "").strip()
+            else "default"
+        )
+
+    def _recall_model_name(self) -> str:
+        """Return the normalized required recall/default model."""
+        return str(self.config.memory.recall_model or "").strip()
+
+    def _fast_model_name(self) -> str:
+        """Return the effective normalized model used by fast tasks."""
+        return (
+            str(self.config.memory.fast_model or "").strip()
+            or self._recall_model_name()
+        )
+
+    def _memorize_profile_name(self) -> str:
+        """Return the profile created for extraction tasks."""
+        return (
+            "memorize"
+            if str(self.config.memory.memorize_model or "").strip()
+            else "default"
+        )
+
+    def _configured_memory_profiles(
+        self,
+        *,
+        include_default: bool = True,
+    ) -> tuple[str, ...]:
+        """Return unique configured chat profiles in task-priority order."""
+        profiles = [
+            self._memorize_profile_name(),
+            self._fast_profile_name(),
+        ]
+        if include_default:
+            profiles.append("default")
+        return tuple(dict.fromkeys(profiles))
+
     def _inject_bedrock_clients(self) -> None:
         """Replace placeholder OpenAISDKClient instances with Bedrock clients.
 
@@ -1938,6 +1983,8 @@ class MemUBridge:
         return CodexMemoryPool(
             workers=self.config.memory.codex_workers,
             bin_path=codex.bin_path,
+            min_version=codex.min_version,
+            max_version=codex.max_version,
             home_dir=codex.home_dir,
             work_dir=str(
                 Path(codex.home_dir).expanduser() / "memory-workspace"
@@ -1985,7 +2032,7 @@ class MemUBridge:
         """
         import httpx as _httpx
 
-        for profile in ("memorize", "fast", "default"):
+        for profile in self._configured_memory_profiles():
             try:
                 client = self._service._get_llm_base_client(profile)
 
@@ -2104,13 +2151,14 @@ class MemUBridge:
             pass
         return False
 
-    async def _probe_api_health(self, profile: str = "fast") -> str:
+    async def _probe_api_health(self, profile: str | None = None) -> str:
         """Quick health check against the API after a timeout.
 
-        Sends a tiny request on the 'fast' profile (Haiku) to distinguish
-        between API-wide outage vs. model-specific throttling.  Returns a
-        short diagnostic string for the log.
+        Sends a tiny request on the configured fast profile, or ``default``
+        when no separate fast model exists. Returns a short diagnostic string
+        for the log.
         """
+        profile = profile or self._fast_profile_name()
         try:
             client = self._service._get_llm_base_client(profile)
             t0 = time.monotonic()
@@ -2157,10 +2205,10 @@ class MemUBridge:
 
         # Probe API health before resetting — helps diagnose whether the
         # issue is model-specific throttling vs. API-wide outage.
-        health = await self._probe_api_health("fast")
+        health = await self._probe_api_health()
         logger.info("API health probe before reset: %s", health)
 
-        for profile in ("memorize", "fast", "default"):
+        for profile in self._configured_memory_profiles():
             try:
                 client = self._service._llm_clients.get(profile)
                 if client is None:
@@ -2202,7 +2250,7 @@ class MemUBridge:
         # Warm up the new clients — the first HTTP/2 request on a fresh
         # AsyncOpenAI→httpx connection can stall.  A cheap throwaway call
         # forces the connection open before the real memorize call.
-        for profile in ("memorize", "fast"):
+        for profile in self._configured_memory_profiles(include_default=False):
             try:
                 client = self._service._get_llm_base_client(profile)
                 if isinstance(client, (_BedrockLLMClient, CodexMemoryLLMClient)):
@@ -2541,10 +2589,11 @@ class MemUBridge:
         *,
         model: str,
         max_tokens: int,
-        profile: str = "fast",
+        profile: str | None = None,
         output_schema: dict[str, Any] | None = None,
     ) -> str:
         """Call one initialized memU chat profile on the memU event loop."""
+        profile = profile or self._fast_profile_name()
         client = self._service._get_llm_base_client(profile)
         if output_schema is not None and hasattr(client, "chat_structured"):
             response = await client.chat_structured(
@@ -2567,7 +2616,7 @@ class MemUBridge:
         *,
         model: str,
         max_tokens: int,
-        profile: str = "fast",
+        profile: str | None = None,
         output_schema: dict[str, Any] | None = None,
     ) -> str:
         """Thread-pool bridge into the provider-neutral memU chat client."""
@@ -2606,7 +2655,7 @@ class MemUBridge:
         Uses the fast profile for this structured extraction task.
         Returns a dict mapping item_id -> resolved ISO date string or None.
         """
-        model = self.config.memory.fast_model or self.config.memory.recall_model
+        model = self._fast_model_name()
 
         items_text = "\n".join(
             f"{i}. {summary}" for i, (_, summary) in enumerate(items)
@@ -2632,6 +2681,7 @@ class MemUBridge:
             prompt,
             model=model,
             max_tokens=2048,
+            profile=self._fast_profile_name(),
             output_schema={
                 "type": "object",
                 "properties": {
@@ -2723,7 +2773,7 @@ class MemUBridge:
             return
 
         try:
-            model = self.config.memory.fast_model or self.config.memory.recall_model
+            model = self._fast_model_name()
 
             items_text = "\n".join(
                 f"{i}. {item.get('summary', '')}"
@@ -2793,6 +2843,7 @@ class MemUBridge:
             prompt,
             model=model,
             max_tokens=512,
+            profile=self._fast_profile_name(),
             output_schema={
                 "type": "object",
                 "properties": {

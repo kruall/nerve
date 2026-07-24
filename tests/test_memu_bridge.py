@@ -371,6 +371,18 @@ class TestConfigMemoryModels:
         assert config.recall_model == "claude-sonnet-4-6"
         assert config.memorize_model == "claude-sonnet-4-6"
 
+    def test_from_dict_normalizes_model_names(self):
+        config = MemoryConfig.from_dict({
+            "recall_model": "  gpt-recall  ",
+            "memorize_model": "  ",
+            "fast_model": " gpt-fast ",
+            "embed_model": " text-embedding-3-small ",
+        })
+        assert config.recall_model == "gpt-recall"
+        assert config.memorize_model == ""
+        assert config.fast_model == "gpt-fast"
+        assert config.embed_model == "text-embedding-3-small"
+
     def test_semantic_dedup_threshold_default(self):
         config = MemoryConfig()
         assert config.semantic_dedup_threshold == 0.85
@@ -443,8 +455,11 @@ class TestCodexMemoryInjection:
         config.memory.provider = "codex"
         bridge = MemUBridge(config)
         client = _StructuredClient()
+        requested_profiles = []
         bridge._service = SimpleNamespace(
-            _get_llm_base_client=lambda profile: client,
+            _get_llm_base_client=lambda profile: (
+                requested_profiles.append(profile) or client
+            ),
         )
 
         result = bridge._call_knowledge_filter_sync(
@@ -452,10 +467,103 @@ class TestCodexMemoryInjection:
         )
 
         assert result == [1, 3]
+        assert requested_profiles == ["fast"]
         assert client.calls[0][0] == "classify"
         schema = client.calls[0][1]["output_schema"]
         assert schema["type"] == "object"
         assert schema["properties"]["indices"]["type"] == "array"
+
+    @pytest.mark.parametrize("fast_model", ["", "   "])
+    def test_owned_structured_call_falls_back_to_default_profile(
+        self,
+        tmp_path,
+        fast_model,
+    ):
+        class _StructuredClient:
+            async def chat_structured(self, prompt, **kwargs):
+                return '{"indices": []}', {"provider": "codex"}
+
+        config = _make_config(tmp_path)
+        config.memory.provider = "codex"
+        config.memory.fast_model = fast_model
+        bridge = MemUBridge(config)
+        requested_profiles = []
+        bridge._service = SimpleNamespace(
+            _get_llm_base_client=lambda profile: (
+                requested_profiles.append(profile) or _StructuredClient()
+            ),
+        )
+
+        assert bridge._call_knowledge_filter_sync(
+            config.memory.recall_model,
+            "classify",
+        ) == []
+        assert requested_profiles == ["default"]
+
+    def test_date_resolution_falls_back_to_default_profile(self, tmp_path):
+        class _StructuredClient:
+            async def chat_structured(self, prompt, **kwargs):
+                return (
+                    '{"items": [{"happened_at": "2026-07-24"}]}',
+                    {"provider": "codex"},
+                )
+
+        config = _make_config(tmp_path)
+        config.memory.provider = "codex"
+        config.memory.fast_model = ""
+        bridge = MemUBridge(config)
+        requested_profiles = []
+        bridge._service = SimpleNamespace(
+            _get_llm_base_client=lambda profile: (
+                requested_profiles.append(profile) or _StructuredClient()
+            ),
+        )
+
+        result = bridge._resolve_dates_via_llm(
+            [("item-1", "deployed today")],
+            "2026-07-24",
+        )
+
+        assert result == {"item-1": "2026-07-24"}
+        assert requested_profiles == ["default"]
+
+    def test_uninitialized_date_fallback_uses_normalized_recall_model(
+        self,
+        tmp_path,
+    ):
+        config = _make_config(tmp_path)
+        config.memory.fast_model = "   "
+        config.memory.recall_model = "  gpt-recall  "
+        bridge = MemUBridge(config)
+        client = MagicMock()
+        client.messages.create.return_value = SimpleNamespace(
+            content=[SimpleNamespace(
+                text='{"items": [{"happened_at": "2026-07-24"}]}',
+            )],
+        )
+        bridge._get_anthropic_client = MagicMock(return_value=client)
+
+        result = bridge._resolve_dates_via_llm(
+            [("item-1", "deployed today")],
+            "2026-07-24",
+        )
+
+        assert result == {"item-1": "2026-07-24"}
+        assert client.messages.create.call_args.kwargs["model"] == "gpt-recall"
+
+    def test_codex_runtime_receives_supported_version_range(self, tmp_path):
+        config = _make_config(tmp_path)
+        config.memory.provider = "codex"
+        bridge = MemUBridge(config)
+
+        with patch(
+            "nerve.memory.memu_bridge.CodexMemoryPool",
+        ) as pool_cls:
+            bridge._make_codex_runtime()
+
+        kwargs = pool_cls.call_args.kwargs
+        assert kwargs["min_version"] == config.codex.min_version
+        assert kwargs["max_version"] == config.codex.max_version
 
     @pytest.mark.asyncio
     async def test_health_exposes_provider_and_embedding_mode(self, tmp_path):

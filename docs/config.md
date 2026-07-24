@@ -228,8 +228,8 @@ Sources pull data from external services on a schedule. See [sources.md](sources
 |-----|------|---------|-------------|
 | `memory.provider` | string | `inherit` | Chat provider for memU: `inherit`, `anthropic`, `bedrock`, or `codex`. `inherit` follows the top-level `provider.type` and preserves the previous behavior. |
 | `memory.recall_model` | string | `claude-sonnet-4-6` | Model for LLM recall routing/ranking when embeddings are disabled |
-| `memory.memorize_model` | string | `claude-sonnet-4-6` | Model for memory extraction when embeddings are enabled |
-| `memory.fast_model` | string | `claude-haiku-4-5-20251001` | Model for preprocessing, categorization, category summaries, date resolution, and knowledge filtering. Also used for extraction and recall ranking when embeddings are disabled. |
+| `memory.memorize_model` | string | `claude-sonnet-4-6` | Model for memory extraction when embeddings are enabled. Empty reuses `recall_model`. |
+| `memory.fast_model` | string | `claude-haiku-4-5-20251001` | Model for preprocessing, categorization, category summaries, date resolution, and knowledge filtering. Also used for extraction and recall ranking when embeddings are disabled. Empty reuses `recall_model`. |
 | `memory.embed_model` | string | *(empty)* | Independent OpenAI embedding model. Requires top-level `openai_api_key` (for example, `text-embedding-3-small`). |
 | `memory.codex_workers` | int | `2` | Number of isolated Codex app-server workers. Values are clamped to `1`–`4`; each worker handles one memory turn at a time. |
 | `memory.codex_effort` | string | `low` | Codex reasoning effort for memory writes and, without embeddings, LLM recall: `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`. |
@@ -248,10 +248,13 @@ Provider behavior:
   login or explicitly configured `codex.api_key`; the top-level
   `openai_api_key` is never reused as Codex chat authentication. Native
   command/file, app, browser, computer-use, plugin, collaboration, MCP, and
-  dynamic tool paths are disabled for memory workers.
+  dynamic tool paths are disabled for memory workers. Effective config and
+  managed feature requirements are verified before a thread starts; enabled
+  persistent MCP servers or forced forbidden features fail closed.
 
-With `memory.provider: codex`, all three memory model fields must contain Codex
-model IDs available to the authenticated account:
+With `memory.provider: codex`, `memory.recall_model` must contain a Codex model
+ID available to the authenticated account. `memorize_model` and `fast_model`
+may be empty to reuse it:
 
 ```yaml
 memory:

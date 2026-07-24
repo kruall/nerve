@@ -102,10 +102,12 @@ The memory chat provider is selected independently of the main agent:
 Codex memory workers start ephemeral, read-only threads in a dedicated empty
 workspace. CLI overrides disable native shell/unified-exec, apps, browser,
 computer-use, plugins, collaboration, MCP, dynamic tools, and web search;
-the runtime also aborts any turn that still emits a tool item. Project
-instructions and embedding/API credentials are excluded from the child
-environment. With `codex.auth: chatgpt`, workers reuse the same ChatGPT OAuth
-login as Codex agent sessions:
+before starting a thread, the runtime verifies the effective config and
+managed feature requirements and refuses to run when an enabled persistent
+MCP server or forbidden feature remains. It also aborts any turn that still
+emits a tool item. Project instructions and embedding/API credentials are
+excluded from the child environment. With `codex.auth: chatgpt`, workers reuse
+the same ChatGPT OAuth login as Codex agent sessions:
 
 ```bash
 CODEX_HOME=~/.nerve/codex codex login
@@ -128,6 +130,9 @@ memory:
   embed_model: text-embedding-3-small
   categories: [...]     # see Categories section above
 ```
+
+`recall_model` is required. Empty `memorize_model` or `fast_model` values reuse
+the recall/default profile.
 
 Put the embedding secret in `config.local.yaml`:
 

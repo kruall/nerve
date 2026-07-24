@@ -24,6 +24,10 @@ see tests/fixtures/codex_schema_meta.json). Behavior is selected via
   failed_turn  — emits an error notification then turn/completed(failed)
   memory       — emits prompt-dependent authoritative agentMessage output
                  plus sanitized request/environment metadata for memory tests
+  memory_inherited_mcp — exposes a persistent MCP config layer
+  memory_malformed_config — returns unverifiable config/read layers
+  memory_disabled_mcp — exposes only an explicitly disabled MCP server
+  memory_required_feature — requirements force a forbidden feature
   big_line     — mcpToolCall item/completed whose result is ~2 MiB on a
                  single JSONL line (asyncio 64 KiB StreamReader-limit
                  regression: one large MCP response must not kill the
@@ -49,7 +53,19 @@ import time
 from pathlib import Path
 
 if "--version" in sys.argv:
-    print("codex-cli 0.144.1")
+    version = "codex-cli 0.144.1"
+    codex_home = os.environ.get("CODEX_HOME")
+    if codex_home:
+        try:
+            configured = (
+                Path(codex_home) / "fake_codex_version"
+            ).read_text().strip()
+        except OSError:
+            pass
+        else:
+            if configured:
+                version = configured
+    print(version)
     raise SystemExit(0)
 
 
@@ -78,6 +94,8 @@ _approval_decision: dict = {}
 _interrupted = threading.Event()
 _active_turn: dict = {"threadId": None, "turnId": None}
 _thread_params: dict[str, dict] = {}
+_config_read_params: dict = {}
+_config_requirements_read = [False]
 
 
 def send(payload: dict) -> None:
@@ -117,6 +135,16 @@ def _config_overrides() -> list[str]:
     return out
 
 
+def _effective_config() -> dict:
+    """Apply the memory runtime's simple false/empty CLI overrides."""
+    features = {}
+    config: dict = {"features": features, "mcp_servers": {}}
+    for override in _config_overrides():
+        if override.startswith("features.") and override.endswith("=false"):
+            features[override.removeprefix("features.").removesuffix("=false")] = False
+    return config
+
+
 def _usage(turn_id: str, thread_id: str) -> None:
     notify("thread/tokenUsage/updated", {
         "threadId": thread_id, "turnId": turn_id,
@@ -153,7 +181,13 @@ def run_turn(
     turn_params: dict | None = None,
 ) -> None:
     """Emit the scripted turn for the current MODE (worker thread)."""
-    if MODE == "memory":
+    if MODE in {
+        "memory",
+        "memory_inherited_mcp",
+        "memory_malformed_config",
+        "memory_disabled_mcp",
+        "memory_required_feature",
+    }:
         params = turn_params or {}
         inputs = params.get("input") or []
         prompt = ""
@@ -189,6 +223,8 @@ def run_turn(
             "threadParams": _thread_params.get(thread_id, {}),
             "turnParams": params,
             "configOverrides": _config_overrides(),
+            "configReadParams": _config_read_params,
+            "configRequirementsRead": _config_requirements_read[0],
             "codexHome": os.environ.get("CODEX_HOME", ""),
             "sensitiveEnvPresent": {
                 name: name in os.environ for name in sensitive_names
@@ -402,6 +438,71 @@ def main() -> None:
             respond(req_id, {"loginId": "fake-login"})
         elif method == "model/list":
             respond(req_id, {"data": [{"id": "gpt-5.6-sol"}]})
+        elif method == "config/read":
+            _config_read_params.clear()
+            _config_read_params.update(msg.get("params") or {})
+            effective = _effective_config()
+            if MODE == "memory_inherited_mcp":
+                inherited = {"mcp_servers": {
+                    "danger": {"command": "must-not-start"},
+                }}
+                effective["mcp_servers"] = inherited["mcp_servers"]
+                respond(req_id, {
+                    "config": effective,
+                    "origins": {},
+                    "layers": [{
+                        "name": {
+                            "type": "user",
+                            "file": "/tmp/fake-codex/config.toml",
+                        },
+                        "version": "1",
+                        "config": inherited,
+                    }],
+                })
+            elif MODE == "memory_malformed_config":
+                respond(req_id, {
+                    "config": [],
+                    "origins": {},
+                    "layers": [],
+                })
+            elif MODE == "memory_disabled_mcp":
+                effective["mcp_servers"] = {
+                    "off": {"enabled": False, "command": "must-not-start"},
+                }
+                respond(req_id, {
+                    "config": effective,
+                    "origins": {},
+                    "layers": [{
+                        "name": {
+                            "type": "project",
+                            "dotCodexFolder": "/tmp/fake-codex/.codex",
+                        },
+                        "version": "1",
+                        "disabledReason": "untrusted project",
+                        "config": {
+                            "mcp_servers": {
+                                "ignored": {"command": "must-not-start"},
+                            },
+                        },
+                    }],
+                })
+            else:
+                respond(req_id, {
+                    "config": effective,
+                    "origins": {},
+                    "layers": [],
+                })
+        elif method == "configRequirements/read":
+            if msg.get("params") is not None:
+                respond_error(req_id, -32602, "params must be null or omitted")
+                continue
+            _config_requirements_read[0] = True
+            requirements = None
+            if MODE == "memory_required_feature":
+                requirements = {
+                    "featureRequirements": {"plugins": True},
+                }
+            respond(req_id, {"requirements": requirements})
         elif method == "thread/read":
             if MODE == "resume_auth_fail":
                 respond_error(req_id, 401, "authentication expired")

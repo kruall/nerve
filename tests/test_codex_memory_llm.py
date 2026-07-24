@@ -18,6 +18,8 @@ from nerve.memory.codex_llm import (
 
 FAKE_BIN = str(Path(__file__).parent / "fixtures" / "fake_codex_appserver.py")
 MODEL = "gpt-5.6-sol"
+MIN_VERSION = "0.144.1"
+MAX_VERSION = "0.145.0"
 
 
 def _home_with_mode(tmp_path: Path, mode: str) -> Path:
@@ -31,6 +33,8 @@ def _runtime(tmp_path: Path, mode: str = "memory") -> CodexMemoryRuntime:
     home = _home_with_mode(tmp_path, mode)
     return CodexMemoryRuntime(
         bin_path=FAKE_BIN,
+        min_version=MIN_VERSION,
+        max_version=MAX_VERSION,
         home_dir=str(home),
         work_dir=str(tmp_path / "memory-work"),
         request_timeout=2,
@@ -44,6 +48,8 @@ def _pool(tmp_path: Path, mode: str = "memory") -> CodexMemoryPool:
     return CodexMemoryPool(
         workers=2,
         bin_path=FAKE_BIN,
+        min_version=MIN_VERSION,
+        max_version=MAX_VERSION,
         home_dir=str(home),
         work_dir=str(tmp_path / "memory-work"),
         request_timeout=2,
@@ -116,6 +122,11 @@ async def test_chat_uses_authoritative_output_and_isolated_thread(
         assert "features.plugins=false" in overrides
         assert "features.multi_agent=false" in overrides
 
+        assert payload["configReadParams"] == {
+            "cwd": str(tmp_path / "memory-work"),
+            "includeLayers": True,
+        }
+        assert payload["configRequirementsRead"] is True
         assert payload["codexHome"] == str(tmp_path / "codex-home")
         assert not any(payload["sensitiveEnvPresent"].values())
         for value in secrets.values():
@@ -155,6 +166,8 @@ async def test_pool_close_wakes_waiting_callers(
     pool = CodexMemoryPool(
         workers=1,
         bin_path=FAKE_BIN,
+        min_version=MIN_VERSION,
+        max_version=MAX_VERSION,
         home_dir=str(home),
         work_dir=str(tmp_path / "memory-work"),
         request_timeout=2,
@@ -229,6 +242,123 @@ async def test_native_tool_activity_is_rejected(
     try:
         with pytest.raises(CodexMemoryError, match="forbidden tool activity"):
             await client.chat("try to invoke a native tool")
+        assert runtime.is_alive is False
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_inherited_mcp_fails_closed_before_starting_thread(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path, mode="memory_inherited_mcp")
+    client = CodexMemoryLLMClient(runtime=runtime, chat_model=MODEL)
+    try:
+        with pytest.raises(
+            CodexMemoryError,
+            match=r"inherited MCP server.*danger",
+        ):
+            await client.chat("must not start a thread")
+        assert runtime.is_alive is False
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_malformed_effective_config_fails_closed(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path, mode="memory_malformed_config")
+    client = CodexMemoryLLMClient(runtime=runtime, chat_model=MODEL)
+    try:
+        with pytest.raises(
+            CodexMemoryError,
+            match="invalid effective config",
+        ):
+            await client.chat("must not start a thread")
+        assert runtime.is_alive is False
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_disabled_mcp_and_inactive_layer_do_not_block_memory(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path, mode="memory_disabled_mcp")
+    client = CodexMemoryLLMClient(runtime=runtime, chat_model=MODEL)
+    try:
+        text, _ = await client.chat("safe disabled config")
+        assert json.loads(text)["prompt"] == "safe disabled config"
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_managed_required_feature_fails_closed_before_thread(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path, mode="memory_required_feature")
+    client = CodexMemoryLLMClient(runtime=runtime, chat_model=MODEL)
+    try:
+        with pytest.raises(
+            CodexMemoryError,
+            match=r"managed requirements.*plugins",
+        ):
+            await client.chat("must not start a thread")
+        assert runtime.is_alive is False
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", ["codex-cli 0.144.0", "codex-cli 0.145"])
+async def test_unsupported_cli_version_fails_before_appserver_start(
+    tmp_path: Path,
+    version: str,
+) -> None:
+    home = _home_with_mode(tmp_path, "memory")
+    (home / "fake_codex_version").write_text(version, encoding="utf-8")
+    runtime = CodexMemoryRuntime(
+        bin_path=FAKE_BIN,
+        min_version=MIN_VERSION,
+        max_version=MAX_VERSION,
+        home_dir=str(home),
+        work_dir=str(tmp_path / "memory-work"),
+        request_timeout=2,
+        turn_timeout=5,
+        idle_timeout=2,
+    )
+    client = CodexMemoryLLMClient(runtime=runtime, chat_model=MODEL)
+    try:
+        with pytest.raises(CodexMemoryError, match="Unsupported codex-cli"):
+            await client.chat("must not start app-server")
+        assert runtime.is_alive is False
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_malformed_cli_version_fails_cleanly(tmp_path: Path) -> None:
+    home = _home_with_mode(tmp_path, "memory")
+    (home / "fake_codex_version").write_text(
+        "codex-cli development",
+        encoding="utf-8",
+    )
+    runtime = CodexMemoryRuntime(
+        bin_path=FAKE_BIN,
+        min_version=MIN_VERSION,
+        max_version=MAX_VERSION,
+        home_dir=str(home),
+        work_dir=str(tmp_path / "memory-work"),
+        request_timeout=2,
+        turn_timeout=5,
+        idle_timeout=2,
+    )
+    client = CodexMemoryLLMClient(runtime=runtime, chat_model=MODEL)
+    try:
+        with pytest.raises(CodexMemoryError, match="Could not parse"):
+            await client.chat("must not start app-server")
         assert runtime.is_alive is False
     finally:
         await runtime.close()

@@ -92,6 +92,26 @@ def _mode(monkeypatch, mode: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_inventory_preflight_can_skip_unused_default_model(tmp_path):
+    cfg = _config(tmp_path, model="unused-model")
+    backend = CodexBackend(_deps(cfg))
+
+    inventory = await backend.preflight(
+        force=True,
+        validate_default_model=False,
+    )
+    validated = await backend.preflight(
+        force=True,
+        validate_default_model=True,
+    )
+
+    assert inventory["available"] is True
+    assert inventory["models"] == ["gpt-5.6-sol"]
+    assert validated["available"] is False
+    assert "unused-model" in validated["reason"]
+
+
+@pytest.mark.asyncio
 async def test_basic_turn_streams_and_completes(tmp_path, monkeypatch):
     _mode(monkeypatch, "basic")
     cfg = _config(tmp_path)

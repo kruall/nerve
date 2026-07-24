@@ -577,10 +577,16 @@ class MemoryConfig:
         categories = [MemoryCategoryConfig.from_dict(c) for c in raw_cats]
         return cls(
             provider=str(d.get("provider", "inherit")).strip().lower(),
-            recall_model=d.get("recall_model", "claude-sonnet-4-6"),
-            memorize_model=d.get("memorize_model", "claude-sonnet-4-6"),
-            fast_model=d.get("fast_model", "claude-haiku-4-5-20251001"),
-            embed_model=d.get("embed_model", ""),
+            recall_model=str(
+                d.get("recall_model", "claude-sonnet-4-6") or "",
+            ).strip(),
+            memorize_model=str(
+                d.get("memorize_model", "claude-sonnet-4-6") or "",
+            ).strip(),
+            fast_model=str(
+                d.get("fast_model", "claude-haiku-4-5-20251001") or "",
+            ).strip(),
+            embed_model=str(d.get("embed_model", "") or "").strip(),
             codex_workers=max(
                 1, min(4, _lenient_int(d.get("codex_workers"), 2)),
             ),
@@ -1067,8 +1073,8 @@ class CodexConfig:
             min_version=str(d.get("min_version", "0.144.1")),
             max_version=str(d.get("max_version", "0.145.0")),
             home_dir=str(d.get("home_dir", "~/.nerve/codex")),
-            model=str(d.get("model", "gpt-5.6-sol")),
-            cron_model=str(d.get("cron_model") or ""),
+            model=str(d.get("model", "gpt-5.6-sol") or "").strip(),
+            cron_model=str(d.get("cron_model") or "").strip(),
             auth=str(d.get("auth", "chatgpt")).strip().lower(),
             api_key=str(d.get("api_key") or ""),
             api_key_env=str(d.get("api_key_env", "OPENAI_API_KEY")),

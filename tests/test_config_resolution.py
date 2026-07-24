@@ -210,6 +210,16 @@ class TestMemoryProviderResolution:
                 "memory": {"provider": "mystery"},
             })
 
+    def test_codex_model_names_are_normalized(self):
+        config = NerveConfig.from_dict({
+            "codex": {
+                "model": "  gpt-5.6-sol  ",
+                "cron_model": "   ",
+            },
+        })
+        assert config.codex.model == "gpt-5.6-sol"
+        assert config.codex.cron_model == ""
+
 
 class TestTelegramDmPolicy:
     def test_default_is_pairing(self):

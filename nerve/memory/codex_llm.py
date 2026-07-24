@@ -28,7 +28,9 @@ from typing import Any
 from nerve.agent.backends.base import TransportDiedError
 from nerve.agent.backends.codex.appserver import (
     CodexAppServerClient,
+    CodexCliVersionError,
     CodexRpcError,
+    check_codex_cli_version,
 )
 
 logger = logging.getLogger(__name__)
@@ -75,9 +77,9 @@ _SAFE_ENV_KEYS = {
 }
 
 # Codex exposes native command/file, app, browser, computer, plugin, and
-# collaboration tools independently of MCP/dynamic tools. CLI config
-# overrides take precedence over the user's CODEX_HOME config, making this an
-# enforceable boundary rather than a prompt-only request.
+# collaboration tools independently of MCP/dynamic tools. These CLI overrides
+# are verified through config/read and configRequirements/read before any
+# thread starts, making the boundary enforceable rather than prompt-only.
 _DISABLED_TOOL_FEATURES = (
     "apps",
     "browser_use",
@@ -124,6 +126,8 @@ class CodexMemoryRuntime:
         self,
         *,
         bin_path: str,
+        min_version: str,
+        max_version: str,
         home_dir: str,
         work_dir: str,
         auth: str = "chatgpt",
@@ -134,6 +138,8 @@ class CodexMemoryRuntime:
         idle_timeout: float = 60.0,
     ) -> None:
         self._bin_path = bin_path
+        self._min_version = min_version
+        self._max_version = max_version
         self._home_dir = str(Path(home_dir).expanduser())
         self._work_dir = str(Path(work_dir).expanduser())
         self._auth = auth
@@ -170,12 +176,135 @@ class CodexMemoryRuntime:
             return {"action": "decline"}
         return {}
 
+    async def _assert_isolated_config(
+        self,
+        transport: CodexAppServerClient,
+    ) -> None:
+        """Fail closed unless effective config enforces the memory boundary."""
+        try:
+            result = await transport.request(
+                "config/read",
+                {"cwd": self._work_dir, "includeLayers": True},
+                timeout=self._request_timeout,
+            )
+            requirements_result = await transport.request(
+                "configRequirements/read",
+                None,
+                timeout=self._request_timeout,
+            )
+        except Exception as e:
+            raise CodexMemoryError(
+                "Codex memory isolation failed: could not inspect the "
+                f"effective config ({type(e).__name__})"
+            ) from e
+
+        if not isinstance(result, dict):
+            raise CodexMemoryError(
+                "Codex memory isolation failed: config/read returned an "
+                "invalid response"
+            )
+        effective = result.get("config")
+        if not isinstance(effective, dict):
+            raise CodexMemoryError(
+                "Codex memory isolation failed: config/read returned an "
+                "invalid effective config"
+            )
+
+        server_names: set[str] = set()
+        for key in ("mcp_servers", "mcpServers"):
+            if key not in effective or effective[key] in (None, {}):
+                continue
+            servers = effective[key]
+            if not isinstance(servers, dict):
+                raise CodexMemoryError(
+                    "Codex memory isolation failed: inherited MCP "
+                    "configuration has an invalid shape"
+                )
+            for name, server in servers.items():
+                if not isinstance(server, dict):
+                    raise CodexMemoryError(
+                        "Codex memory isolation failed: inherited MCP "
+                        "configuration has an invalid shape"
+                    )
+                if server.get("enabled") is not False:
+                    server_names.add(str(name))
+
+        if server_names:
+            names = ", ".join(sorted(server_names))
+            raise CodexMemoryError(
+                "Codex memory isolation failed: inherited MCP server "
+                f"configuration is present ({names}); use a Codex home "
+                "without persistent MCP servers"
+            )
+
+        features = effective.get("features")
+        if not isinstance(features, dict):
+            raise CodexMemoryError(
+                "Codex memory isolation failed: effective feature flags "
+                "could not be verified"
+            )
+        enabled_features = sorted(
+            feature
+            for feature in _DISABLED_TOOL_FEATURES
+            if features.get(feature) is not False
+        )
+        if enabled_features:
+            raise CodexMemoryError(
+                "Codex memory isolation failed: forbidden features remain "
+                f"enabled ({', '.join(enabled_features)})"
+            )
+
+        if not isinstance(requirements_result, dict):
+            raise CodexMemoryError(
+                "Codex memory isolation failed: configRequirements/read "
+                "returned an invalid response"
+            )
+        requirements = requirements_result.get("requirements")
+        if requirements is not None and not isinstance(requirements, dict):
+            raise CodexMemoryError(
+                "Codex memory isolation failed: feature requirements could "
+                "not be verified"
+            )
+        feature_requirements = (
+            requirements.get("featureRequirements")
+            if isinstance(requirements, dict)
+            else None
+        )
+        if feature_requirements is not None and not isinstance(
+            feature_requirements, dict,
+        ):
+            raise CodexMemoryError(
+                "Codex memory isolation failed: feature requirements have "
+                "an invalid shape"
+            )
+        forced_features = sorted(
+            feature
+            for feature in _DISABLED_TOOL_FEATURES
+            if isinstance(feature_requirements, dict)
+            and feature_requirements.get(feature) is True
+        )
+        if forced_features:
+            raise CodexMemoryError(
+                "Codex memory isolation failed: managed requirements force "
+                f"forbidden features ({', '.join(forced_features)})"
+            )
+
     async def _ensure_started(self) -> CodexAppServerClient:
         if self._transport is not None and self._transport.is_alive():
             return self._transport
 
         await self._drop_transport()
         Path(self._work_dir).mkdir(parents=True, exist_ok=True)
+        try:
+            await check_codex_cli_version(
+                bin_path=self._bin_path,
+                min_version=self._min_version,
+                max_version=self._max_version,
+                env=self._child_env(),
+            )
+        except CodexCliVersionError as e:
+            raise CodexMemoryError(str(e)) from e
+
         transport = CodexAppServerClient(
             bin_path=self._bin_path,
             cwd=self._work_dir,
@@ -195,6 +324,7 @@ class CodexMemoryRuntime:
         )
         try:
             await transport.start()
+            await self._assert_isolated_config(transport)
             account = await transport.request(
                 "account/read", {}, timeout=self._request_timeout,
             )
