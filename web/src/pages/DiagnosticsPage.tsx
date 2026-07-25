@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 // import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
-import { Server, HardDrive, RefreshCw, Clock, CheckCircle2, XCircle, Database, Activity, Brain, Play, Loader2, DollarSign, Zap, BarChart3 } from 'lucide-react';
+import { Server, HardDrive, RefreshCw, Clock, CheckCircle2, XCircle, Database, Activity, Brain, Play, Loader2, DollarSign, Zap, BarChart3, Cpu, Search } from 'lucide-react';
 import { ExternalAgentsSection } from '../components/ExternalAgents/ExternalAgentsSection';
 
 function formatUptime(isoDate: string): string {
@@ -262,11 +262,15 @@ export function DiagnosticsPage() {
             </h2>
 
             {/* Summary cards */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+            <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 mb-3">
               <InfoCard icon={Activity} label="Status"
                 value={memuHealth.service_available ? 'Available' : 'Unavailable'} />
               <InfoCard icon={Clock} label="Uptime"
                 value={memuHealth.initialized_at ? formatUptime(memuHealth.initialized_at) : 'N/A'} />
+              <InfoCard icon={Cpu} label="Provider"
+                value={memuHealth.configuration?.provider || 'Unknown'} />
+              <InfoCard icon={Search} label="Recall"
+                value={memuHealth.configuration?.embedding_enabled ? 'Local vector RAG' : 'LLM ranking'} />
               <InfoCard icon={Database} label="Total Items"
                 value={String(memuHealth.database?.total_items ?? 0)} />
               <InfoCard icon={HardDrive} label="DB Size"

@@ -11,6 +11,7 @@ import pytest
 import yaml
 
 from nerve.config import (
+    NerveConfig,
     TelegramConfig,
     append_telegram_allowed_user,
     load_config,
@@ -174,6 +175,50 @@ class TestValidateConfigKeys:
             "memory": {"categories": [{"name": "a", "description": "b"}]},
         }
         assert validate_config_keys(merged) == []
+
+    def test_codex_memory_keys_are_known(self):
+        merged = {
+            "memory": {
+                "provider": "codex",
+                "codex_workers": 2,
+                "codex_effort": "low",
+            },
+        }
+        assert validate_config_keys(merged) == []
+
+
+class TestMemoryProviderResolution:
+    def test_inherit_preserves_global_anthropic_provider(self):
+        config = NerveConfig.from_dict({})
+        assert config.resolved_memory_provider == "anthropic"
+
+    def test_inherit_preserves_global_bedrock_provider(self):
+        config = NerveConfig.from_dict({
+            "provider": {"type": "bedrock"},
+        })
+        assert config.resolved_memory_provider == "bedrock"
+
+    def test_explicit_codex_is_independent_of_agent_backend(self):
+        config = NerveConfig.from_dict({
+            "memory": {"provider": "codex"},
+        })
+        assert config.resolved_memory_provider == "codex"
+
+    def test_rejects_unknown_memory_provider(self):
+        with pytest.raises(ValueError, match="memory.provider"):
+            NerveConfig.from_dict({
+                "memory": {"provider": "mystery"},
+            })
+
+    def test_codex_model_names_are_normalized(self):
+        config = NerveConfig.from_dict({
+            "codex": {
+                "model": "  gpt-5.6-sol  ",
+                "cron_model": "   ",
+            },
+        })
+        assert config.codex.model == "gpt-5.6-sol"
+        assert config.codex.cron_model == ""
 
 
 class TestTelegramDmPolicy:

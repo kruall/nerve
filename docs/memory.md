@@ -62,7 +62,7 @@ Knowledge extraction is filtered at three levels to prevent generic programming/
 
 1. **Custom extraction prompt** — The knowledge memory type uses custom rules (same mechanism as event date resolution) that instruct the LLM to only extract project-specific, environment-specific, or non-obvious knowledge. General CS/DevOps facts that any experienced engineer would know are explicitly forbidden.
 
-2. **Post-extraction relevance filter** (opt-in, `memory.knowledge_filter: true`) — After memorize completes, newly created knowledge items are batch-evaluated by a fast model (Haiku). Items identified as generic knowledge are auto-deleted. Disabled by default because it adds an extra API call per memorize and can be overly aggressive.
+2. **Post-extraction relevance filter** (opt-in, `memory.knowledge_filter: true`) — After memorize completes, newly created knowledge items are batch-evaluated by `memory.fast_model`. Items identified as generic knowledge are auto-deleted. Disabled by default because it adds an extra LLM call per memorize and can be overly aggressive.
 
 3. **Semantic deduplication** — See below.
 
@@ -78,38 +78,97 @@ Reinforced items rank higher in search results via salience-aware ranking: `simi
 
 ### Configuration
 
-memU uses two or three LLM profiles depending on configuration:
-- **Chat** — Anthropic API for recall routing (claude-sonnet-4-6)
-- **Fast** — Anthropic API for fact extraction and categorization (claude-haiku-4-5)
-- **Embedding** *(optional)* — OpenAI text-embedding-3-small for vector search. Only active when `openai_api_key` is set.
+memU separates chat generation from embeddings:
 
-When no OpenAI key is configured, memU uses **LLM-based recall** instead of vector search — the Chat profile ranks memories directly, requiring no embeddings. This uses more Anthropic API tokens per recall but removes the OpenAI dependency entirely.
+- **Recall** — `memory.recall_model` performs LLM recall routing/ranking when
+  embeddings are disabled.
+- **Memorize** — `memory.memorize_model` extracts memory items when embeddings
+  are enabled.
+- **Fast** — `memory.fast_model` handles preprocessing, categorization,
+  category summaries, date resolution, and knowledge filtering. Without
+  embeddings, it also handles extraction and recall ranking.
+- **Embedding** *(optional)* — `memory.embed_model` produces vectors through
+  OpenAI. It is active only when a top-level `openai_api_key` is also set.
+
+The memory chat provider is selected independently of the main agent:
+
+| Provider | Behavior |
+|----------|----------|
+| `inherit` | Historical default. Uses Bedrock when `provider.type: bedrock`; otherwise uses the configured Anthropic-compatible API or proxy. |
+| `anthropic` | Forces the configured Anthropic-compatible API or CLIProxyAPI. |
+| `bedrock` | Uses AWS Bedrock and requires top-level `provider.type: bedrock`. |
+| `codex` | Uses isolated `codex app-server` workers with the authentication stored in `codex.home_dir`. |
+
+Codex memory workers start ephemeral, read-only threads in a dedicated empty
+workspace. CLI overrides disable native shell/unified-exec, apps, browser,
+computer-use, plugins, collaboration, MCP, dynamic tools, and web search;
+before starting a thread, the runtime verifies the effective config and
+managed feature requirements and refuses to run when an enabled persistent
+MCP server or forbidden feature remains. It also aborts any turn that still
+emits a tool item. Project instructions and embedding/API credentials are
+excluded from the child environment. With `codex.auth: chatgpt`, workers reuse
+the same ChatGPT OAuth login as Codex agent sessions:
+
+```bash
+CODEX_HOME=~/.nerve/codex codex login
+```
+
+The top-level `openai_api_key` remains embeddings-only. It is never silently
+used to authenticate Codex; API-key Codex authentication must be explicitly
+configured under `codex`.
 
 Config in `config.yaml`:
+
 ```yaml
 memory:
-  chat_model: claude-sonnet-4-6       # recall routing
-  fast_model: claude-haiku-4-5-20251001  # extraction & categorization
-  # embed_model: text-embedding-3-small  # only needed with openai_api_key
-  categories: [...]  # see Categories section above
+  provider: codex
+  recall_model: gpt-5.6-terra
+  memorize_model: gpt-5.6-terra
+  fast_model: gpt-5.6-terra
+  codex_workers: 2      # 1-4 app-server processes; one active turn per worker
+  codex_effort: low     # low | medium | high | xhigh | max | ultra
+  embed_model: text-embedding-3-small
+  categories: [...]     # see Categories section above
 ```
+
+`recall_model` is required. Empty `memorize_model` or `fast_model` values reuse
+the recall/default profile.
+
+Put the embedding secret in `config.local.yaml`:
+
+```yaml
+openai_api_key: <openai-api-key>
+```
+
+With both embedding settings present, OpenAI generates query/item vectors while
+the corpus and vector ranking remain in the local SQLite-backed memU index.
+Normal recall is therefore local RAG and does not invoke Codex; Codex is used
+for write-side extraction, preprocessing, categorization, date resolution, and
+optional knowledge filtering.
+
+Without embeddings, memU switches to **LLM-based recall**. The selected chat
+provider ranks memories directly, so a Codex configuration consumes a Codex
+turn for reads as well as writes. Semantic deduplication also falls back to
+content hashes.
 
 ### Event Date Resolution
 
-After a conversation is indexed, Nerve resolves temporal context for extracted event items. Event items get their `happened_at` field set via an LLM call (using `fast_model` / Haiku) that parses dates from the content. Non-event items (profiles, knowledge, behavior) stay timeless.
+After a conversation is indexed, Nerve resolves temporal context for extracted event items. Event items get their `happened_at` field set via an LLM call using `fast_model` that parses dates from the content. Non-event items (profiles, knowledge, behavior) stay timeless.
 
 Date resolution runs regardless of whether the `memorize_file` call succeeded — on timeout, memU may have partially persisted items before the pipeline was cancelled, so those orphan items still need `happened_at` populated.
 
-This uses the `anthropic` Python SDK directly (not the OpenAI-compatible endpoint) since it runs synchronously in a thread. The `anthropic` package must be installed — see `pyproject.toml`.
+Date resolution uses the selected memory provider through the initialized memU
+fast profile. Codex uses a constrained JSON schema for this structured result;
+Anthropic and Bedrock use their corresponding adapters.
 
 ### Performance Optimizations
 
 - **Vector cache** *(with OpenAI key)* — All item and category embeddings are preloaded into memory at startup, eliminating repeated SQLite JSON parsing (~2s per search saved)
-- **Fast model** — Extraction and category summary updates use Haiku instead of Sonnet
+- **Fast model** — Mechanical preprocessing, category updates, date resolution, and filtering use the separately configurable `fast_model`
 - **Disabled pipeline steps** — Route intention, sufficiency checks, and resource retrieval are disabled in the retrieve pipeline (saves 3+ LLM calls per recall)
 - **Category embedding reuse** *(with OpenAI key)* — Category ranking uses stored embeddings instead of re-embedding summaries on every recall
 - **LLM-based fallback** — When no embedding provider is configured, retrieval and memorization work without embeddings; semantic deduplication falls back to content-hash only
-- **Client warmup** — Anthropic LLM clients are pinged during startup to force HTTP/2 connection establishment (avoids a cold-start hang on the first memorize call)
+- **Provider lifecycle** — HTTP clients are warmed during startup; Codex app-server workers start lazily on the first real memory operation so startup does not consume subscription turns
 - **Memorize timeout** — Each memorize call is capped at 300s; if it hangs, it is cancelled, LLM clients are evicted (cache cleared + HTTP transport closed), a fresh client is created, and one retry is attempted
 - **Per-call LLM timeout** — Base LLM client `.chat()` methods are wrapped with a 120s `asyncio.wait_for()` at init time (instance attribute shadowing). A single dead HTTP/2 connection fails fast instead of consuming the entire 300s pipeline budget. Hung calls log `memU LLM HUNG [profile]: no response after 120s (prompt=N chars)`
 - **LLM call instrumentation** — Uses memU's `LLMInterceptorRegistry` (before/after/on_error hooks on `LLMClientWrapper`) to log every LLM call with profile, step ID, call type, prompt size, latency, and response size. Log format: `memU LLM call [profile/step_id]: kind, prompt=N chars` / `memU LLM done [profile/step_id]: Nms, response=N chars`

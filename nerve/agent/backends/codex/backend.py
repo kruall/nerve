@@ -25,7 +25,6 @@ import json
 import logging
 import os
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -42,7 +41,9 @@ from nerve.agent.backends.base import (
 )
 from nerve.agent.backends.codex.appserver import (
     CodexAppServerClient,
+    CodexCliVersionError,
     CodexRpcError,
+    check_codex_cli_version,
 )
 from nerve.agent.backends.codex.diffs import reverse_apply_unified_diff
 from nerve.agent.backends.codex.mcp_stdio_wrapper import EXTERNAL_MCP_ENV_PREFIX
@@ -155,7 +156,9 @@ class CodexBackend:
         self.config = deps.config
         self.codex = deps.config.codex
         Path(self._home_dir()).mkdir(parents=True, exist_ok=True)
-        self._preflight_cache: tuple[float, dict[str, Any]] | None = None
+        self._preflight_cache: (
+            tuple[float, bool, dict[str, Any]] | None
+        ) = None
         self._preflight_lock = asyncio.Lock()
         self._live_models: set[str] = set()
         self._rate_limits: dict[str, Any] | None = None
@@ -218,48 +221,30 @@ class CodexBackend:
             await client.disconnect()
             raise
 
-    @staticmethod
-    def _version_tuple(value: str) -> tuple[int, ...]:
-        match = re.search(r"(\d+(?:\.\d+){1,3})", value)
-        if not match:
-            raise BackendError(f"Could not parse Codex CLI version from {value!r}")
-        return tuple(int(part) for part in match.group(1).split("."))
-
     async def _check_cli_version(self) -> str:
-        def _read() -> str:
-            try:
-                completed = subprocess.run(
-                    [self.codex.bin_path, "--version"],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                )
-            except (OSError, subprocess.SubprocessError) as e:
-                raise BackendError(
-                    f"Codex CLI is unavailable at {self.codex.bin_path!r}: {e}"
-                ) from e
-            return (completed.stdout or completed.stderr).strip()
-
-        output = await asyncio.to_thread(_read)
-        current = self._version_tuple(output)
-        minimum = self._version_tuple(self.codex.min_version)
-        maximum = self._version_tuple(self.codex.max_version)
-        if current < minimum or current >= maximum:
-            raise BackendError(
-                f"Unsupported {output}; Nerve tested Codex versions "
-                f">={self.codex.min_version}, <{self.codex.max_version}"
+        try:
+            return await check_codex_cli_version(
+                bin_path=self.codex.bin_path,
+                min_version=self.codex.min_version,
+                max_version=self.codex.max_version,
             )
-        return output
+        except CodexCliVersionError as e:
+            raise BackendError(str(e)) from e
 
-    async def preflight(self, *, force: bool = False) -> dict[str, Any]:
+    async def preflight(
+        self,
+        *,
+        force: bool = False,
+        validate_default_model: bool = True,
+    ) -> dict[str, Any]:
         """Check binary/version, auth, protocol, models, MCP, and plugin state."""
         now = time.monotonic()
         if (
             not force and self._preflight_cache is not None
             and now - self._preflight_cache[0] < 60
+            and self._preflight_cache[1] == validate_default_model
         ):
-            return dict(self._preflight_cache[1])
+            return dict(self._preflight_cache[2])
         async with self._preflight_lock:
             try:
                 version = await self._check_cli_version()
@@ -299,7 +284,11 @@ class CodexBackend:
                     for item in models if isinstance(item, dict)
                     and (item.get("id") or item.get("model") or item.get("slug"))
                 })
-                if model_ids and self.codex.model not in model_ids:
+                if (
+                    validate_default_model
+                    and model_ids
+                    and self.codex.model not in model_ids
+                ):
                     raise BackendError(
                         f"Configured Codex model {self.codex.model!r} is unavailable"
                     )
@@ -326,14 +315,18 @@ class CodexBackend:
                         effective_auth not in ("unknown", self.codex.auth)
                     ),
                     "account_type": account_type,
-                    "models": model_ids or [self.codex.model],
+                    "models": model_ids,
                     "default_model": self.codex.model,
                     "rate_limits": self._rate_limits,
                     "ultracode": plugin,
                 }
             except Exception as e:
                 result = {"available": False, "reason": str(e)}
-            self._preflight_cache = (time.monotonic(), result)
+            self._preflight_cache = (
+                time.monotonic(),
+                validate_default_model,
+                result,
+            )
             return dict(result)
 
     @staticmethod
@@ -433,6 +426,11 @@ class CodexBackend:
                 f"{base}.url={_toml_str(url)}",
                 f"{base}.bearer_token_env_var={_toml_str('NERVE_MCP_TOKEN')}",
                 f"{base}.required=true",
+                # This is Nerve's own loopback-only, session-authenticated
+                # server. Without an explicit approval mode Codex rejects MCP
+                # calls under non-interactive/never approval policies before
+                # they ever reach the server ("user rejected MCP tool call").
+                f'{base}.default_tools_approval_mode="approve"',
                 f"{base}.startup_timeout_sec=30",
                 f"{base}.tool_timeout_sec={int(self.codex.tool_timeout_sec)}",
             ]

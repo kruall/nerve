@@ -744,9 +744,17 @@ class AgentEngine:
                 if not context_msgs:
                     return
 
-                await self._memory_bridge.memorize_conversation(
+                memorized = await self._memory_bridge.memorize_conversation(
                     session_id, context_msgs,
                 )
+                if not memorized:
+                    logger.warning(
+                        "memU did not index %d messages from session %s; "
+                        "leaving last_memorized_at unchanged",
+                        len(context_msgs), session_id,
+                    )
+                    return
+
                 logger.info(
                     "Indexed %d messages from session %s into memU",
                     len(context_msgs), session_id,
@@ -836,9 +844,16 @@ class AgentEngine:
             if not new_msgs:
                 return 0
 
-            await self._memory_bridge.memorize_conversation(
+            memorized = await self._memory_bridge.memorize_conversation(
                 session_id, new_msgs,
             )
+            if not memorized:
+                logger.warning(
+                    "Incremental memU indexing failed for session %s; "
+                    "leaving last_memorized_at unchanged",
+                    session_id,
+                )
+                return 0
 
             if latest_ts:
                 await self.db.update_session_fields(

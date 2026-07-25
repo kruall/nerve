@@ -92,6 +92,26 @@ def _mode(monkeypatch, mode: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_inventory_preflight_can_skip_unused_default_model(tmp_path):
+    cfg = _config(tmp_path, model="unused-model")
+    backend = CodexBackend(_deps(cfg))
+
+    inventory = await backend.preflight(
+        force=True,
+        validate_default_model=False,
+    )
+    validated = await backend.preflight(
+        force=True,
+        validate_default_model=True,
+    )
+
+    assert inventory["available"] is True
+    assert inventory["models"] == ["gpt-5.6-sol"]
+    assert validated["available"] is False
+    assert "unused-model" in validated["reason"]
+
+
+@pytest.mark.asyncio
 async def test_basic_turn_streams_and_completes(tmp_path, monkeypatch):
     _mode(monkeypatch, "basic")
     cfg = _config(tmp_path)
@@ -160,6 +180,7 @@ async def test_config_overrides_carry_mcp_bridge(tmp_path, monkeypatch):
     assert 'mcp_servers.nerve.url="http://127.0.0.1:8900/mcp/v1/"' in joined
     assert 'mcp_servers.nerve.bearer_token_env_var="NERVE_MCP_TOKEN"' in joined
     assert "mcp_servers.nerve.required=true" in joined
+    assert 'mcp_servers.nerve.default_tools_approval_mode="approve"' in joined
     assert "mcp_servers.nerve.startup_timeout_sec=30" in joined
     assert "project_doc_max_bytes=0" in joined
 

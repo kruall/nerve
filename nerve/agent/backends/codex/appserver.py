@@ -24,7 +24,9 @@ import contextlib
 import json
 import logging
 import os
+import re
 import signal
+import subprocess
 from typing import Any, Awaitable, Callable
 
 from nerve.agent.backends.base import TransportDiedError
@@ -62,6 +64,58 @@ _STREAM_LIMIT = 1024 * 1024
 # peer; silently dropping a terminal/accounting notification is unsafe.
 _MAX_LINE_BYTES = 64 * 1024 * 1024
 _MAX_NOTIFICATION_BACKLOG = 4_096
+
+
+class CodexCliVersionError(RuntimeError):
+    """The configured Codex CLI is missing or outside the tested range."""
+
+
+def _version_tuple(value: str) -> tuple[int, int, int, int]:
+    """Parse and normalize a Codex version for semantic tuple comparison."""
+    match = re.search(r"(\d+(?:\.\d+){1,3})", value)
+    if not match:
+        raise CodexCliVersionError(
+            f"Could not parse Codex CLI version from {value!r}"
+        )
+    parts = tuple(int(part) for part in match.group(1).split("."))
+    return (*parts, *(0 for _ in range(4 - len(parts))))
+
+
+async def check_codex_cli_version(
+    *,
+    bin_path: str,
+    min_version: str,
+    max_version: str,
+    env: dict[str, str] | None = None,
+) -> str:
+    """Return ``codex --version`` output when it is in the tested range."""
+
+    def _read() -> str:
+        try:
+            completed = subprocess.run(
+                [bin_path, "--version"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=env,
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            raise CodexCliVersionError(
+                f"Codex CLI is unavailable at {bin_path!r}: {e}"
+            ) from e
+        return (completed.stdout or completed.stderr).strip()
+
+    output = await asyncio.to_thread(_read)
+    current = _version_tuple(output)
+    minimum = _version_tuple(min_version)
+    maximum = _version_tuple(max_version)
+    if current < minimum or current >= maximum:
+        raise CodexCliVersionError(
+            f"Unsupported {output}; Nerve tested Codex versions "
+            f">={min_version}, <{max_version}"
+        )
+    return output
 
 
 async def _read_jsonl_line(reader: asyncio.StreamReader, label: str) -> bytes:
@@ -294,10 +348,13 @@ class CodexAppServerClient:
         future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[req_id] = future
         try:
-            await self._write({
+            payload = {
                 "jsonrpc": "2.0", "id": req_id,
-                "method": method, "params": params or {},
-            })
+                "method": method,
+            }
+            if params is not None:
+                payload["params"] = params
+            await self._write(payload)
             return await asyncio.wait_for(
                 future, timeout=timeout or self._request_timeout,
             )

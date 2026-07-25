@@ -555,10 +555,16 @@ class MemoryCategoryConfig:
 
 @dataclass
 class MemoryConfig:
+    # "inherit" preserves the historical behavior: use the global
+    # Anthropic/Bedrock provider. "codex" uses the authenticated Codex
+    # app-server for chat while embeddings remain independently configurable.
+    provider: str = "inherit"  # inherit | anthropic | bedrock | codex
     recall_model: str = "claude-sonnet-4-6"  # Recall routing
     memorize_model: str = "claude-sonnet-4-6"  # Extraction & preprocessing
     fast_model: str = "claude-haiku-4-5-20251001"  # Category summaries, date resolution
     embed_model: str = ""
+    codex_workers: int = 2
+    codex_effort: str = "low"
     sqlite_dsn: str = ""
     semantic_dedup_threshold: float = 0.85  # Cosine similarity threshold for semantic dedup
     knowledge_filter: bool = False  # Post-extraction LLM filter for generic knowledge (extra API call)
@@ -570,10 +576,21 @@ class MemoryConfig:
         raw_cats = d.get("categories", [])
         categories = [MemoryCategoryConfig.from_dict(c) for c in raw_cats]
         return cls(
-            recall_model=d.get("recall_model", "claude-sonnet-4-6"),
-            memorize_model=d.get("memorize_model", "claude-sonnet-4-6"),
-            fast_model=d.get("fast_model", "claude-haiku-4-5-20251001"),
-            embed_model=d.get("embed_model", ""),
+            provider=str(d.get("provider", "inherit")).strip().lower(),
+            recall_model=str(
+                d.get("recall_model", "claude-sonnet-4-6") or "",
+            ).strip(),
+            memorize_model=str(
+                d.get("memorize_model", "claude-sonnet-4-6") or "",
+            ).strip(),
+            fast_model=str(
+                d.get("fast_model", "claude-haiku-4-5-20251001") or "",
+            ).strip(),
+            embed_model=str(d.get("embed_model", "") or "").strip(),
+            codex_workers=max(
+                1, min(4, _lenient_int(d.get("codex_workers"), 2)),
+            ),
+            codex_effort=str(d.get("codex_effort", "low")).strip().lower(),
             sqlite_dsn=d.get("sqlite_dsn", default_dsn),
             semantic_dedup_threshold=float(d.get("semantic_dedup_threshold", 0.85)),
             knowledge_filter=bool(d.get("knowledge_filter", False)),
@@ -1056,8 +1073,8 @@ class CodexConfig:
             min_version=str(d.get("min_version", "0.144.1")),
             max_version=str(d.get("max_version", "0.145.0")),
             home_dir=str(d.get("home_dir", "~/.nerve/codex")),
-            model=str(d.get("model", "gpt-5.6-sol")),
-            cron_model=str(d.get("cron_model") or ""),
+            model=str(d.get("model", "gpt-5.6-sol") or "").strip(),
+            cron_model=str(d.get("cron_model") or "").strip(),
             auth=str(d.get("auth", "chatgpt")).strip().lower(),
             api_key=str(d.get("api_key") or ""),
             api_key_env=str(d.get("api_key_env", "OPENAI_API_KEY")),
@@ -1394,6 +1411,13 @@ class NerveConfig:
         """
         return self.ollama.enabled and self.proxy.enabled
 
+    @property
+    def resolved_memory_provider(self) -> str:
+        """Effective chat provider for memU (embeddings stay independent)."""
+        if self.memory.provider == "inherit":
+            return "bedrock" if self.provider.is_bedrock else "anthropic"
+        return self.memory.provider
+
     def create_anthropic_client(self, timeout: float = 60.0) -> Any:
         """Create an Anthropic client based on the configured provider.
 
@@ -1471,8 +1495,41 @@ class NerveConfig:
                 raise ValueError(
                     f"{label} must be one of {self._KNOWN_BACKENDS}, got {name!r}"
                 )
-        codex_selected = "codex" in (
-            self.agent.backend, self.agent.resolved_cron_backend,
+        memory_providers = ("inherit", "anthropic", "bedrock", "codex")
+        if self.memory.provider not in memory_providers:
+            raise ValueError(
+                f"memory.provider must be one of {memory_providers}, "
+                f"got {self.memory.provider!r}"
+            )
+        if (
+            self.memory.provider == "bedrock"
+            and not self.provider.is_bedrock
+        ):
+            raise ValueError(
+                "memory.provider='bedrock' requires provider.type='bedrock'"
+            )
+        if (
+            self.memory.provider == "anthropic"
+            and self.provider.is_bedrock
+        ):
+            raise ValueError(
+                "memory.provider='anthropic' is incompatible with "
+                "provider.type='bedrock'"
+            )
+        if self.memory.codex_effort not in {
+            "low", "medium", "high", "xhigh", "max", "ultra",
+        }:
+            raise ValueError(
+                "memory.codex_effort must be one of "
+                "('low', 'medium', 'high', 'xhigh', 'max', 'ultra'), "
+                f"got {self.memory.codex_effort!r}"
+            )
+
+        codex_selected = (
+            "codex" in (
+                self.agent.backend, self.agent.resolved_cron_backend,
+            )
+            or self.resolved_memory_provider == "codex"
         )
         problems = self.codex.validate()
         if problems:

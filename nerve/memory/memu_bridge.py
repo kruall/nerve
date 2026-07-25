@@ -11,6 +11,7 @@ import ctypes
 import gc
 import json
 import logging
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -29,6 +30,10 @@ import nerve._env  # noqa: F401  isort: skip
 import numpy as np
 
 from nerve.config import NerveConfig
+from nerve.memory.codex_llm import (
+    CodexMemoryLLMClient,
+    CodexMemoryPool,
+)
 from nerve.observability.langfuse import attributes as lf_attrs
 
 logger = logging.getLogger(__name__)
@@ -684,6 +689,7 @@ class MemUBridge:
         # Debounce tracking for file re-indexing (path -> asyncio.Task)
         self._reindex_tasks: dict[str, asyncio.Task] = {}
         self._anthropic_client: Any | None = None  # Lazy sync Anthropic
+        self._codex_runtime: CodexMemoryPool | None = None
         # Dedicated event loop (own thread) that runs ALL memU service
         # coroutines.  memU's async pipeline steps call synchronous
         # SQLite/numpy work inline; isolating the whole service on its own
@@ -774,11 +780,14 @@ class MemUBridge:
         """Close LLM transports + DB engine.  Runs on the memU loop."""
         if not self._service:
             return
+        if self._codex_runtime is not None:
+            await self._codex_runtime.close()
+            self._codex_runtime = None
         for profile, client in list(
             getattr(self._service, "_llm_clients", {}).items()
         ):
             try:
-                if isinstance(client, _BedrockLLMClient):
+                if isinstance(client, (_BedrockLLMClient, CodexMemoryLLMClient)):
                     await client.close()
                 else:
                     inner = getattr(client, "client", None)
@@ -1409,25 +1418,26 @@ class MemUBridge:
             # right after the service is constructed.
             self._setup_sqlite_pragmas(sqlite_dsn)
 
-            # ── Bedrock detection ──
-            # When provider is Bedrock, anthropic_api_base_url and
-            # effective_api_key are both empty (Bedrock uses IAM auth).
-            # memU's OpenAISDKClient can't talk to Bedrock, so we:
-            # 1. Pass a placeholder base_url so LLMConfig validation passes
-            # 2. After MemoryService init, inject _BedrockLLMClient instances
-            is_bedrock = self.config.provider.is_bedrock
+            # ── Chat provider detection ──
+            # memU validates all profiles as OpenAI-compatible at construction
+            # time. Bedrock and Codex therefore use placeholders which are
+            # replaced with native adapters before the first real LLM call.
+            memory_provider = self.config.resolved_memory_provider
+            is_bedrock = memory_provider == "bedrock"
+            is_codex = memory_provider == "codex"
 
-            # For Bedrock we still need a base_url that passes validation
-            # inside memU's LLMConfig.  It will never be used because we
-            # replace the clients immediately after init.
-            chat_base_url = self.config.anthropic_api_base_url or "https://placeholder.invalid/v1"
-            chat_api_key = self.config.effective_api_key or "placeholder"
+            if is_bedrock or is_codex:
+                chat_base_url = "https://placeholder.invalid/v1"
+                chat_api_key = "placeholder"
+            else:
+                chat_base_url = self.config.anthropic_api_base_url
+                chat_api_key = self.config.effective_api_key
 
             llm_profiles: dict[str, Any] = {
                 "default": {
                     "base_url": chat_base_url,
                     "api_key": chat_api_key,
-                    "chat_model": self.config.memory.recall_model,
+                    "chat_model": self._recall_model_name(),
                     "client_backend": "sdk",
                 },
             }
@@ -1445,22 +1455,26 @@ class MemUBridge:
 
             # Fast model for category summaries and date resolution (Haiku).
             fast_profile = "default"
-            if self.config.memory.fast_model:
+            fast_model = str(self.config.memory.fast_model or "").strip()
+            if fast_model:
                 llm_profiles["fast"] = {
                     "base_url": chat_base_url,
                     "api_key": chat_api_key,
-                    "chat_model": self.config.memory.fast_model,
+                    "chat_model": fast_model,
                     "client_backend": "sdk",
                 }
                 fast_profile = "fast"
 
             # Memorize model for extraction & preprocessing (Sonnet).
             memorize_profile = "default"
-            if self.config.memory.memorize_model:
+            memorize_model = str(
+                self.config.memory.memorize_model or "",
+            ).strip()
+            if memorize_model:
                 llm_profiles["memorize"] = {
                     "base_url": chat_base_url,
                     "api_key": chat_api_key,
-                    "chat_model": self.config.memory.memorize_model,
+                    "chat_model": memorize_model,
                     "client_backend": "sdk",
                 }
                 memorize_profile = "memorize"
@@ -1535,12 +1549,11 @@ class MemUBridge:
             # Per-connection pragmas (busy_timeout, synchronous=NORMAL).
             self._attach_engine_pragmas()
 
-            # ── Bedrock client injection ──
-            # Replace the placeholder OpenAISDKClient instances with real
-            # Bedrock-backed clients.  Must happen before any LLM call
-            # (warmup, category sync, etc.).
+            # Replace placeholder clients before any warmup/category work.
             if is_bedrock:
                 self._inject_bedrock_clients()
+            elif is_codex:
+                self._inject_codex_clients()
 
             await self._ensure_categories()
 
@@ -1667,7 +1680,7 @@ class MemUBridge:
             # connection can hang (HTTP/2 negotiation issue with Cloudflare,
             # or cold Bedrock endpoint).  A cheap throwaway call here forces
             # the connection open so real memorize calls don't stall.
-            for profile in ("memorize", "fast", "default"):
+            for profile in self._configured_memory_profiles():
                 try:
                     client = self._service._get_llm_base_client(profile)
                     if isinstance(client, _BedrockLLMClient):
@@ -1676,6 +1689,10 @@ class MemUBridge:
                             timeout=15,
                         )
                         logger.debug("Warmed up Bedrock LLM client: %s", profile)
+                    elif isinstance(client, CodexMemoryLLMClient):
+                        # A Codex "ping" is a full subscription turn. Start
+                        # workers lazily on the first real memory operation.
+                        continue
                     elif hasattr(client, "client"):  # OpenAISDKClient
                         await asyncio.wait_for(
                             client.client.chat.completions.create(
@@ -1885,6 +1902,47 @@ class MemUBridge:
             aws_secret_access_key=self.config.provider.aws_secret_access_key,
         )
 
+    def _fast_profile_name(self) -> str:
+        """Return the profile created for fast tasks."""
+        return (
+            "fast"
+            if str(self.config.memory.fast_model or "").strip()
+            else "default"
+        )
+
+    def _recall_model_name(self) -> str:
+        """Return the normalized required recall/default model."""
+        return str(self.config.memory.recall_model or "").strip()
+
+    def _fast_model_name(self) -> str:
+        """Return the effective normalized model used by fast tasks."""
+        return (
+            str(self.config.memory.fast_model or "").strip()
+            or self._recall_model_name()
+        )
+
+    def _memorize_profile_name(self) -> str:
+        """Return the profile created for extraction tasks."""
+        return (
+            "memorize"
+            if str(self.config.memory.memorize_model or "").strip()
+            else "default"
+        )
+
+    def _configured_memory_profiles(
+        self,
+        *,
+        include_default: bool = True,
+    ) -> tuple[str, ...]:
+        """Return unique configured chat profiles in task-priority order."""
+        profiles = [
+            self._memorize_profile_name(),
+            self._fast_profile_name(),
+        ]
+        if include_default:
+            profiles.append("default")
+        return tuple(dict.fromkeys(profiles))
+
     def _inject_bedrock_clients(self) -> None:
         """Replace placeholder OpenAISDKClient instances with Bedrock clients.
 
@@ -1903,6 +1961,62 @@ class MemUBridge:
             self._service._llm_clients[name] = self._make_bedrock_client(model)
             logger.info("Injected Bedrock LLM client for profile '%s' (model=%s)", name, model)
 
+    def _make_codex_runtime(self) -> CodexMemoryPool:
+        """Create the isolated shared worker pool for Codex memory calls."""
+        codex = self.config.codex
+        api_key = ""
+        if codex.auth == "api_key":
+            # Deliberately do not fall back to top-level openai_api_key: that
+            # secret is reserved for embeddings and must not silently change
+            # Codex memory from ChatGPT credits to API billing.
+            api_key = codex.api_key
+            if not api_key and codex.api_key_env:
+                api_key = os.environ.get(codex.api_key_env, "")
+        effort = (
+            codex.effort_map.get(
+                self.config.memory.codex_effort,
+                self.config.memory.codex_effort,
+            )
+            if codex.effort_map
+            else self.config.memory.codex_effort
+        )
+        return CodexMemoryPool(
+            workers=self.config.memory.codex_workers,
+            bin_path=codex.bin_path,
+            min_version=codex.min_version,
+            max_version=codex.max_version,
+            home_dir=codex.home_dir,
+            work_dir=str(
+                Path(codex.home_dir).expanduser() / "memory-workspace"
+            ),
+            auth=codex.auth,
+            api_key=api_key,
+            effort=effort,
+            turn_timeout=float(self._LLM_CALL_TIMEOUT),
+            idle_timeout=min(60.0, float(self._LLM_CALL_TIMEOUT)),
+        )
+
+    def _inject_codex_clients(self) -> None:
+        """Replace memU chat profiles with isolated Codex-backed clients."""
+        if self._codex_runtime is None:
+            self._codex_runtime = self._make_codex_runtime()
+
+        profiles_to_replace = {
+            name: cfg.chat_model
+            for name, cfg in self._service.llm_profiles.profiles.items()
+            if name != "embedding"
+        }
+        for name, model in profiles_to_replace.items():
+            self._service._llm_clients[name] = CodexMemoryLLMClient(
+                runtime=self._codex_runtime,
+                chat_model=model,
+            )
+            logger.info(
+                "Injected Codex memory client for profile '%s' (model=%s)",
+                name,
+                model,
+            )
+
     def _instrument_llm_timeouts(self) -> None:
         """Configure per-call timeouts on LLM clients (two layers).
 
@@ -1918,13 +2032,15 @@ class MemUBridge:
         """
         import httpx as _httpx
 
-        for profile in ("memorize", "fast", "default"):
+        for profile in self._configured_memory_profiles():
             try:
                 client = self._service._get_llm_base_client(profile)
 
                 # --- Layer 1: httpx timeout + disable SDK retries ---
-                # (Bedrock clients use their own timeout; skip Layer 1 for them)
-                if not isinstance(client, _BedrockLLMClient):
+                # Native Bedrock/Codex clients own their transports and timeout.
+                if not isinstance(
+                    client, (_BedrockLLMClient, CodexMemoryLLMClient),
+                ):
                     inner = getattr(client, "client", None)  # OpenAISDKClient.client = AsyncOpenAI
                     if inner is not None:
                         inner.timeout = _httpx.Timeout(
@@ -2035,17 +2151,18 @@ class MemUBridge:
             pass
         return False
 
-    async def _probe_api_health(self, profile: str = "fast") -> str:
+    async def _probe_api_health(self, profile: str | None = None) -> str:
         """Quick health check against the API after a timeout.
 
-        Sends a tiny request on the 'fast' profile (Haiku) to distinguish
-        between API-wide outage vs. model-specific throttling.  Returns a
-        short diagnostic string for the log.
+        Sends a tiny request on the configured fast profile, or ``default``
+        when no separate fast model exists. Returns a short diagnostic string
+        for the log.
         """
+        profile = profile or self._fast_profile_name()
         try:
             client = self._service._get_llm_base_client(profile)
             t0 = time.monotonic()
-            if isinstance(client, _BedrockLLMClient):
+            if isinstance(client, (_BedrockLLMClient, CodexMemoryLLMClient)):
                 await asyncio.wait_for(
                     client.chat("ping", max_tokens=1),
                     timeout=15,
@@ -2082,20 +2199,22 @@ class MemUBridge:
         client so _get_llm_base_client() creates a new one, then re-apply
         per-call timeouts.
         """
-        is_bedrock = self.config.provider.is_bedrock
+        memory_provider = self.config.resolved_memory_provider
+        is_bedrock = memory_provider == "bedrock"
+        is_codex = memory_provider == "codex"
 
         # Probe API health before resetting — helps diagnose whether the
         # issue is model-specific throttling vs. API-wide outage.
-        health = await self._probe_api_health("fast")
+        health = await self._probe_api_health()
         logger.info("API health probe before reset: %s", health)
 
-        for profile in ("memorize", "fast", "default"):
+        for profile in self._configured_memory_profiles():
             try:
                 client = self._service._llm_clients.get(profile)
                 if client is None:
                     continue
                 # Close the underlying transport
-                if isinstance(client, _BedrockLLMClient):
+                if isinstance(client, (_BedrockLLMClient, CodexMemoryLLMClient)):
                     await client.close()
                 else:
                     inner = getattr(client, "client", None)  # OpenAISDKClient
@@ -2114,10 +2233,16 @@ class MemUBridge:
             except Exception as e:
                 logger.warning("Could not reset LLM client for '%s': %s", profile, e)
 
-        # For Bedrock, re-inject fresh Bedrock clients (memU's default
-        # _get_llm_base_client would recreate broken OpenAISDK ones).
+        if is_codex and self._codex_runtime is not None:
+            await self._codex_runtime.close()
+            self._codex_runtime = None
+
+        # Native providers must be re-injected: memU's lazy default would
+        # recreate placeholder OpenAI clients after eviction.
         if is_bedrock:
             self._inject_bedrock_clients()
+        elif is_codex:
+            self._inject_codex_clients()
 
         # Re-apply per-call timeouts on the fresh clients
         self._instrument_llm_timeouts()
@@ -2125,11 +2250,11 @@ class MemUBridge:
         # Warm up the new clients — the first HTTP/2 request on a fresh
         # AsyncOpenAI→httpx connection can stall.  A cheap throwaway call
         # forces the connection open before the real memorize call.
-        for profile in ("memorize", "fast"):
+        for profile in self._configured_memory_profiles(include_default=False):
             try:
                 client = self._service._get_llm_base_client(profile)
-                if isinstance(client, _BedrockLLMClient):
-                    # Bedrock warmup — use the adapter's chat method directly
+                if isinstance(client, (_BedrockLLMClient, CodexMemoryLLMClient)):
+                    # Native adapter warmup — use its chat method directly.
                     await asyncio.wait_for(
                         client.chat("ping", max_tokens=1),
                         timeout=15,
@@ -2372,8 +2497,8 @@ class MemUBridge:
         - Non-event items: happened_at stays NULL (timeless facts).
         - All items: extra.mentioned_at = conversation date.
 
-        Runs synchronous work (sqlite3 + Anthropic API) in a dedicated thread
-        pool so it cannot starve the default asyncio executor.
+        Runs synchronous SQLite work and the configured memory-provider call in
+        a dedicated thread pool so it cannot starve the default executor.
         """
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
@@ -2447,26 +2572,90 @@ class MemUBridge:
             logger.warning("Event date resolution failed: %s", e)
 
     def _get_anthropic_client(self) -> Any:
-        """Get or create the shared sync Anthropic client.
+        """Get or create the legacy sync Anthropic fallback client.
 
-        Uses the config factory method which returns AnthropicBedrock
-        when provider is "bedrock", or standard Anthropic otherwise.
+        Production date/filter calls use the already-injected memU profile.
+        This fallback exists for bridges constructed without ``initialize()``
+        (notably small unit tests and maintenance scripts).
         """
         if self._anthropic_client is not None:
             return self._anthropic_client
         self._anthropic_client = self.config.create_anthropic_client(timeout=60.0)
         return self._anthropic_client
 
+    async def _memory_profile_chat(
+        self,
+        prompt: str,
+        *,
+        model: str,
+        max_tokens: int,
+        profile: str | None = None,
+        output_schema: dict[str, Any] | None = None,
+    ) -> str:
+        """Call one initialized memU chat profile on the memU event loop."""
+        profile = profile or self._fast_profile_name()
+        client = self._service._get_llm_base_client(profile)
+        if output_schema is not None and hasattr(client, "chat_structured"):
+            response = await client.chat_structured(
+                prompt,
+                output_schema=output_schema,
+                max_tokens=max_tokens,
+            )
+        else:
+            # ``model`` is used only by the uninitialized fallback below;
+            # initialized profiles already carry their configured model.
+            del model
+            response = await client.chat(prompt, max_tokens=max_tokens)
+        if isinstance(response, tuple):
+            return str(response[0])
+        return str(response)
+
+    def _memory_profile_chat_sync(
+        self,
+        prompt: str,
+        *,
+        model: str,
+        max_tokens: int,
+        profile: str | None = None,
+        output_schema: dict[str, Any] | None = None,
+    ) -> str:
+        """Thread-pool bridge into the provider-neutral memU chat client."""
+        if self._service is not None:
+            coro = self._memory_profile_chat(
+                prompt,
+                model=model,
+                max_tokens=max_tokens,
+                profile=profile,
+                output_schema=output_schema,
+            )
+            loop = self._memu_loop
+            if loop is not None and not loop.is_closed():
+                future = asyncio.run_coroutine_threadsafe(coro, loop)
+                try:
+                    return future.result(timeout=self._LLM_CALL_TIMEOUT + 5)
+                except BaseException:
+                    future.cancel()
+                    raise
+            return asyncio.run(coro)
+
+        # Compatibility fallback for an uninitialized bridge.
+        client = self._get_anthropic_client()
+        response = client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.content[0].text
+
     def _resolve_dates_via_llm(
         self, items: list[tuple[str, str]], conversation_date: str,
     ) -> dict[str, str | None]:
-        """Call Anthropic API to resolve actual happened_at dates for event items.
+        """Resolve actual happened_at dates through the configured memory LLM.
 
-        Uses the fast_model (Haiku) for this structured extraction task.
+        Uses the fast profile for this structured extraction task.
         Returns a dict mapping item_id -> resolved ISO date string or None.
         """
-        model = self.config.memory.fast_model or self.config.memory.recall_model
-        client = self._get_anthropic_client()
+        model = self._fast_model_name()
 
         items_text = "\n".join(
             f"{i}. {summary}" for i, (_, summary) in enumerate(items)
@@ -2482,25 +2671,57 @@ class MemUBridge:
             f"- Events on the conversation date → return {conversation_date}\n"
             f"- Undeterminable date → return null\n\n"
             f"Items:\n{items_text}\n\n"
-            f"Return ONLY a valid JSON array with one object per item, in the same order:\n"
-            f'[{{"happened_at": "YYYY-MM-DD"}}, {{"happened_at": null}}, ...]'
+            f"Return ONLY a valid JSON object whose items array has one object per "
+            f"input item, in the same order:\n"
+            f'{{"items": [{{"happened_at": "YYYY-MM-DD"}}, '
+            f'{{"happened_at": null}}, ...]}}'
         )
 
-        response = client.messages.create(
+        text = self._memory_profile_chat_sync(
+            prompt,
             model=model,
             max_tokens=2048,
-            messages=[{"role": "user", "content": prompt}],
+            profile=self._fast_profile_name(),
+            output_schema={
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "minItems": len(items),
+                        "maxItems": len(items),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "happened_at": {
+                                    "type": ["string", "null"],
+                                },
+                            },
+                            "required": ["happened_at"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["items"],
+                "additionalProperties": False,
+            },
         )
 
         result: dict[str, str | None] = {}
         try:
             import re
-            text = response.content[0].text
-            json_match = re.search(r"\[.*\]", text, re.DOTALL)
-            if json_match:
-                parsed = json.loads(json_match.group())
-                for idx, entry in enumerate(parsed):
-                    if 0 <= idx < len(items):
+
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                # Keep compatibility with non-structured providers that may
+                # wrap the JSON in explanatory prose.
+                json_match = re.search(r"(\{.*\}|\[.*\])", text, re.DOTALL)
+                parsed = json.loads(json_match.group()) if json_match else []
+
+            entries = parsed.get("items", []) if isinstance(parsed, dict) else parsed
+            if isinstance(entries, list):
+                for idx, entry in enumerate(entries):
+                    if 0 <= idx < len(items) and isinstance(entry, dict):
                         item_id = items[idx][0]
                         raw = entry.get("happened_at")
                         result[item_id] = self._validate_date_value(raw)
@@ -2552,7 +2773,7 @@ class MemUBridge:
             return
 
         try:
-            model = self.config.memory.fast_model or self.config.memory.recall_model
+            model = self._fast_model_name()
 
             items_text = "\n".join(
                 f"{i}. {item.get('summary', '')}"
@@ -2576,10 +2797,11 @@ class MemUBridge:
                 "- Custom tool behavior, internal API quirks\n"
                 "- Integration-specific knowledge unique to the user's setup\n\n"
                 f"Items:\n{items_text}\n\n"
-                "Return ONLY a JSON array of 0-based indices of GENERIC items to delete.\n"
-                "Example: [0, 2, 5]\n"
-                "If all items are worth keeping, return: []\n"
-                "Return ONLY the JSON array, nothing else."
+                "Return ONLY a JSON object containing the 0-based indices of GENERIC "
+                "items to delete.\n"
+                'Example: {"indices": [0, 2, 5]}\n'
+                'If all items are worth keeping, return: {"indices": []}\n'
+                "Return ONLY the JSON object, nothing else."
             )
 
             loop = asyncio.get_running_loop()
@@ -2614,23 +2836,38 @@ class MemUBridge:
             logger.warning("Knowledge filter failed (non-fatal): %s", e)
 
     def _call_knowledge_filter_sync(self, model: str, prompt: str) -> list[int]:
-        """Synchronous Haiku call for knowledge filtering (runs in thread pool)."""
+        """Synchronous fast-profile call for filtering (runs in thread pool)."""
         import re as _re
 
-        client = self._get_anthropic_client()
-        response = client.messages.create(
+        text = self._memory_profile_chat_sync(
+            prompt,
             model=model,
             max_tokens=512,
-            messages=[{"role": "user", "content": prompt}],
+            profile=self._fast_profile_name(),
+            output_schema={
+                "type": "object",
+                "properties": {
+                    "indices": {
+                        "type": "array",
+                        "items": {"type": "integer", "minimum": 0},
+                    },
+                },
+                "required": ["indices"],
+                "additionalProperties": False,
+            },
         )
 
         try:
-            text = response.content[0].text
-            json_match = _re.search(r"\[.*?\]", text, _re.DOTALL)
-            if json_match:
-                parsed = json.loads(json_match.group())
-                if isinstance(parsed, list):
-                    return [int(x) for x in parsed if isinstance(x, (int, float))]
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                # Backward-compatible parsing for providers that add prose.
+                json_match = _re.search(r"(\{.*?\}|\[.*?\])", text, _re.DOTALL)
+                parsed = json.loads(json_match.group()) if json_match else []
+
+            indices = parsed.get("indices", []) if isinstance(parsed, dict) else parsed
+            if isinstance(indices, list):
+                return [int(x) for x in indices if isinstance(x, (int, float))]
         except Exception as e:
             logger.warning("Failed to parse knowledge filter response: %s", e)
 
@@ -3143,6 +3380,23 @@ class MemUBridge:
     async def get_health(self) -> dict:
         """Complete health snapshot for the diagnostics endpoint."""
         result = self._metrics.to_dict()
+        result["configuration"] = {
+            "provider": self.config.resolved_memory_provider,
+            "recall_model": self.config.memory.recall_model,
+            "memorize_model": self.config.memory.memorize_model,
+            "fast_model": self.config.memory.fast_model,
+            "embedding_enabled": self._has_embeddings,
+            "embed_model": (
+                self.config.memory.embed_model
+                if self._has_embeddings
+                else ""
+            ),
+            "codex_workers": (
+                self.config.memory.codex_workers
+                if self.config.resolved_memory_provider == "codex"
+                else 0
+            ),
+        }
         result["database"] = await self.get_db_stats()
         return result
 
