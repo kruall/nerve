@@ -426,6 +426,11 @@ class CodexBackend:
                 f"{base}.url={_toml_str(url)}",
                 f"{base}.bearer_token_env_var={_toml_str('NERVE_MCP_TOKEN')}",
                 f"{base}.required=true",
+                # This is Nerve's own loopback-only, session-authenticated
+                # server. Without an explicit approval mode Codex rejects MCP
+                # calls under non-interactive/never approval policies before
+                # they ever reach the server ("user rejected MCP tool call").
+                f'{base}.default_tools_approval_mode="approve"',
                 f"{base}.startup_timeout_sec=30",
                 f"{base}.tool_timeout_sec={int(self.codex.tool_timeout_sec)}",
             ]

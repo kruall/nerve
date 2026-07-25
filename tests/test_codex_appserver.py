@@ -180,6 +180,7 @@ async def test_config_overrides_carry_mcp_bridge(tmp_path, monkeypatch):
     assert 'mcp_servers.nerve.url="http://127.0.0.1:8900/mcp/v1/"' in joined
     assert 'mcp_servers.nerve.bearer_token_env_var="NERVE_MCP_TOKEN"' in joined
     assert "mcp_servers.nerve.required=true" in joined
+    assert 'mcp_servers.nerve.default_tools_approval_mode="approve"' in joined
     assert "mcp_servers.nerve.startup_timeout_sec=30" in joined
     assert "project_doc_max_bytes=0" in joined
 
