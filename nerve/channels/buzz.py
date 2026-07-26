@@ -11,8 +11,11 @@ import asyncio
 import json
 import logging
 import os
+import re
+import unicodedata
 from datetime import datetime, timezone
 from typing import Any, TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from nerve.channels.base import BaseChannel, ChannelCapability, InboundMessage, OutboundMessage
 from nerve.config import NerveConfig
@@ -38,6 +41,8 @@ class BuzzChannel(BaseChannel):
         self._dispatch_tasks: set[asyncio.Task[None]] = set()
         self._stop_event = asyncio.Event()
         self._private_key = ""
+        self._channel_names: dict[str, str] = {}
+        self._source_names: dict[str, str] = {}
 
     @property
     def name(self) -> str:
@@ -52,6 +57,8 @@ class BuzzChannel(BaseChannel):
             return
         self._validate_config()
         self._private_key = self._load_private_key()
+        await self._load_channel_names()
+        await self._migrate_legacy_source_names()
         await self._prime_cursors()
         self._stop_event.clear()
         self._poll_task = asyncio.create_task(self._poll_loop(), name="buzz-channel")
@@ -169,6 +176,52 @@ class BuzzChannel(BaseChannel):
             raise RuntimeError("Buzz CLI returned an unexpected response")
         return [event for event in decoded if isinstance(event, dict)]
 
+    async def _load_channel_names(self) -> None:
+        """Resolve configured UUIDs to human-readable Buzz source names."""
+        output = await self._run_cli("--format", "compact", "channels", "list")
+        try:
+            decoded = json.loads(output)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Buzz CLI returned invalid channel JSON") from exc
+        if not isinstance(decoded, list):
+            raise RuntimeError("Buzz CLI returned an unexpected channel response")
+
+        names = {
+            str(item.get("channel_id", "")): str(item.get("name", "")).strip()
+            for item in decoded
+            if isinstance(item, dict) and item.get("channel_id") and item.get("name")
+        }
+        missing = [channel_id for channel_id in self.config.channel_ids if channel_id not in names]
+        if missing:
+            raise ValueError(
+                "Configured Buzz channel IDs were not returned by 'channels list': "
+                + ", ".join(missing)
+            )
+
+        community = self._slug(
+            self.config.community_name or self._community_from_relay_url(self.config.relay_url)
+        )
+        candidates = {
+            channel_id: f"buzz:{community}:{self._slug(names[channel_id])}"
+            for channel_id in self.config.channel_ids
+        }
+        collisions: dict[str, list[str]] = {}
+        for channel_id, source in candidates.items():
+            collisions.setdefault(source, []).append(channel_id)
+        for source, channel_ids in collisions.items():
+            if len(channel_ids) > 1:
+                for channel_id in channel_ids:
+                    candidates[channel_id] = f"{source}-{channel_id[:8]}"
+
+        self._channel_names = {
+            channel_id: names[channel_id] for channel_id in self.config.channel_ids
+        }
+        self._source_names = candidates
+
+    async def _migrate_legacy_source_names(self) -> None:
+        for channel_id, source in self._source_names.items():
+            await self.db.rename_source(f"buzz:{channel_id}", source)
+
     async def _run_cli(self, *args: str) -> str:
         env = os.environ.copy()
         env["BUZZ_PRIVATE_KEY"] = self._private_key
@@ -223,6 +276,8 @@ class BuzzChannel(BaseChannel):
             metadata={
                 "message_id": str(event["id"]),
                 "buzz_channel_id": channel_id,
+                "buzz_channel_name": self._channel_names.get(channel_id, ""),
+                "buzz_source": self._source_name(channel_id),
                 "buzz_author_pubkey": author,
             },
         ))
@@ -245,6 +300,16 @@ class BuzzChannel(BaseChannel):
             metadata={"channel_id": channel_id, "author_pubkey": author, "kind": event.get("kind"), "tags": event.get("tags", [])},
         )
 
+    def _source_name(self, channel_id: str) -> str:
+        return self._source_names.get(channel_id, f"buzz:{channel_id}")
+
     @staticmethod
-    def _source_name(channel_id: str) -> str:
-        return f"buzz:{channel_id}"
+    def _community_from_relay_url(relay_url: str) -> str:
+        parsed = urlsplit(relay_url)
+        return parsed.hostname or parsed.path or "community"
+
+    @staticmethod
+    def _slug(value: str) -> str:
+        normalized = unicodedata.normalize("NFKC", value).strip().casefold()
+        normalized = re.sub(r"[^\w.-]+", "-", normalized, flags=re.UNICODE)
+        return normalized.strip("-._") or "unnamed"

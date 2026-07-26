@@ -79,6 +79,9 @@ telegram:
 buzz:
   enabled: false
   relay_url: http://10.77.77.8:3001
+  # Human-readable community label used in source names. When omitted, the
+  # relay host is used (for example, buzz:relay.example:general).
+  # community_name: my-team
   binary_path: /home/nerve/buzz/target/release/buzz
   # private_key_file: ~/.config/buzz-nerve/identity
   # bot_pubkey: "<Doggy public key>"

@@ -25,6 +25,45 @@ class SourceStore:
             (source, cursor_value, now),
         )
 
+    async def rename_source(self, old_source: str, new_source: str) -> None:
+        """Move persisted source state to a new human-readable name.
+
+        This preserves message rowids so consumer cursors remain valid. If the
+        destination already contains the same message or cursor, the
+        destination wins and the duplicate legacy row is removed.
+        """
+        if old_source == new_source:
+            return
+        async with self._atomic():
+            await self.db.execute(
+                "UPDATE OR IGNORE sync_cursors SET source = ? WHERE source = ?",
+                (new_source, old_source),
+            )
+            await self.db.execute(
+                "DELETE FROM sync_cursors WHERE source = ?",
+                (old_source,),
+            )
+            await self.db.execute(
+                "UPDATE OR IGNORE source_messages SET source = ? WHERE source = ?",
+                (new_source, old_source),
+            )
+            await self.db.execute(
+                "DELETE FROM source_messages WHERE source = ?",
+                (old_source,),
+            )
+            await self.db.execute(
+                "UPDATE source_run_log SET source = ? WHERE source = ?",
+                (new_source, old_source),
+            )
+            await self.db.execute(
+                "UPDATE OR IGNORE consumer_cursors SET source = ? WHERE source = ?",
+                (new_source, old_source),
+            )
+            await self.db.execute(
+                "DELETE FROM consumer_cursors WHERE source = ?",
+                (old_source,),
+            )
+
     # --- Source run log operations ---
 
     async def log_source_run(

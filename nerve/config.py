@@ -280,6 +280,7 @@ class BuzzConfig:
 
     enabled: bool = False
     relay_url: str = ""
+    community_name: str = ""
     binary_path: Path = field(default_factory=lambda: Path("buzz"))
     private_key: str = ""
     private_key_file: Path | None = None
@@ -294,6 +295,7 @@ class BuzzConfig:
         return cls(
             enabled=bool(d.get("enabled", False)),
             relay_url=str(d.get("relay_url", "")),
+            community_name=str(d.get("community_name", "")).strip(),
             binary_path=_expand_path(d.get("binary_path", "buzz")) or Path("buzz"),
             private_key=str(d.get("private_key", "")),
             private_key_file=_expand_path(d.get("private_key_file")),

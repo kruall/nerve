@@ -1212,6 +1212,25 @@ class TestConsumerCursors:
         messages = await db.read_source_messages_by_rowid("github", after_seq=cursor, limit=50)
         assert len(messages) == 0
 
+    async def test_rename_source_preserves_messages_cursors_and_history(self, db: Database):
+        old_source = "buzz:71560b67-4553-5a3a-a0c5-1dc813fb52b6"
+        new_source = "buzz:acme:general"
+        rowids = await self._insert_messages(db, old_source, 2)
+        await db.set_sync_cursor(old_source, "42")
+        await db.set_consumer_cursor("inbox", old_source, rowids[0])
+        await db.log_source_run(old_source, records_fetched=2)
+
+        await db.rename_source(old_source, new_source)
+
+        assert await db.get_sync_cursor(old_source) is None
+        assert await db.get_sync_cursor(new_source) == "42"
+        assert await db.get_source_message(old_source, f"msg-{old_source}-0") is None
+        moved = await db.get_source_message(new_source, f"msg-{old_source}-0")
+        assert moved is not None
+        assert await db.get_consumer_cursor("inbox", new_source) == rowids[0]
+        assert await db.get_last_source_run(old_source) is None
+        assert await db.get_last_source_run(new_source) is not None
+
     async def test_consumer_cursor_read_advance(self, db: Database):
         """Consumer cursor should advance and subsequent reads return only new messages."""
         rowids = await self._insert_messages(db, "github", 3)
