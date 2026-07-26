@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _POLL_LIMIT = 100
+_DM_LIMIT = 200
 _COMMAND_TIMEOUT_SECONDS = 30.0
 
 
@@ -43,6 +44,8 @@ class BuzzChannel(BaseChannel):
         self._private_key = ""
         self._channel_names: dict[str, str] = {}
         self._source_names: dict[str, str] = {}
+        self._dm_channel_ids: set[str] = set()
+        self._next_dm_refresh = 0.0
 
     @property
     def name(self) -> str:
@@ -62,7 +65,11 @@ class BuzzChannel(BaseChannel):
         await self._prime_cursors()
         self._stop_event.clear()
         self._poll_task = asyncio.create_task(self._poll_loop(), name="buzz-channel")
-        logger.info("Buzz channel started for %d channel(s)", len(self.config.channel_ids))
+        logger.info(
+            "Buzz channel started for %d configured channel(s) and %d DM(s)",
+            len(self.config.channel_ids),
+            len(self._dm_channel_ids),
+        )
 
     async def stop(self) -> None:
         self._stop_event.set()
@@ -80,7 +87,10 @@ class BuzzChannel(BaseChannel):
         self._dispatch_tasks.clear()
 
     async def send(self, message: OutboundMessage) -> None:
-        if message.target not in self.config.channel_ids:
+        if (
+            message.target not in self.config.channel_ids
+            and message.target not in self._dm_channel_ids
+        ):
             raise ValueError("Refusing to send to a Buzz channel not configured for Nerve")
         await self._run_cli("messages", "send", "--channel", message.target, "--content", message.text)
 
@@ -88,8 +98,8 @@ class BuzzChannel(BaseChannel):
         missing: list[str] = []
         if not self.config.relay_url:
             missing.append("relay_url")
-        if not self.config.channel_ids:
-            missing.append("channel_ids")
+        if not self.config.channel_ids and not self.config.direct_messages:
+            missing.append("channel_ids or direct_messages")
         if not self.config.allowed_pubkeys:
             missing.append("allowed_pubkeys")
         if not self.config.bot_pubkey:
@@ -118,7 +128,8 @@ class BuzzChannel(BaseChannel):
 
     async def _prime_cursors(self) -> None:
         """Record the current relay head without replying to old history."""
-        for channel_id in self.config.channel_ids:
+        await self._refresh_dm_channel_ids(force=True)
+        for channel_id in self._poll_targets():
             source = self._source_name(channel_id)
             if await self.db.get_sync_cursor(source) is not None:
                 continue
@@ -130,8 +141,12 @@ class BuzzChannel(BaseChannel):
     async def _poll_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                for channel_id in self.config.channel_ids:
-                    await self._poll_channel(channel_id)
+                await self._refresh_dm_channel_ids()
+                for channel_id in self._poll_targets():
+                    await self._poll_channel(
+                        channel_id,
+                        is_dm=channel_id in self._dm_channel_ids,
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -143,7 +158,7 @@ class BuzzChannel(BaseChannel):
             except asyncio.TimeoutError:
                 pass
 
-    async def _poll_channel(self, channel_id: str) -> None:
+    async def _poll_channel(self, channel_id: str, *, is_dm: bool = False) -> None:
         source = self._source_name(channel_id)
         raw_cursor = await self.db.get_sync_cursor(source)
         cursor = int(raw_cursor or 0)
@@ -156,10 +171,10 @@ class BuzzChannel(BaseChannel):
             event_id = str(event.get("id", ""))
             if not event_id or await self.db.get_source_message(source, event_id):
                 continue
-            record = self._record_from_event(source, channel_id, event)
+            record = self._record_from_event(source, channel_id, event, is_dm=is_dm)
             await self.db.insert_source_messages([record], source=source)
-            if self._accepts(event):
-                self._start_dispatch(channel_id, event)
+            if self._accepts(event, is_dm=is_dm):
+                self._start_dispatch(channel_id, event, is_dm=is_dm)
         if latest > cursor:
             await self.db.set_sync_cursor(source, str(latest))
 
@@ -222,6 +237,46 @@ class BuzzChannel(BaseChannel):
         for channel_id, source in self._source_names.items():
             await self.db.rename_source(f"buzz:{channel_id}", source)
 
+    async def _fetch_dm_channel_ids(self) -> set[str]:
+        """Return relay-confirmed DM conversations visible to the bot."""
+        output = await self._run_cli("dms", "list", "--limit", str(_DM_LIMIT))
+        try:
+            decoded = json.loads(output)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Buzz CLI returned invalid DM JSON") from exc
+        if not isinstance(decoded, list):
+            raise RuntimeError("Buzz CLI returned an unexpected DM response")
+        allowed = set(self.config.allowed_pubkeys)
+        permitted = allowed | {self.config.bot_pubkey}
+        dm_channel_ids: set[str] = set()
+        for item in decoded:
+            if not isinstance(item, dict):
+                continue
+            dm_id = item.get("dm_id")
+            participants = item.get("participants")
+            if not isinstance(dm_id, str) or not dm_id:
+                continue
+            if not isinstance(participants, list):
+                continue
+            members = {str(pubkey).lower() for pubkey in participants}
+            if members and members <= permitted and members & allowed:
+                dm_channel_ids.add(dm_id)
+        return dm_channel_ids
+
+    async def _refresh_dm_channel_ids(self, *, force: bool = False) -> None:
+        if not self.config.direct_messages:
+            self._dm_channel_ids.clear()
+            return
+        now = asyncio.get_running_loop().time()
+        if force or now >= self._next_dm_refresh:
+            self._dm_channel_ids = await self._fetch_dm_channel_ids()
+            self._next_dm_refresh = (
+                now + self.config.direct_message_refresh_seconds
+            )
+
+    def _poll_targets(self) -> list[str]:
+        return sorted(set(self.config.channel_ids) | self._dm_channel_ids)
+
     async def _run_cli(self, *args: str) -> str:
         env = os.environ.copy()
         env["BUZZ_PRIVATE_KEY"] = self._private_key
@@ -244,13 +299,13 @@ class BuzzChannel(BaseChannel):
             raise RuntimeError(f"Buzz CLI exited with status {process.returncode}")
         return stdout.decode("utf-8", errors="replace")
 
-    def _accepts(self, event: dict[str, Any]) -> bool:
+    def _accepts(self, event: dict[str, Any], *, is_dm: bool = False) -> bool:
         author = str(event.get("pubkey", "")).lower()
         if not author or author == self.config.bot_pubkey:
             return False
         if author not in self.config.allowed_pubkeys:
             return False
-        if not self.config.require_mention:
+        if is_dm or not self.config.require_mention:
             return True
         return any(
             isinstance(tag, list) and len(tag) > 1 and tag[0] == "p"
@@ -258,27 +313,48 @@ class BuzzChannel(BaseChannel):
             for tag in event.get("tags", [])
         )
 
-    def _start_dispatch(self, channel_id: str, event: dict[str, Any]) -> None:
-        task = asyncio.create_task(self._dispatch(channel_id, event), name="buzz-inbound")
+    def _start_dispatch(
+        self,
+        channel_id: str,
+        event: dict[str, Any],
+        *,
+        is_dm: bool = False,
+    ) -> None:
+        task = asyncio.create_task(
+            self._dispatch(channel_id, event, is_dm=is_dm),
+            name="buzz-inbound",
+        )
         self._dispatch_tasks.add(task)
         task.add_done_callback(self._dispatch_tasks.discard)
 
-    async def _dispatch(self, channel_id: str, event: dict[str, Any]) -> None:
+    async def _dispatch(
+        self,
+        channel_id: str,
+        event: dict[str, Any],
+        *,
+        is_dm: bool = False,
+    ) -> None:
         author = str(event["pubkey"]).lower()
         content = str(event.get("content", "")).strip()
         if not content:
             return
+        context = (
+            "[Это личное сообщение Buzz; ответ увидит только этот чат.]\n\n"
+            if is_dm
+            else "[Это сообщение из общего канала Buzz; ответ увидят все его участники.]\n\n"
+        )
         await self.router.handle_message(InboundMessage(
             channel_name=self.name,
             channel_key=f"buzz:{channel_id}:{author}",
             sender_id=channel_id,
-            text=("[Это сообщение из общего канала Buzz; ответ увидят все его участники.]\n\n" + content),
+            text=context + content,
             metadata={
                 "message_id": str(event["id"]),
                 "buzz_channel_id": channel_id,
                 "buzz_channel_name": self._channel_names.get(channel_id, ""),
                 "buzz_source": self._source_name(channel_id),
                 "buzz_author_pubkey": author,
+                "buzz_is_dm": is_dm,
             },
         ))
 
@@ -290,14 +366,27 @@ class BuzzChannel(BaseChannel):
             return 0
 
     @classmethod
-    def _record_from_event(cls, source: str, channel_id: str, event: dict[str, Any]) -> SourceRecord:
+    def _record_from_event(
+        cls,
+        source: str,
+        channel_id: str,
+        event: dict[str, Any],
+        *,
+        is_dm: bool = False,
+    ) -> SourceRecord:
         timestamp = datetime.fromtimestamp(cls._event_timestamp(event), tz=timezone.utc).isoformat()
         author = str(event.get("pubkey", "")).lower()
         return SourceRecord(
             id=str(event["id"]), source=source, record_type="buzz_message",
             summary=f"Buzz message from {author[:12]}",
             content=str(event.get("content", "")), timestamp=timestamp,
-            metadata={"channel_id": channel_id, "author_pubkey": author, "kind": event.get("kind"), "tags": event.get("tags", [])},
+            metadata={
+                "channel_id": channel_id,
+                "author_pubkey": author,
+                "kind": event.get("kind"),
+                "tags": event.get("tags", []),
+                "is_dm": is_dm,
+            },
         )
 
     def _source_name(self, channel_id: str) -> str:

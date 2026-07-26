@@ -85,10 +85,14 @@ buzz:
   binary_path: /home/nerve/buzz/target/release/buzz
   # private_key_file: ~/.config/buzz-nerve/identity
   # bot_pubkey: "<Doggy public key>"
+  # Public/group channels to poll. Direct-message conversations are discovered
+  # automatically; leave this empty for a DM-only bot.
   # channel_ids: ["<Buzz channel UUID>"]
   # allowed_pubkeys: ["<your Buzz public key>"]
   require_mention: true
   poll_interval_seconds: 3
+  direct_messages: false         # Poll DMs whose members are all allowed.
+  direct_message_refresh_seconds: 30
 
 # Quiet hours (local timezone)
 quiet_start: "02:00"

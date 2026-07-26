@@ -289,6 +289,8 @@ class BuzzConfig:
     allowed_pubkeys: list[str] = field(default_factory=list)
     require_mention: bool = True
     poll_interval_seconds: float = 3.0
+    direct_messages: bool = False
+    direct_message_refresh_seconds: float = 30.0
 
     @classmethod
     def from_dict(cls, d: dict) -> "BuzzConfig":
@@ -304,6 +306,10 @@ class BuzzConfig:
             allowed_pubkeys=[str(v).lower() for v in d.get("allowed_pubkeys", []) or []],
             require_mention=bool(d.get("require_mention", True)),
             poll_interval_seconds=max(1.0, float(d.get("poll_interval_seconds", 3.0))),
+            direct_messages=bool(d.get("direct_messages", False)),
+            direct_message_refresh_seconds=max(
+                1.0, float(d.get("direct_message_refresh_seconds", 30.0)),
+            ),
         )
 
 

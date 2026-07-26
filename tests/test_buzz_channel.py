@@ -6,12 +6,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from nerve.channels.base import OutboundMessage
 from nerve.channels.buzz import BuzzChannel
 from nerve.config import NerveConfig
 
 BOT = "7cfe357723892013ae3198fa99ffd353524081992d1cf9ca42b127d9fedb2403"
 USER = "b50fabe8acbb9aaafa8c4bc32995a7f8d1acb4221a5136d1feb8d8dccec3b4eb"
 CHANNEL = "71560b67-4553-5a3a-a0c5-1dc813fb52b6"
+DM_CHANNEL = "06d9ef66-7f50-48e4-b764-9f605709b6a9"
 
 
 def _channel() -> BuzzChannel:
@@ -19,7 +21,7 @@ def _channel() -> BuzzChannel:
         "enabled": True, "relay_url": "http://relay", "binary_path": "/bin/true",
         "community_name": "Acme Team",
         "private_key": "test-key", "bot_pubkey": BOT, "channel_ids": [CHANNEL],
-        "allowed_pubkeys": [USER],
+        "allowed_pubkeys": [USER], "direct_messages": True,
     }})
     return BuzzChannel(cfg, MagicMock(), MagicMock())
 
@@ -33,6 +35,13 @@ def _event(**overrides):
 
 def test_accepts_allowed_explicit_mention():
     assert _channel()._accepts(_event()) is True
+
+
+def test_accepts_allowed_dm_without_mention():
+    assert _channel()._accepts(
+        _event(content="private ping", tags=[["h", DM_CHANNEL]]),
+        is_dm=True,
+    ) is True
 
 
 @pytest.mark.parametrize("event", [
@@ -53,6 +62,77 @@ def test_private_key_loader_accepts_identity_file(tmp_path: Path):
     assert channel._load_private_key() == "test-key"
 
 
+def test_validation_allows_dm_only_configuration():
+    channel = _channel()
+    channel.config.channel_ids = []
+    channel._validate_config()
+
+
+@pytest.mark.asyncio
+async def test_fetch_dm_channel_ids_uses_relay_confirmed_conversations():
+    channel = _channel()
+    channel._run_cli = AsyncMock(return_value=json.dumps([
+        {"dm_id": DM_CHANNEL, "participants": [BOT, USER]},
+        {"dm_id": "stranger", "participants": [BOT, "other"]},
+        {"dm_id": "mixed-group", "participants": [BOT, USER, "other"]},
+        {"dm_id": "", "participants": [BOT]},
+        {"participants": [BOT]},
+    ]))
+
+    assert await channel._fetch_dm_channel_ids() == {DM_CHANNEL}
+    channel._run_cli.assert_awaited_once_with("dms", "list", "--limit", "200")
+
+
+@pytest.mark.asyncio
+async def test_disabled_direct_messages_do_not_call_cli():
+    channel = _channel()
+    channel.config.direct_messages = False
+    channel._dm_channel_ids.add(DM_CHANNEL)
+    channel._fetch_dm_channel_ids = AsyncMock()
+
+    await channel._refresh_dm_channel_ids(force=True)
+
+    assert channel._dm_channel_ids == set()
+    channel._fetch_dm_channel_ids.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_allows_discovered_dm_channel():
+    channel = _channel()
+    channel._dm_channel_ids.add(DM_CHANNEL)
+    channel._run_cli = AsyncMock(return_value="{}")
+
+    await channel.send(OutboundMessage(target=DM_CHANNEL, text="private reply"))
+
+    channel._run_cli.assert_awaited_once_with(
+        "messages", "send", "--channel", DM_CHANNEL,
+        "--content", "private reply",
+    )
+
+
+@pytest.mark.asyncio
+async def test_poll_dm_dispatches_allowed_message_without_mention():
+    channel = _channel()
+    channel.db.get_sync_cursor = AsyncMock(return_value="0")
+    channel.db.get_source_message = AsyncMock(return_value=None)
+    channel.db.insert_source_messages = AsyncMock()
+    channel.db.set_sync_cursor = AsyncMock()
+    channel._fetch_events = AsyncMock(return_value=[
+        _event(content="private ping", tags=[["h", DM_CHANNEL]]),
+    ])
+    channel._start_dispatch = MagicMock()
+
+    await channel._poll_channel(DM_CHANNEL, is_dm=True)
+
+    channel._start_dispatch.assert_called_once_with(
+        DM_CHANNEL,
+        _event(content="private ping", tags=[["h", DM_CHANNEL]]),
+        is_dm=True,
+    )
+    record = channel.db.insert_source_messages.await_args.args[0][0]
+    assert record.metadata["is_dm"] is True
+
+
 @pytest.mark.asyncio
 async def test_dispatch_keeps_sessions_per_author_and_replies_to_channel():
     channel = _channel()
@@ -66,6 +146,7 @@ async def test_dispatch_keeps_sessions_per_author_and_replies_to_channel():
     assert message.metadata["message_id"] == "event-1"
     assert message.metadata["buzz_channel_name"] == "General"
     assert message.metadata["buzz_source"] == "buzz:acme-team:general"
+    assert message.metadata["buzz_is_dm"] is False
     assert "ответ увидят все" in message.text
 
 
@@ -109,3 +190,16 @@ def test_relay_host_is_used_when_community_name_is_not_configured():
     assert channel._slug(channel._community_from_relay_url(channel.config.relay_url)) == (
         "relay.example"
     )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_marks_dm_private_and_replies_to_dm_channel():
+    channel = _channel()
+    channel.router.handle_message = AsyncMock()
+    await channel._dispatch(DM_CHANNEL, _event(content="private ping"), is_dm=True)
+    message = channel.router.handle_message.await_args.args[0]
+    assert message.sender_id == DM_CHANNEL
+    assert message.channel_key == f"buzz:{DM_CHANNEL}:{USER}"
+    assert message.metadata["buzz_is_dm"] is True
+    assert "личное сообщение" in message.text
+    assert "ответ увидит только этот чат" in message.text
