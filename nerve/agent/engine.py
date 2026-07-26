@@ -72,6 +72,10 @@ from nerve.skills.manager import SkillManager
 logger = logging.getLogger(__name__)
 
 
+class AgentRunError(RuntimeError):
+    """An agent turn failed after its error was persisted and broadcast."""
+
+
 _SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 
 def _sanitize_surrogates(s: str) -> str:
@@ -1657,6 +1661,7 @@ class AgentEngine:
                 "num_turns": event.num_turns,
                 "context_window": event.context_window,
                 "status": event.status,
+                "error": event.error,
             }
             if event.status == "failed" and event.error:
                 # Failed turns still complete: surface the error inline so
@@ -2123,6 +2128,7 @@ class AgentEngine:
         internal: bool = False,
         images: list[dict[str, Any]] | None = None,
         image_refs: list[dict[str, Any]] | None = None,
+        raise_on_error: bool = False,
     ) -> str:
         """Run the agent for a user message and return the final text response.
 
@@ -2130,6 +2136,9 @@ class AgentEngine:
             internal: If True, the user_message is a system-generated trigger
                       (e.g., background task completion) and won't be stored in
                       DB or shown in the UI.
+            raise_on_error: Re-raise a failed agent turn after its error has
+                            been persisted and broadcast. Used by scheduled
+                            execution so failures reach the cron run log.
             images: Optional list of image dicts with keys ``type``,
                     ``media_type``, and ``data`` (base64-encoded).
             image_refs: Optional metadata about uploaded files for persisting
@@ -2166,6 +2175,7 @@ class AgentEngine:
                     return await self._run_inner(
                         session_id, user_message, source, channel, model,
                         effort_override=effort_override,
+                        raise_on_error=raise_on_error,
                         internal=internal, images=images,
                         image_refs=image_refs,
                     )
@@ -2210,10 +2220,14 @@ class AgentEngine:
         channel: str | None,
         model: str | None,
         effort_override: str | None = None,
+        raise_on_error: bool = False,
         internal: bool = False,
         images: list[dict[str, Any]] | None = None,
         image_refs: list[dict[str, Any]] | None = None,
     ) -> str:
+        run_error: Exception | None = None
+        run_error_message = ""
+
         # Ensure session exists in DB
         await self.sessions.get_or_create(session_id, source=source)
 
@@ -2496,6 +2510,7 @@ class AgentEngine:
 
         except Exception as e:
             error_msg = f"Agent error: {e}"
+            run_error = e
             logger.error(error_msg, exc_info=True)
 
             # --- Poisoned context detection (Layer 2 safety net) ---
@@ -2554,6 +2569,7 @@ class AgentEngine:
             if client:
                 await self._safe_disconnect(client)
             st.full_response_text = error_msg
+            run_error_message = error_msg
 
         # Persist the turn (assistant message + usage) and broadcast done.
         # Background-task continuation is handled by the CLI itself: when a
@@ -2561,6 +2577,15 @@ class AgentEngine:
         # which the idle stream watcher drains to the UI — no Nerve-side
         # output-file polling needed (the old regex watcher lived here).
         await self._finalize_turn(session_id, st, channel)
+
+        if raise_on_error and run_error is not None:
+            raise AgentRunError(run_error_message) from run_error
+        if (
+            raise_on_error
+            and (st.result_meta or {}).get("status") == "failed"
+        ):
+            turn_error = (st.result_meta or {}).get("error") or "turn failed"
+            raise AgentRunError(f"Agent turn failed: {turn_error}")
 
         return st.full_response_text
 
@@ -3038,6 +3063,7 @@ class AgentEngine:
                 source="cron",
                 model=model,  # backend default_model(source) fills cron defaults
                 effort_override=effort,
+                raise_on_error=True,
             )
         finally:
             await self._teardown_oneshot_client(session_id)
@@ -3078,6 +3104,7 @@ class AgentEngine:
                 source="cron",
                 model=model,  # backend default_model(source) fills cron defaults
                 effort_override=effort,
+                raise_on_error=True,
             )
         finally:
             # The session is reused by the next run (until rotation), which

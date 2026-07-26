@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from nerve.agent.engine import AgentEngine
+from nerve.agent.engine import AgentEngine, AgentRunError
 from nerve.agent.sessions import SessionManager
 from nerve.config import NerveConfig
 from nerve.db.migrations.v039_codex_integrity import up as apply_v039
@@ -104,6 +104,42 @@ async def test_codex_engine_run_persists_reloadable_output(
             {"type": "thinking", "content": "thinking..."},
             {"type": "text", "content": "Hello "},
         ]
+    finally:
+        await engine.shutdown()
+
+
+async def test_codex_cron_propagates_agent_failure(
+    db, tmp_path, monkeypatch,
+):
+    """Cron callers must receive a structured failure after UI persistence."""
+    fake_bin = Path(__file__).parent / "fixtures" / "fake_codex_appserver.py"
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.setenv("FAKE_CODEX_MODE", "failed_turn")
+    cfg = NerveConfig.from_dict({
+        "workspace": str(workspace),
+        "agent": {"backend": "codex", "cron_backend": "codex"},
+        "codex": {
+            "bin_path": str(fake_bin),
+            "home_dir": str(tmp_path / "codex-home"),
+            "model": "gpt-5.6-sol",
+            "cron_model": "gpt-5.6-terra",
+        },
+    })
+    engine = AgentEngine(cfg, db)
+
+    try:
+        with pytest.raises(AgentRunError, match="model exploded"):
+            await engine.run_cron("failing-job", "run it")
+
+        session_id = "cron:failing-job:"
+        sessions = await db.list_sessions()
+        failed = next(
+            s for s in sessions
+            if s["source"] == "cron" and s["id"].startswith(session_id)
+        )
+        history = await db.get_messages(failed["id"])
+        assert "Turn failed: model exploded" in history[-1]["content"]
     finally:
         await engine.shutdown()
 

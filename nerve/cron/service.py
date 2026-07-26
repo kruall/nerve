@@ -608,7 +608,11 @@ class CronService:
         session_id: str | None = None
 
         try:
-            model = job.model or self.config.agent.cron_model
+            # A job-level model is an explicit cross-backend override.  When
+            # it is absent, leave model resolution to the selected backend:
+            # Claude uses agent.cron_model, while Codex uses
+            # codex.cron_model (falling back to codex.model).
+            model = job.model or None
             effort = job.effort or None  # per-job effort override; None = source default (cron_effort)
             rotated = False
             base_prompt = job.resolve_prompt()

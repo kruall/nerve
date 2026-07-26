@@ -1107,6 +1107,24 @@ class TestPromptFile:
 
 class TestRunLogOutput:
     @pytest.mark.asyncio
+    async def test_backend_resolves_default_model(self, cron_service):
+        job = _make_job()
+
+        await cron_service._run_job_inner(job)
+
+        kwargs = cron_service.engine.run_cron.call_args.kwargs
+        assert kwargs["model"] is None
+
+    @pytest.mark.asyncio
+    async def test_job_model_is_explicit_override(self, cron_service):
+        job = _make_job(model="job-specific-model")
+
+        await cron_service._run_job_inner(job)
+
+        kwargs = cron_service.engine.run_cron.call_args.kwargs
+        assert kwargs["model"] == "job-specific-model"
+
+    @pytest.mark.asyncio
     async def test_stores_tail_of_long_response(self, cron_service):
         long = "begin " + ("x" * 3000) + " THE END"
         cron_service.engine.run_cron = AsyncMock(return_value=long)

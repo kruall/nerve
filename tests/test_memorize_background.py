@@ -332,6 +332,7 @@ class TestCronRunDiscard:
         result = await engine.run_cron("job", "prompt")
 
         assert result == "done"
+        assert engine.run.await_args.kwargs["raise_on_error"] is True
         engine._discard_client.assert_awaited_once_with(
             "cron:job:1", background_memorize=True,
         )
@@ -346,6 +347,7 @@ class TestCronRunDiscard:
         result = await engine.run_persistent_cron("job", "prompt")
 
         assert result == "done"
+        assert engine.run.await_args.kwargs["raise_on_error"] is True
         engine._discard_client.assert_awaited_once_with(
             "cron:job", background_memorize=True,
         )

@@ -37,7 +37,7 @@ from any working directory:
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `agent.model` | string | `claude-opus-4-8` | Primary model for conversations |
-| `agent.cron_model` | string | `claude-sonnet-4-6` | Model for cron jobs (cheaper) |
+| `agent.cron_model` | string | `claude-sonnet-4-6` | Claude backend model for cron jobs (cheaper) |
 | `agent.max_turns` | int | `50` | Max agentic turns per request |
 | `agent.max_concurrent` | int | `4` | Max concurrent agent sessions |
 | `agent.cache_ttl` | string | `"5m"` | Prompt-cache write TTL policy: `5m` (status quo), `1h` (always request the 1-hour TTL), or `auto` (per session at client-build time: sparse-cadence sessions — persistent crons, wakeup loops, spaced chats — get `1h`; dense sessions stay on `5m`). Per-cron-job override via `cache_ttl` in jobs.yaml. See `nerve/agent/cache_policy.py` |
