@@ -53,6 +53,7 @@ class InboundMessage:
     text: str                                       # The message content
     session_id: str | None = None                   # Explicit session override (web sends this)
     metadata: dict[str, Any] = field(default_factory=dict)
+    steer_if_busy: bool = False                     # Inject into an active turn when supported
 
 
 @dataclass

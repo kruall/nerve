@@ -102,6 +102,14 @@ class AgentClient(Protocol):
 
     async def start_turn(self, turn: TurnInput) -> None: ...
 
+    async def steer(self, turn: TurnInput) -> bool:
+        """Inject user input into the currently active turn.
+
+        Returns ``False`` when there is no steerable active turn, allowing
+        callers to queue the input as a normal follow-up turn instead.
+        """
+        ...
+
     def receive_turn(self) -> AsyncIterator[AgentEvent]:
         """Yield events until (and including) ``TurnCompleted``.
 

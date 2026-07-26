@@ -122,6 +122,27 @@ class TestChannelMapping:
         assert session is not None
         assert session["source"] == "telegram"
 
+    async def test_simultaneous_first_messages_share_one_session(
+        self, sm: SessionManager,
+    ):
+        original_create = sm._create_session
+        create_calls = 0
+
+        async def slow_create(*args, **kwargs):
+            nonlocal create_calls
+            create_calls += 1
+            await asyncio.sleep(0.01)
+            return await original_create(*args, **kwargs)
+
+        sm._create_session = slow_create
+        first, second = await asyncio.gather(
+            sm.get_active_session("buzz:shared", source="buzz"),
+            sm.get_active_session("buzz:shared", source="buzz"),
+        )
+
+        assert first == second
+        assert create_calls == 1
+
     async def test_auto_session_reused_within_sticky_period(self, sm: SessionManager, db: Database):
         """Same session returned if last activity is within sticky period."""
         sid1 = await sm.get_active_session("telegram:111", source="telegram")

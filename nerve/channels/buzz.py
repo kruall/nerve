@@ -343,11 +343,12 @@ class BuzzChannel(BaseChannel):
             if is_dm
             else "[Это сообщение из общего канала Buzz; ответ увидят все его участники.]\n\n"
         )
+        author_context = f"[Автор Buzz: {author}]\n\n"
         await self.router.handle_message(InboundMessage(
             channel_name=self.name,
-            channel_key=f"buzz:{channel_id}:{author}",
+            channel_key=f"buzz:{channel_id}",
             sender_id=channel_id,
-            text=context + content,
+            text=context + author_context + content,
             metadata={
                 "message_id": str(event["id"]),
                 "buzz_channel_id": channel_id,
@@ -356,6 +357,7 @@ class BuzzChannel(BaseChannel):
                 "buzz_author_pubkey": author,
                 "buzz_is_dm": is_dm,
             },
+            steer_if_busy=True,
         ))
 
     @staticmethod

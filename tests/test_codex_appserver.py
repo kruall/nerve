@@ -154,6 +154,21 @@ async def test_basic_turn_streams_and_completes(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_steer_injects_input_into_active_turn(tmp_path, monkeypatch):
+    _mode(monkeypatch, "basic")
+    cfg = _config(tmp_path)
+    backend = CodexBackend(_deps(cfg))
+    client = await backend.create_client(_spec(cfg))
+    try:
+        assert await client.steer(TurnInput(text="too early")) is False
+        await client.start_turn(TurnInput(text="hello"))
+        assert await client.steer(TurnInput(text="also consider this")) is True
+        await _collect_turn(client)
+    finally:
+        await client.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_effective_api_key_auth_controls_billing(tmp_path, monkeypatch):
     _mode(monkeypatch, "account_api_key")
     cfg = _config(tmp_path, auth="chatgpt")  # deliberately mismatched config

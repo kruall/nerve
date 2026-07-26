@@ -2212,6 +2212,83 @@ class AgentEngine:
                         "is_running": False,
                     })
 
+    async def steer(
+        self,
+        session_id: str,
+        user_message: str,
+        channel: str | None,
+        images: list[dict[str, Any]] | None = None,
+        image_refs: list[dict[str, Any]] | None = None,
+    ) -> bool:
+        """Inject input into a session's active backend turn.
+
+        ``False`` means the caller should retain the message for a normal
+        follow-up turn. Once a backend accepts the steer we return ``True``
+        even if history persistence fails, because replaying it as a follow-up
+        would duplicate input at the model.
+        """
+        if not self.sessions.is_running(session_id):
+            return False
+        client = self.sessions.get_client(session_id)
+        if client is None:
+            return False
+        try:
+            accepted = await client.steer(TurnInput(
+                text=user_message,
+                images=images,
+            ))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.info("Steering session %s failed: %s", session_id, e)
+            return False
+        if not accepted:
+            return False
+
+        try:
+            await self._store_user_message(
+                session_id, user_message, channel,
+                images=images, image_refs=image_refs,
+            )
+            await broadcaster.broadcast(session_id, {
+                "type": "user_message",
+                "session_id": session_id,
+                "content": user_message,
+                "blocks": image_refs or None,
+            })
+        except Exception:
+            logger.exception(
+                "Steered input reached the backend but could not be persisted "
+                "for session %s",
+                session_id,
+            )
+        return True
+
+    async def _store_user_message(
+        self,
+        session_id: str,
+        user_message: str,
+        channel: str | None,
+        *,
+        images: list[dict[str, Any]] | None = None,
+        image_refs: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Persist one user input in the same shape as a normal turn."""
+        db_text = user_message
+        if images:
+            img_count = sum(
+                1 for img in images if img.get("type") != "text_file"
+            )
+            if img_count:
+                suffix = f"\n[{img_count} image(s) attached]"
+                db_text = (
+                    user_message + suffix if user_message else suffix.strip()
+                )
+        await self.sessions.add_message(
+            session_id, "user", db_text, channel=channel,
+            blocks=image_refs,
+        )
+
     async def _run_inner(
         self,
         session_id: str,
@@ -2253,17 +2330,10 @@ class AgentEngine:
                     self._generate_session_title(session_id, user_message),
                 )
 
-            # Store user message in DB (note attached images for display)
-            db_text = user_message
-            if images:
-                # Count only image/pdf entries, not text_file entries
-                img_count = sum(1 for img in images if img.get("type") != "text_file")
-                if img_count:
-                    suffix = f"\n[{img_count} image(s) attached]"
-                    db_text = (user_message + suffix) if user_message else suffix.strip()
-            await self.sessions.add_message(
-                session_id, "user", db_text, channel=channel,
-                blocks=image_refs,
+            # Store user message in DB (note attached images for display).
+            await self._store_user_message(
+                session_id, user_message, channel,
+                images=images, image_refs=image_refs,
             )
 
         # Turn accumulator — shared shape with the autonomous-turn drain.

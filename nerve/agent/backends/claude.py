@@ -792,6 +792,7 @@ class ClaudeClient(AgentClient):
         self._options = options
         self._sdk = ClaudeSDKClient(options=options)
         self._native_session_id: str | None = spec.resume_native_id
+        self._turn_active = False
         # The resolved model this client was built with (engine reads it
         # to detect mid-session model switches).
         self.model: str = options.model or ""
@@ -806,6 +807,10 @@ class ClaudeClient(AgentClient):
         await self._sdk.connect()
 
     async def start_turn(self, turn: TurnInput) -> None:
+        await self._send_input(turn)
+        self._turn_active = True
+
+    async def _send_input(self, turn: TurnInput) -> None:
         try:
             if turn.images or turn.documents:
                 blocks = self._build_content_blocks(turn)
@@ -822,6 +827,16 @@ class ClaudeClient(AgentClient):
                 await self._sdk.query(self._escape_slash(turn.text))
         except CLIConnectionError as e:
             raise TransportDiedError(str(e)) from e
+
+    async def steer(self, turn: TurnInput) -> bool:
+        """Send additional streaming input to Claude's active turn."""
+        if not self._turn_active:
+            return False
+        try:
+            await self._send_input(turn)
+        except TransportDiedError:
+            return False
+        return True
 
     @staticmethod
     def _escape_slash(text: str) -> str:
@@ -918,11 +933,13 @@ class ClaudeClient(AgentClient):
                 done = False
                 for event in self._translate_and_capture(message):
                     if isinstance(event, ev.TurnCompleted):
+                        self._turn_active = False
                         done = True
                     yield event
                 if done:
                     return
         finally:
+            self._turn_active = False
             with contextlib.suppress(Exception):
                 await response_iter.aclose()
 

@@ -123,15 +123,31 @@ class ChannelRouter:
                 "message_id": msg_id,
             }
 
+        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
+        if (
+            lock.locked()
+            and msg.steer_if_busy
+            and self.engine.sessions.is_running(session_id)
+        ):
+            images = msg.metadata.get("images") if msg.metadata else None
+            if await self.engine.steer(
+                session_id=session_id,
+                user_message=msg.text,
+                channel=msg.channel_name,
+                images=images,
+            ):
+                return ""
+
         # Queue the message; a Future carries the result back to the caller.
+        # A failed steering attempt lands here too, so input is never lost when
+        # the backend has not started its turn yet or no longer accepts steer.
         future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         self._pending_batches.setdefault(session_id, []).append(
             (msg, future),
         )
 
-        # If the session is already busy, the message is queued —
-        # the driver coroutine will include it in the next batch.
-        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
+        # If the session is already busy, the driver coroutine will include
+        # this message in the next batch.
         if lock.locked():
             return await future
 

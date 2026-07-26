@@ -71,6 +71,10 @@ class SessionManager:
         # In-memory SDK client registry (rebuilt on demand from DB)
         self._clients: dict[str, Any] = {}
         self._client_locks: dict[str, asyncio.Lock] = {}
+        # Serialize resolve/create/remap for each external chat. Without this,
+        # simultaneous first messages can both observe a missing mapping and
+        # mint separate sessions for the same channel.
+        self._channel_locks: dict[str, asyncio.Lock] = {}
         # Idle tracking: session_id -> monotonic time of last run() completion
         self._last_activity: dict[str, float] = {}
         # Running task tracking
@@ -258,17 +262,19 @@ class SessionManager:
         (a turn is in flight) or when its last activity falls within the
         sticky period. Otherwise creates a fresh session and remaps.
         """
-        row = await self.db.get_channel_session(channel_key)
-        if row:
-            session = await self.db.get_session(row["session_id"])
-            if session and self._is_within_sticky_period(session):
-                return row["session_id"]
+        lock = self._channel_locks.setdefault(channel_key, asyncio.Lock())
+        async with lock:
+            row = await self.db.get_channel_session(channel_key)
+            if row:
+                session = await self.db.get_session(row["session_id"])
+                if session and self._is_within_sticky_period(session):
+                    return row["session_id"]
 
-        # Create a fresh session
-        session_id = self._generate_session_id()
-        await self._create_session(session_id, source=source)
-        await self.db.set_channel_session(channel_key, session_id)
-        return session_id
+            # Create a fresh session
+            session_id = self._generate_session_id()
+            await self._create_session(session_id, source=source)
+            await self.db.set_channel_session(channel_key, session_id)
+            return session_id
 
     def _is_within_sticky_period(self, session: dict) -> bool:
         """Check whether a session is still the channel's owner.

@@ -807,6 +807,26 @@ class CodexClient(AgentClient):
             else None
         )
 
+    async def steer(self, turn: TurnInput) -> bool:
+        """Inject input into the active Codex turn via ``turn/steer``."""
+        if not self._thread_id or not self._turn_id:
+            return False
+        params = {
+            "threadId": self._thread_id,
+            "expectedTurnId": self._turn_id,
+            "input": self._build_input_items(turn),
+        }
+        try:
+            response = await self._transport.request("turn/steer", params)
+        except (CodexRpcError, TransportDiedError) as e:
+            logger.info(
+                "Codex turn for session %s could not be steered: %s",
+                self._spec.session_id, e,
+            )
+            return False
+        turn_id = response.get("turnId") if isinstance(response, dict) else None
+        return turn_id == self._turn_id
+
     def _build_input_items(self, turn: TurnInput) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         text = turn.text or ""
@@ -914,6 +934,8 @@ class CodexClient(AgentClient):
                 continue
 
             for event in await self._map_notification(method, params):
+                if isinstance(event, ev.TurnCompleted):
+                    self._turn_id = None
                 yield event
                 if isinstance(event, ev.TurnCompleted):
                     return

@@ -134,20 +134,30 @@ async def test_poll_dm_dispatches_allowed_message_without_mention():
 
 
 @pytest.mark.asyncio
-async def test_dispatch_keeps_sessions_per_author_and_replies_to_channel():
+async def test_dispatch_uses_one_steerable_session_per_channel():
     channel = _channel()
     channel._channel_names[CHANNEL] = "General"
     channel._source_names[CHANNEL] = "buzz:acme-team:general"
     channel.router.handle_message = AsyncMock()
+    other_user = "a" * 64
     await channel._dispatch(CHANNEL, _event())
-    message = channel.router.handle_message.await_args.args[0]
-    assert message.sender_id == CHANNEL
-    assert message.channel_key == f"buzz:{CHANNEL}:{USER}"
-    assert message.metadata["message_id"] == "event-1"
-    assert message.metadata["buzz_channel_name"] == "General"
-    assert message.metadata["buzz_source"] == "buzz:acme-team:general"
-    assert message.metadata["buzz_is_dm"] is False
-    assert "ответ увидят все" in message.text
+    await channel._dispatch(CHANNEL, _event(id="event-2", pubkey=other_user))
+
+    first, second = [
+        call.args[0] for call in channel.router.handle_message.await_args_list
+    ]
+    assert first.sender_id == second.sender_id == CHANNEL
+    assert first.channel_key == second.channel_key == f"buzz:{CHANNEL}"
+    assert first.steer_if_busy is second.steer_if_busy is True
+    assert first.metadata["message_id"] == "event-1"
+    assert first.metadata["buzz_channel_name"] == "General"
+    assert first.metadata["buzz_source"] == "buzz:acme-team:general"
+    assert first.metadata["buzz_is_dm"] is False
+    assert first.metadata["buzz_author_pubkey"] == USER
+    assert second.metadata["buzz_author_pubkey"] == other_user
+    assert USER in first.text
+    assert other_user in second.text
+    assert "ответ увидят все" in first.text
 
 
 @pytest.mark.asyncio
@@ -199,7 +209,8 @@ async def test_dispatch_marks_dm_private_and_replies_to_dm_channel():
     await channel._dispatch(DM_CHANNEL, _event(content="private ping"), is_dm=True)
     message = channel.router.handle_message.await_args.args[0]
     assert message.sender_id == DM_CHANNEL
-    assert message.channel_key == f"buzz:{DM_CHANNEL}:{USER}"
+    assert message.channel_key == f"buzz:{DM_CHANNEL}"
+    assert message.steer_if_busy is True
     assert message.metadata["buzz_is_dm"] is True
     assert "личное сообщение" in message.text
     assert "ответ увидит только этот чат" in message.text

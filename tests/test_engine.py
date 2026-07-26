@@ -4,15 +4,69 @@ helpers (no SDK subprocess)."""
 import asyncio
 import os
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from claude_agent_sdk import AssistantMessage, TextBlock
 
-from nerve.agent.backends.base import SessionSpec
+from nerve.agent.backends.base import SessionSpec, TurnInput
 from nerve.agent.backends.claude import ClaudeBackend, ClaudeClient, translate_message
 from nerve.agent.engine import AgentEngine, _TurnState, _model_family
 from nerve.config import AgentConfig, NerveConfig
+
+
+@pytest.mark.asyncio
+async def test_engine_steer_persists_accepted_input():
+    engine = AgentEngine.__new__(AgentEngine)
+    engine.sessions = MagicMock()
+    engine.sessions.is_running.return_value = True
+    client = MagicMock()
+    client.steer = AsyncMock(return_value=True)
+    engine.sessions.get_client.return_value = client
+    engine._store_user_message = AsyncMock()
+    broadcast = AsyncMock()
+
+    with patch("nerve.agent.engine.broadcaster.broadcast", broadcast):
+        accepted = await engine.steer(
+            "s1", "new context", channel="buzz",
+        )
+
+    assert accepted is True
+    client.steer.assert_awaited_once_with(TurnInput(text="new context"))
+    engine._store_user_message.assert_awaited_once_with(
+        "s1", "new context", "buzz", images=None, image_refs=None,
+    )
+    broadcast.assert_awaited_once_with("s1", {
+        "type": "user_message",
+        "session_id": "s1",
+        "content": "new context",
+        "blocks": None,
+    })
+
+
+@pytest.mark.asyncio
+async def test_engine_steer_rejects_session_without_active_client():
+    engine = AgentEngine.__new__(AgentEngine)
+    engine.sessions = MagicMock()
+    engine.sessions.is_running.return_value = False
+
+    assert await engine.steer("s1", "later", channel="buzz") is False
+    engine.sessions.get_client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_claude_steer_only_writes_during_active_turn():
+    client = ClaudeClient.__new__(ClaudeClient)
+    client._sdk = MagicMock()
+    client._sdk.query = AsyncMock()
+    client._turn_active = False
+
+    assert await client.steer(TurnInput(text="too early")) is False
+    client._sdk.query.assert_not_awaited()
+
+    client._turn_active = True
+    assert await client.steer(TurnInput(text="new context")) is True
+    client._sdk.query.assert_awaited_once_with("new context")
 
 
 @pytest.mark.parametrize(

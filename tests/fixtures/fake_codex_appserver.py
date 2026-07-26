@@ -535,6 +535,12 @@ def main() -> None:
                 args=(thread_id, turn_id, dict(msg.get("params") or {})),
                 daemon=True,
             ).start()
+        elif method == "turn/steer":
+            expected = msg["params"].get("expectedTurnId")
+            if expected != _active_turn.get("turnId"):
+                respond_error(req_id, -32602, "active turn changed")
+            else:
+                respond(req_id, {"turnId": expected})
         elif method == "turn/interrupt":
             respond(req_id, {})
             _interrupted.set()
