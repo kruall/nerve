@@ -37,6 +37,10 @@ def test_accepts_allowed_explicit_mention():
     assert _channel()._accepts(_event()) is True
 
 
+def test_disables_automatic_session_responses():
+    assert _channel().automatic_responses is False
+
+
 def test_accepts_allowed_dm_without_mention():
     assert _channel()._accepts(
         _event(content="private ping", tags=[["h", DM_CHANNEL]]),

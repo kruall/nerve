@@ -94,6 +94,15 @@ class BaseChannel(abc.ABC):
         """Channel-specific constraints. Override for non-default values."""
         return ChannelConstraints()
 
+    @property
+    def automatic_responses(self) -> bool:
+        """Whether the router should publish the agent's response stream.
+
+        Channels with an explicit outbound tool can disable this so internal
+        session output is never treated as an intentional public message.
+        """
+        return True
+
     @abc.abstractmethod
     async def start(self) -> None:
         """Start the channel transport (connect, listen, poll, etc.)."""

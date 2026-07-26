@@ -160,7 +160,8 @@ class TestDefaultRegistry:
             # sources
             "list_sources", "poll_source",
             # notifications
-            "notify", "ask_user", "react", "send_sticker", "send_file",
+            "notify", "ask_user", "react", "send_sticker", "buzz_send",
+            "send_file",
             # mcp admin
             "nerve_api", "mcp_reload",
             # hoa

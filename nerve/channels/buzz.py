@@ -55,6 +55,11 @@ class BuzzChannel(BaseChannel):
     def capabilities(self) -> ChannelCapability:
         return ChannelCapability.SEND_TEXT | ChannelCapability.MARKDOWN
 
+    @property
+    def automatic_responses(self) -> bool:
+        """Buzz messages are published only through the explicit MCP tool."""
+        return False
+
     async def start(self) -> None:
         if self._poll_task is not None:
             return

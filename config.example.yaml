@@ -77,6 +77,8 @@ telegram:
 # chmod 600 file outside this repository. Empty allowed_pubkeys means no one
 # can invoke Nerve; that is intentional.
 buzz:
+  # Agent session output is never forwarded automatically. Buzz-visible
+  # replies are sent deliberately through the session-bound buzz_send MCP tool.
   enabled: false
   relay_url: http://10.77.77.8:3001
   # Human-readable community label used in source names. When omitted, the

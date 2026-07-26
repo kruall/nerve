@@ -14,6 +14,10 @@ from nerve.channels.router import ChannelRouter
 
 
 class _StubChannel(BaseChannel):
+    def __init__(self, *, automatic_responses: bool = True):
+        self._automatic_responses = automatic_responses
+        self.sent = []
+
     @property
     def name(self) -> str:
         return "buzz"
@@ -22,6 +26,10 @@ class _StubChannel(BaseChannel):
     def capabilities(self) -> ChannelCapability:
         return ChannelCapability.SEND_TEXT
 
+    @property
+    def automatic_responses(self) -> bool:
+        return self._automatic_responses
+
     async def start(self) -> None:
         pass
 
@@ -29,7 +37,75 @@ class _StubChannel(BaseChannel):
         pass
 
     async def send(self, message) -> None:
-        pass
+        self.sent.append(message)
+
+
+@pytest.mark.asyncio
+async def test_explicit_text_delivery_uses_matching_session_context():
+    engine = MagicMock()
+    router = ChannelRouter(engine)
+    channel = _StubChannel()
+    router.register(channel)
+    router._message_context["shared"] = {
+        "channel_name": "buzz",
+        "target": "channel-1",
+        "message_id": "event-1",
+    }
+
+    assert await router.send_text(
+        "shared", "deliberate reply", channel="buzz",
+    ) is True
+    assert len(channel.sent) == 1
+    assert channel.sent[0].target == "channel-1"
+    assert channel.sent[0].text == "deliberate reply"
+    assert channel.sent[0].session_id == "shared"
+
+
+@pytest.mark.asyncio
+async def test_explicit_text_delivery_refuses_stale_or_mismatched_context():
+    engine = MagicMock()
+    router = ChannelRouter(engine)
+    channel = _StubChannel()
+    router.register(channel)
+    router._message_context["shared"] = {
+        "channel_name": "web",
+        "target": "client-1",
+        "message_id": "event-1",
+    }
+
+    assert await router.send_text(
+        "shared", "must not leak", channel="buzz",
+    ) is False
+    assert await router.send_text(
+        "missing", "must not leak", channel="buzz",
+    ) is False
+    assert channel.sent == []
+
+
+@pytest.mark.asyncio
+async def test_run_without_automatic_responses_does_not_register_adapter():
+    engine = MagicMock()
+    engine.run = AsyncMock(return_value="internal answer")
+    engine.register_task = MagicMock()
+    router = ChannelRouter(engine)
+    router._setup_streaming = AsyncMock()
+    router._teardown_streaming = AsyncMock()
+    channel = _StubChannel(automatic_responses=False)
+
+    response = await router._run_single(
+        channel,
+        InboundMessage(
+            channel_name="buzz",
+            channel_key="buzz:channel-1",
+            sender_id="channel-1",
+            text="hello",
+        ),
+        "shared",
+    )
+
+    assert response == "internal answer"
+    router._setup_streaming.assert_not_awaited()
+    router._teardown_streaming.assert_not_awaited()
 
 
 @pytest.mark.asyncio

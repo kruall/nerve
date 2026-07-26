@@ -1,8 +1,8 @@
-"""Notification tool handlers — notify, ask_user, propose_action, react, send_sticker, send_file.
+"""Notification and channel-output tool handlers.
 
-All six tools need ``ctx.session_id`` so the channel router can deliver
-to the correct chat (web, Telegram). The session_id arrives via
-:class:`ToolContext`; there's no per-tool special-casing left.
+The channel-bound tools need ``ctx.session_id`` so the router can deliver
+to the correct chat (web, Telegram, Buzz). The session_id arrives via
+:class:`ToolContext`; delivery remains bound to the active session.
 
 ``propose_action`` files an ``approval``-kind notification whose answer
 routes through a server-side dispatcher (``ctx.notification_service``)
@@ -25,6 +25,7 @@ from pathlib import Path
 from nerve.agent.tools.registry import ToolContext, ToolResult, ToolSpec
 from nerve.agent.tools.schemas import (
     ASK_USER_SCHEMA,
+    BUZZ_SEND_SCHEMA,
     NOTIFICATION_SILENCE_SCHEMA,
     NOTIFY_SCHEMA,
     PROPOSE_ACTION_SCHEMA,
@@ -390,6 +391,44 @@ async def send_sticker_handler(ctx: ToolContext, args: dict) -> ToolResult:
         return ToolResult.text(f"Failed to send sticker: {e}")
 
 
+async def buzz_send_handler(ctx: ToolContext, args: dict) -> ToolResult:
+    """Publish an intentional message to the Buzz chat driving this turn."""
+    raw_message = args.get("message")
+    if not isinstance(raw_message, str) or not raw_message.strip():
+        return ToolResult.text(
+            "buzz_send: message is required.",
+            is_error=True,
+        )
+    message = raw_message.strip()
+    if ctx.engine is None:
+        return ToolResult.text("buzz_send: engine not available.", is_error=True)
+    if ctx.engine.get_active_channel(ctx.session_id) != "buzz":
+        return ToolResult.text(
+            "buzz_send is available only while a Buzz message is driving this session.",
+            is_error=True,
+        )
+
+    try:
+        delivered = await ctx.engine.router.send_text(
+            ctx.session_id,
+            message,
+            channel="buzz",
+        )
+    except Exception as exc:
+        logger.error("buzz_send dispatch failed: %s", exc)
+        return ToolResult.text(
+            f"Failed to send Buzz message: {exc}",
+            is_error=True,
+        )
+
+    if not delivered:
+        return ToolResult.text(
+            "Cannot send Buzz message: current chat context is unavailable.",
+            is_error=True,
+        )
+    return ToolResult.text("Buzz message sent.")
+
+
 async def send_file_handler(ctx: ToolContext, args: dict) -> ToolResult:
     """Deliver a file via the channel router.
 
@@ -516,6 +555,18 @@ SEND_STICKER_SPEC = ToolSpec(
     handler=send_sticker_handler,
 )
 
+BUZZ_SEND_SPEC = ToolSpec(
+    name="buzz_send",
+    description=(
+        "Send an intentional user-facing message to the current Buzz chat. "
+        "Buzz session output is not published automatically, so use this for "
+        "every message that Buzz participants should see. The destination is "
+        "bound to the Buzz message driving the current turn and cannot be chosen."
+    ),
+    input_schema=BUZZ_SEND_SCHEMA,
+    handler=buzz_send_handler,
+)
+
 SEND_FILE_SPEC = ToolSpec(
     name="send_file",
     description=(
@@ -535,5 +586,6 @@ NOTIFICATION_SPECS = [
     NOTIFICATION_SILENCE_SPEC,
     REACT_SPEC,
     SEND_STICKER_SPEC,
+    BUZZ_SEND_SPEC,
     SEND_FILE_SPEC,
 ]

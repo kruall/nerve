@@ -202,9 +202,10 @@ class ChannelRouter:
                     "Typing indicator failed for %s: %s", msg.channel_name, e,
                 )
 
-        adapter = await self._setup_streaming(
-            channel, msg.sender_id, session_id,
-        )
+        if channel.automatic_responses:
+            await self._setup_streaming(
+                channel, msg.sender_id, session_id,
+            )
         images = msg.metadata.get("images") if msg.metadata else None
 
         task = asyncio.create_task(
@@ -224,9 +225,10 @@ class ChannelRouter:
                 return task.result()
             return ""
         finally:
-            await self._teardown_streaming(
-                channel.name, msg.sender_id, session_id,
-            )
+            if channel.automatic_responses:
+                await self._teardown_streaming(
+                    channel.name, msg.sender_id, session_id,
+                )
 
     async def _run_batch(
         self,
@@ -266,7 +268,8 @@ class ChannelRouter:
                     last_msg.channel_name, e,
                 )
 
-        adapter = await self._setup_streaming(channel, sender_id, session_id)
+        if channel.automatic_responses:
+            await self._setup_streaming(channel, sender_id, session_id)
 
         task = asyncio.create_task(
             self.engine.run(
@@ -285,9 +288,10 @@ class ChannelRouter:
                 return task.result()
             return ""
         finally:
-            await self._teardown_streaming(
-                channel.name, sender_id, session_id,
-            )
+            if channel.automatic_responses:
+                await self._teardown_streaming(
+                    channel.name, sender_id, session_id,
+                )
 
     def _cancel_pending(self, session_id: str) -> None:
         """Cancel all pending futures for a session."""
@@ -335,6 +339,41 @@ class ChannelRouter:
             return False
 
         await channel.send_sticker(ctx["target"], sticker)
+        return True
+
+    # ------------------------------------------------------------------ #
+    #  Explicit text delivery                                              #
+    # ------------------------------------------------------------------ #
+
+    async def send_text(
+        self,
+        session_id: str,
+        text: str,
+        channel: str | None = None,
+    ) -> bool:
+        """Send intentional text to the current inbound chat.
+
+        Both the active channel supplied by the caller and the cached inbound
+        context must match. This prevents a session-scoped tool from sending
+        to a stale chat or choosing an arbitrary target.
+        """
+        if channel is None:
+            return False
+
+        chan_obj = self._channels.get(channel)
+        if not chan_obj or ChannelCapability.SEND_TEXT not in chan_obj.capabilities:
+            return False
+
+        ctx = self._message_context.get(session_id)
+        if not ctx or ctx.get("channel_name") != channel:
+            return False
+
+        formatted = chan_obj.format_response(text)
+        await chan_obj.send(OutboundMessage(
+            target=ctx["target"],
+            text=formatted,
+            session_id=session_id,
+        ))
         return True
 
     # ------------------------------------------------------------------ #

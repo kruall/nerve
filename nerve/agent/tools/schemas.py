@@ -820,6 +820,17 @@ SEND_STICKER_SCHEMA = {
     "required": ["sticker"],
 }
 
+BUZZ_SEND_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "message": {
+            "type": "string",
+            "description": "Intentional user-facing message to send to the current Buzz chat",
+        },
+    },
+    "required": ["message"],
+}
+
 SEND_FILE_SCHEMA = {
     "type": "object",
     "properties": {

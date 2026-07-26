@@ -49,3 +49,25 @@ def test_build_system_prompt_smoke(tmp_path: Path):
     prompt = build_system_prompt(workspace=tmp_path, session_id="t1", source="web")
     assert "# Session Context" in prompt
     assert "mcp__nerve__" in prompt, "prompt must advertise tools with mcp__nerve__ prefix"
+
+
+def test_buzz_prompt_requires_explicit_public_output(tmp_path: Path):
+    prompt = build_system_prompt(
+        workspace=tmp_path,
+        session_id="buzz-1",
+        source="buzz",
+    )
+
+    assert "# Buzz Output Contract" in prompt
+    assert "mcp__nerve__buzz_send" in prompt
+    assert "NOT delivered to Buzz" in prompt
+
+
+def test_non_buzz_prompt_has_no_buzz_output_contract(tmp_path: Path):
+    prompt = build_system_prompt(
+        workspace=tmp_path,
+        session_id="web-1",
+        source="web",
+    )
+
+    assert "# Buzz Output Contract" not in prompt
