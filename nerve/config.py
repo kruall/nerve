@@ -269,6 +269,43 @@ class TelegramConfig:
 
 
 @dataclass
+class BuzzConfig:
+    """Configuration for the native Buzz channel.
+
+    Empty ``allowed_pubkeys`` deliberately means nobody is allowed to invoke
+    the agent. A Buzz community can contain many members, while a Nerve
+    instance has access to private workspace data and must not be open by
+    accident.
+    """
+
+    enabled: bool = False
+    relay_url: str = ""
+    binary_path: Path = field(default_factory=lambda: Path("buzz"))
+    private_key: str = ""
+    private_key_file: Path | None = None
+    bot_pubkey: str = ""
+    channel_ids: list[str] = field(default_factory=list)
+    allowed_pubkeys: list[str] = field(default_factory=list)
+    require_mention: bool = True
+    poll_interval_seconds: float = 3.0
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "BuzzConfig":
+        return cls(
+            enabled=bool(d.get("enabled", False)),
+            relay_url=str(d.get("relay_url", "")),
+            binary_path=_expand_path(d.get("binary_path", "buzz")) or Path("buzz"),
+            private_key=str(d.get("private_key", "")),
+            private_key_file=_expand_path(d.get("private_key_file")),
+            bot_pubkey=str(d.get("bot_pubkey", "")).lower(),
+            channel_ids=[str(v) for v in d.get("channel_ids", []) or []],
+            allowed_pubkeys=[str(v).lower() for v in d.get("allowed_pubkeys", []) or []],
+            require_mention=bool(d.get("require_mention", True)),
+            poll_interval_seconds=max(1.0, float(d.get("poll_interval_seconds", 3.0))),
+        )
+
+
+@dataclass
 class TelegramSyncConfig:
     enabled: bool = True
     api_id: int = 0
@@ -1354,6 +1391,7 @@ class NerveConfig:
     gateway: GatewayConfig = field(default_factory=GatewayConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
+    buzz: BuzzConfig = field(default_factory=BuzzConfig)
     sync: SyncConfig = field(default_factory=SyncConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     cron: CronConfig = field(default_factory=CronConfig)
@@ -1574,6 +1612,7 @@ class NerveConfig:
             gateway=GatewayConfig.from_dict(d.get("gateway", {})),
             agent=AgentConfig.from_dict(d.get("agent", {})),
             telegram=TelegramConfig.from_dict(d.get("telegram", {})),
+            buzz=BuzzConfig.from_dict(d.get("buzz", {})),
             sync=SyncConfig.from_dict(d.get("sync", {})),
             memory=MemoryConfig.from_dict(d.get("memory", {})),
             cron=CronConfig.from_dict(d.get("cron", {})),

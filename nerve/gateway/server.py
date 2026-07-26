@@ -215,6 +215,16 @@ async def lifespan(app: FastAPI):
         await telegram_channel.start()
         logger.info("Telegram bot started")
 
+    # Start native Buzz channel if explicitly configured. Its configuration
+    # is fail-closed: it needs an allow-list and a bot public key.
+    buzz_channel = None
+    if config.buzz.enabled:
+        from nerve.channels.buzz import BuzzChannel
+        buzz_channel = BuzzChannel(config, _engine.router, db)
+        _engine.register_channel(buzz_channel)
+        await buzz_channel.start()
+        logger.info("Buzz channel started")
+
     # Start cron service
     global _cron_service
     cron_task = None
@@ -519,6 +529,8 @@ async def lifespan(app: FastAPI):
     # the telegram polling task before we get a chance to stop it cleanly.
     if telegram_channel:
         await telegram_channel.stop()
+    if buzz_channel:
+        await buzz_channel.stop()
     if cron_task:
         await cron_task.stop()
 
