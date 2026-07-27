@@ -13,6 +13,7 @@ from nerve.agent.tools.handlers.hoa import HOA_SPECS
 from nerve.agent.tools.handlers.mcp_admin import MCP_ADMIN_SPECS
 from nerve.agent.tools.handlers.memory import MEMORY_SPECS
 from nerve.agent.tools.handlers.notifications import NOTIFICATION_SPECS
+from nerve.agent.tools.handlers.plane import PLANE_SPECS
 from nerve.agent.tools.handlers.plans import PLAN_SPECS
 from nerve.agent.tools.handlers.skills import SKILL_SPECS
 from nerve.agent.tools.handlers.sources import SOURCE_SPECS
@@ -33,6 +34,7 @@ def build_default_registry() -> ToolRegistry:
         *TASK_SPECS,
         *MEMORY_SPECS,
         *SOURCE_SPECS,
+        *PLANE_SPECS,
         *PLAN_SPECS,
         *SKILL_SPECS,
         *NOTIFICATION_SPECS,

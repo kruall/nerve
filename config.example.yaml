@@ -121,6 +121,16 @@ sync:
     schedule: "*/15 * * * *"
     repos: []                      # Required: ["ClickHouse/clickhouse-go", "owner/repo"]
     batch_size: 50
+  plane:                           # Monitor allowlisted Plane projects
+    enabled: false
+    base_url: ""                   # Instance origin, e.g. https://plane.example.com
+    workspace_slug: ""
+    projects: []                   # Required project UUID allowlist
+    api_key_env: PLANE_API_KEY     # Or set api_key only in config.local.yaml
+    schedule: "*/5 * * * *"
+    batch_size: 50
+    initial_backfill: false        # Baseline current state without inbox flood
+    max_pages_per_project: 20
 
 # Memory (memU)
 memory:

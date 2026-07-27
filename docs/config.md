@@ -222,6 +222,26 @@ Sources pull data from external services on a schedule. See [sources.md](sources
 |-----|------|---------|-------------|
 | `sync.github.schedule` | cron | `*/15 * * * *` | Fetch frequency |
 
+**Plane-specific:**
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `sync.plane.enabled` | bool | `false` | Enable the Plane source and first-party `plane_*` MCP reads |
+| `sync.plane.base_url` | URL | `""` | Plane instance origin; trailing `/api` or `/api/v1` is normalized |
+| `sync.plane.workspace_slug` | string | `""` | Exact workspace slug |
+| `sync.plane.projects` | list[UUID] | `[]` | Required project allowlist; empty is fail-closed |
+| `sync.plane.api_key` | string | `""` | PAT/API key; set only in `config.local.yaml` |
+| `sync.plane.api_key_env` | string | `PLANE_API_KEY` | Environment variable used when `api_key` is empty |
+| `sync.plane.schedule` | cron | `*/5 * * * *` | Fetch frequency |
+| `sync.plane.initial_backfill` | bool | `false` | Emit the existing backlog on first run; default establishes a baseline |
+| `sync.plane.max_pages_per_project` | int | `20` | Safety cap for one project snapshot |
+
+Plane uses one shared, allowlisted client for the source and MCP tools. Keep
+the credential out of `config.yaml`; prefer a service environment variable or
+`config.local.yaml` with restrictive permissions. The initial MCP surface is
+read-only: `plane_list_projects`, `plane_list_states`, `plane_list_members`,
+`plane_list_work_items`, and `plane_get_work_item`.
+
 ## Memory (memU)
 
 | Key | Type | Default | Description |

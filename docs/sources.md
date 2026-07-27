@@ -93,6 +93,23 @@ A persistent cron job (`inbox-processor`) runs every 15 minutes:
 - **Note:** GitHub's Events API returns truncated payloads (e.g., PR titles and URLs may be missing). The source constructs URLs from repo name + number and handles missing fields gracefully
 - **Default schedule:** `*/15 * * * *` (every 15 min)
 
+### Plane
+
+- **Adapter:** `nerve/sources/plane.py` — uses the shared allowlisted async
+  client in `nerve/integrations/plane.py`
+- **Records:** Current work-item snapshots with expanded state, assignees, and
+  labels. The stable Plane work-item UUID is the source record ID, so an item
+  is re-surfaced only when normalized content or metadata changes
+- **Cursor:** Versioned JSON with an independent `updated_at` watermark and
+  same-timestamp ID set for every configured project
+- **First run:** Establishes a per-project baseline and emits no historical
+  backlog unless `initial_backfill: true`
+- **Partial failures:** A failed project's watermark is not advanced. Other
+  allowlisted projects can still ingest successfully
+- **Guardrail:** `projects` is a required UUID allowlist. An empty allowlist
+  disables registration rather than granting workspace-wide visibility
+- **Default schedule:** `*/5 * * * *` (every 5 min)
+
 ### Telegram
 - **Adapter:** `nerve/sources/telegram.py` — uses Telethon (user account API)
 - **Mechanism:** Telegram's native `updates.getDifference` API — asks "what's new since this state?" using PTS/QTS/date
@@ -148,6 +165,17 @@ sync:
     username: ""                  # Auto-detect from gh auth
     batch_size: 50
     condense: false               # Events are naturally short
+
+  plane:
+    enabled: false
+    base_url: "https://plane.example.com"
+    workspace_slug: "my-workspace"
+    projects: []                  # Required project UUID allowlist
+    api_key_env: "PLANE_API_KEY"  # Or api_key in config.local.yaml
+    schedule: "*/5 * * * *"
+    batch_size: 50
+    initial_backfill: false
+    max_pages_per_project: 20
 ```
 
 ### Config Fields
@@ -287,6 +315,22 @@ read_source(source="github", after_seq=1000, limit=10)    # paginate forwards
 
 ### `sync_status` (legacy)
 Check the status of sync source fetch cursors. Kept for backward compatibility.
+
+## Plane MCP Reads
+
+When `sync.plane.enabled` is true, Nerve also exposes a small first-party Plane
+MCP surface backed by the same workspace/project allowlist and credential:
+
+- `plane_list_projects`
+- `plane_list_states`
+- `plane_list_members` (redacted identity/role view)
+- `plane_list_work_items`
+- `plane_get_work_item`
+
+This avoids attaching Plane's full 100+ tool MCP surface to every session. In
+particular, destructive and administrative operations are not exposed by the
+initial integration. Source records remain untrusted input: discovering a
+work-item update is not itself authority to mutate Plane.
 
 ## CLI Usage
 

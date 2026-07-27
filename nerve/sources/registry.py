@@ -165,4 +165,50 @@ def build_source_runners(
             gh_repos.batch_size, gh_repos.repos or "none",
         )
 
+    # Plane (allowlisted work-item snapshots)
+    plane = config.sync.plane
+    if plane.enabled:
+        from nerve.sources.plane import PlaneSource
+
+        missing = []
+        if not plane.base_url:
+            missing.append("base_url")
+        if not plane.workspace_slug:
+            missing.append("workspace_slug")
+        if not plane.projects:
+            missing.append("projects")
+        if not plane.effective_api_key:
+            missing.append(f"api_key/{plane.api_key_env or 'env'}")
+
+        if missing:
+            logger.warning(
+                "Source plane is enabled but missing %s — not registering",
+                ", ".join(missing),
+            )
+        else:
+            source = PlaneSource(config={
+                "base_url": plane.base_url,
+                "workspace_slug": plane.workspace_slug,
+                "projects": plane.projects,
+                "api_key": plane.effective_api_key,
+                "timeout_seconds": plane.timeout_seconds,
+                "initial_backfill": plane.initial_backfill,
+                "max_pages_per_project": plane.max_pages_per_project,
+            })
+            runners.append(SourceRunner(
+                source=source,
+                db=db,
+                batch_size=plane.batch_size,
+                condense=plane.condense,
+                condense_model=condense_model,
+                condense_client_factory=condense_factory,
+                ttl_days=ttl_days,
+            ))
+            logger.info(
+                "Registered source: %s (batch=%d, projects=%d)",
+                source.source_name,
+                plane.batch_size,
+                len(plane.projects),
+            )
+
     return runners

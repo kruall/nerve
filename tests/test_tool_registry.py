@@ -159,6 +159,8 @@ class TestDefaultRegistry:
             "skill_list", "skill_get", "skill_create",
             # sources
             "list_sources", "poll_source",
+            # Plane
+            "plane_list_projects", "plane_get_work_item",
             # notifications
             "notify", "ask_user", "react", "send_sticker", "buzz_send",
             "send_file",

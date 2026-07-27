@@ -456,6 +456,61 @@ READ_SOURCE_SCHEMA = {
     "required": ["source"],
 }
 
+# ----- Plane tools (read-only first-party MCP surface) -----
+
+PLANE_LIST_PROJECTS_SCHEMA = {
+    "type": "object",
+    "properties": {},
+    "required": [],
+}
+
+PLANE_PROJECT_RESOURCE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "project_id": {
+            "type": "string",
+            "description": "Allowlisted Plane project UUID",
+        },
+    },
+    "required": ["project_id"],
+}
+
+PLANE_LIST_WORK_ITEMS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "project_id": {
+            "type": "string",
+            "description": "Allowlisted Plane project UUID",
+        },
+        "cursor": {
+            "type": "string",
+            "description": "Opaque Plane pagination cursor",
+            "default": "",
+        },
+        "limit": {
+            "type": "number",
+            "description": "Number of work items to return (1-100)",
+            "default": 50,
+        },
+    },
+    "required": ["project_id"],
+}
+
+PLANE_GET_WORK_ITEM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "project_id": {
+            "type": "string",
+            "description": "Allowlisted Plane project UUID",
+        },
+        "work_item_id": {
+            "type": "string",
+            "description": "Plane work-item UUID",
+        },
+    },
+    "required": ["project_id", "work_item_id"],
+}
+
 # ----- Plan tools -----
 
 PLAN_PROPOSE_SCHEMA = {

@@ -475,6 +475,66 @@ class GitHubReposSyncConfig:
 
 
 @dataclass
+class PlaneSyncConfig:
+    """Config for the Plane work-item source and first-party MCP tools.
+
+    The API key belongs in ``config.local.yaml`` or an environment variable;
+    never in the committed ``config.yaml``.  ``projects`` is an explicit
+    allowlist of project UUIDs.  An empty allowlist deliberately makes the
+    integration a no-op instead of granting workspace-wide access.
+    """
+
+    enabled: bool = False
+    base_url: str = ""
+    workspace_slug: str = ""
+    projects: list[str] = field(default_factory=list)
+    api_key: str = ""
+    api_key_env: str = "PLANE_API_KEY"
+    schedule: str = "*/5 * * * *"
+    batch_size: int = 50
+    condense: bool = False
+    processor: str = "agent"
+    prompt_hint: str = ""
+    model: str = ""
+    timeout_seconds: float = 30.0
+    initial_backfill: bool = False
+    max_pages_per_project: int = 20
+
+    @classmethod
+    def from_dict(cls, d: dict) -> PlaneSyncConfig:
+        return cls(
+            enabled=bool(d.get("enabled", False)),
+            base_url=str(d.get("base_url", "") or "").rstrip("/"),
+            workspace_slug=str(d.get("workspace_slug", "") or "").strip(),
+            projects=[
+                str(project).strip()
+                for project in (d.get("projects", []) or [])
+                if str(project).strip()
+            ],
+            api_key=str(d.get("api_key", "") or ""),
+            api_key_env=str(d.get("api_key_env", "PLANE_API_KEY") or "").strip(),
+            schedule=str(d.get("schedule", "*/5 * * * *")),
+            batch_size=int(d.get("batch_size", 50)),
+            condense=bool(d.get("condense", False)),
+            processor=str(d.get("processor", "agent")),
+            prompt_hint=str(d.get("prompt_hint", "")),
+            model=str(d.get("model", "")),
+            timeout_seconds=float(d.get("timeout_seconds", 30.0)),
+            initial_backfill=bool(d.get("initial_backfill", False)),
+            max_pages_per_project=int(d.get("max_pages_per_project", 20)),
+        )
+
+    @property
+    def effective_api_key(self) -> str:
+        """Resolve the configured key without persisting environment secrets."""
+        if self.api_key:
+            return self.api_key
+        if self.api_key_env:
+            return os.environ.get(self.api_key_env, "")
+        return ""
+
+
+@dataclass
 class CodexOriginConfig:
     """A single Codex thread sync origin.
 
@@ -570,6 +630,7 @@ class SyncConfig:
     github: GitHubSyncConfig = field(default_factory=GitHubSyncConfig)
     github_events: GitHubEventsSyncConfig = field(default_factory=GitHubEventsSyncConfig)
     github_repos: GitHubReposSyncConfig = field(default_factory=GitHubReposSyncConfig)
+    plane: PlaneSyncConfig = field(default_factory=PlaneSyncConfig)
     codex: CodexSyncConfig = field(default_factory=CodexSyncConfig)
     message_ttl_days: int = 7           # How long to keep source messages in the inbox
     consumer_cursor_ttl_days: int = 2   # Consumer cursors expire after N days of inactivity
@@ -582,6 +643,7 @@ class SyncConfig:
             github=GitHubSyncConfig.from_dict(d.get("github", {})),
             github_events=GitHubEventsSyncConfig.from_dict(d.get("github_events", {})),
             github_repos=GitHubReposSyncConfig.from_dict(d.get("github_repos", {})),
+            plane=PlaneSyncConfig.from_dict(d.get("plane", {})),
             codex=CodexSyncConfig.from_dict(d.get("codex", {})),
             message_ttl_days=d.get("message_ttl_days", 7),
             consumer_cursor_ttl_days=d.get("consumer_cursor_ttl_days", 2),
