@@ -44,6 +44,7 @@ class BuzzChannel(BaseChannel):
         self._private_key = ""
         self._channel_names: dict[str, str] = {}
         self._source_names: dict[str, str] = {}
+        self._author_names: dict[str, str] = {}
         self._dm_channel_ids: set[str] = set()
         self._next_dm_refresh = 0.0
 
@@ -66,6 +67,13 @@ class BuzzChannel(BaseChannel):
         self._validate_config()
         self._private_key = self._load_private_key()
         await self._load_channel_names()
+        try:
+            await self._load_author_names()
+        except Exception:
+            # Profile lookup is best-effort: a transient relay failure must not
+            # prevent the Buzz channel from starting. Dispatch retains the
+            # unambiguous pubkey fallback when no profile name is available.
+            logger.warning("Buzz author profile lookup failed", exc_info=True)
         await self._migrate_legacy_source_names()
         await self._prime_cursors()
         self._stop_event.clear()
@@ -238,6 +246,49 @@ class BuzzChannel(BaseChannel):
         }
         self._source_names = candidates
 
+    async def _load_author_names(self) -> None:
+        """Cache canonical mention names for configured Buzz authors."""
+        pubkeys = sorted(set(self.config.allowed_pubkeys))
+        if not pubkeys:
+            self._author_names = {}
+            return
+
+        args = ["--format", "json", "users", "get"]
+        for pubkey in pubkeys:
+            args.extend(["--pubkey", pubkey])
+        output = await self._run_cli(*args)
+        try:
+            decoded = json.loads(output)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Buzz CLI returned invalid user profile JSON") from exc
+        if not isinstance(decoded, list):
+            raise RuntimeError("Buzz CLI returned an unexpected user profile response")
+
+        names: dict[str, str] = {}
+        allowed = set(pubkeys)
+        for profile in decoded:
+            if not isinstance(profile, dict):
+                continue
+            pubkey = str(profile.get("pubkey", "")).lower()
+            if pubkey not in allowed:
+                continue
+            name = self._profile_mention_name(profile)
+            if name:
+                names[pubkey] = name
+        self._author_names = names
+
+    @staticmethod
+    def _profile_mention_name(profile: dict[str, Any]) -> str:
+        value = profile.get("display_name") or profile.get("name")
+        if not isinstance(value, str):
+            return ""
+        # Buzz supports multi-word display-name mentions. Collapse whitespace
+        # so profile metadata cannot break the one-line author context.
+        name = " ".join(value.strip().removeprefix("@").split())
+        if not name or len(name) > 100 or any(char in name for char in "[]"):
+            return ""
+        return name
+
     async def _migrate_legacy_source_names(self) -> None:
         for channel_id, source in self._source_names.items():
             await self.db.rename_source(f"buzz:{channel_id}", source)
@@ -348,7 +399,13 @@ class BuzzChannel(BaseChannel):
             if is_dm
             else "[Это сообщение из общего канала Buzz; ответ увидят все его участники.]\n\n"
         )
-        author_context = f"[Автор Buzz: {author}]\n\n"
+        author_name = self._author_names.get(author, "")
+        author_context = (
+            f"[Автор Buzz: @{author_name} (pubkey: {author}). "
+            f"Для обращения используйте @{author_name}, не pubkey.]\n\n"
+            if author_name
+            else f"[Автор Buzz: {author}]\n\n"
+        )
         await self.router.handle_message(InboundMessage(
             channel_name=self.name,
             channel_key=f"buzz:{channel_id}",
@@ -363,6 +420,7 @@ class BuzzChannel(BaseChannel):
                 "buzz_channel_name": self._channel_names.get(channel_id, ""),
                 "buzz_source": self._source_name(channel_id),
                 "buzz_author_pubkey": author,
+                "buzz_author_name": author_name,
                 "buzz_is_dm": is_dm,
             },
             steer_if_busy=True,

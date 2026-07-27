@@ -166,6 +166,55 @@ async def test_dispatch_uses_one_steerable_session_per_channel():
 
 
 @pytest.mark.asyncio
+async def test_load_author_names_caches_buzz_profile_names():
+    channel = _channel()
+    other_user = "a" * 64
+    channel.config.allowed_pubkeys.append(other_user)
+    channel._run_cli = AsyncMock(return_value=json.dumps([
+        {"pubkey": USER, "display_name": "kruall"},
+        {"pubkey": other_user, "name": "Other User"},
+        {"pubkey": "c" * 64, "display_name": "Untrusted"},
+    ]))
+
+    await channel._load_author_names()
+
+    assert channel._author_names == {
+        USER: "kruall",
+        other_user: "Other User",
+    }
+    channel._run_cli.assert_awaited_once_with(
+        "--format", "json", "users", "get",
+        "--pubkey", other_user,
+        "--pubkey", USER,
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_uses_profile_name_for_author_mentions():
+    channel = _channel()
+    channel._author_names[USER] = "kruall"
+    channel.router.handle_message = AsyncMock()
+
+    await channel._dispatch(CHANNEL, _event())
+
+    message = channel.router.handle_message.await_args.args[0]
+    assert f"[Автор Buzz: @kruall (pubkey: {USER})" in message.text
+    assert "Для обращения используйте @kruall, не pubkey." in message.text
+    assert message.metadata["buzz_author_name"] == "kruall"
+    assert message.metadata["buzz_author_pubkey"] == USER
+
+
+def test_profile_mention_name_is_single_line_and_rejects_context_delimiters():
+    channel = _channel()
+
+    assert channel._profile_mention_name(
+        {"display_name": "  @Will \n Pfleger  "},
+    ) == "Will Pfleger"
+    assert channel._profile_mention_name({"display_name": "[spoof]"}) == ""
+    assert channel._profile_mention_name({"display_name": "x" * 101}) == ""
+
+
+@pytest.mark.asyncio
 async def test_load_channel_names_builds_human_readable_sources_and_migrates_legacy():
     channel = _channel()
     channel._run_cli = AsyncMock(return_value=(
