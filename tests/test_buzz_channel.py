@@ -152,6 +152,7 @@ async def test_dispatch_uses_one_steerable_session_per_channel():
     ]
     assert first.sender_id == second.sender_id == CHANNEL
     assert first.channel_key == second.channel_key == f"buzz:{CHANNEL}"
+    assert first.session_title == second.session_title == "Buzz · General"
     assert first.steer_if_busy is second.steer_if_busy is True
     assert first.metadata["message_id"] == "event-1"
     assert first.metadata["buzz_channel_name"] == "General"
@@ -206,6 +207,13 @@ def test_relay_host_is_used_when_community_name_is_not_configured():
     )
 
 
+def test_public_session_title_falls_back_to_short_channel_id():
+    channel = _channel()
+    assert channel._session_title(
+        CHANNEL, peer_pubkey=USER, is_dm=False,
+    ) == f"Buzz · {CHANNEL[:12]}"
+
+
 @pytest.mark.asyncio
 async def test_dispatch_marks_dm_private_and_replies_to_dm_channel():
     channel = _channel()
@@ -214,6 +222,7 @@ async def test_dispatch_marks_dm_private_and_replies_to_dm_channel():
     message = channel.router.handle_message.await_args.args[0]
     assert message.sender_id == DM_CHANNEL
     assert message.channel_key == f"buzz:{DM_CHANNEL}"
+    assert message.session_title == f"Buzz DM · {USER[:12]}"
     assert message.steer_if_busy is True
     assert message.metadata["buzz_is_dm"] is True
     assert "личное сообщение" in message.text

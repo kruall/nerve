@@ -28,6 +28,16 @@ DEFAULT_MAX_SESSIONS = 500
 # Sources treated as interactive for the opt-in short idle auto-close. Cron and
 # source-runner sessions are excluded so their context continuity is preserved.
 INTERACTIVE_SOURCES = ["web", "telegram", "discord", "slack", "whatsapp"]
+# Before Buzz supplied session titles, the generic first-message placeholder
+# was built from Nerve's injected Buzz context wrapper. These exact prefixes
+# identify that legacy machine-generated title without treating arbitrary
+# user or manually assigned titles as replaceable.
+LEGACY_BUZZ_TITLE_PREFIXES = (
+    "[Это сообщение из общего канала Buzz;",
+    "[Это сообщение из личного чата Buzz;",
+    "[This message is from a shared Buzz channel;",
+    "[This message is from a private Buzz chat;",
+)
 
 
 class SessionStatus(StrEnum):
@@ -254,13 +264,18 @@ class SessionManager:
         return None
 
     async def get_active_session(
-        self, channel_key: str, source: str = "web",
+        self,
+        channel_key: str,
+        source: str = "web",
+        title: str | None = None,
     ) -> str:
         """Get or create the active session for a channel.
 
         Reuses the channel's mapped session when it is currently active
         (a turn is in flight) or when its last activity falls within the
-        sticky period. Otherwise creates a fresh session and remaps.
+        sticky period. A supplied title backfills only the default ID title
+        or a recognized legacy Buzz placeholder on a reused session.
+        Otherwise creates a fresh titled session and remaps.
         """
         lock = self._channel_locks.setdefault(channel_key, asyncio.Lock())
         async with lock:
@@ -268,13 +283,35 @@ class SessionManager:
             if row:
                 session = await self.db.get_session(row["session_id"])
                 if session and self._is_within_sticky_period(session):
+                    if title and self._can_backfill_channel_title(
+                        session, row["session_id"],
+                    ):
+                        await self.db.update_session_title(
+                            row["session_id"], title,
+                        )
                     return row["session_id"]
 
             # Create a fresh session
             session_id = self._generate_session_id()
-            await self._create_session(session_id, source=source)
+            await self._create_session(
+                session_id, title=title, source=source,
+            )
             await self.db.set_channel_session(channel_key, session_id)
             return session_id
+
+    @staticmethod
+    def _can_backfill_channel_title(
+        session: dict, session_id: str,
+    ) -> bool:
+        """Return whether a channel-provided title may replace the current one."""
+        current = session.get("title")
+        if current == session_id:
+            return True
+        return (
+            session.get("source") == "buzz"
+            and isinstance(current, str)
+            and current.startswith(LEGACY_BUZZ_TITLE_PREFIXES)
+        )
 
     def _is_within_sticky_period(self, session: dict) -> bool:
         """Check whether a session is still the channel's owner.

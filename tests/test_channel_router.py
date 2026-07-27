@@ -41,6 +41,31 @@ class _StubChannel(BaseChannel):
 
 
 @pytest.mark.asyncio
+async def test_implicit_session_resolution_forwards_channel_title():
+    engine = MagicMock()
+    engine.sessions.get_active_session = AsyncMock(return_value="shared")
+    engine.run = AsyncMock(return_value="")
+    engine.register_task = MagicMock()
+    router = ChannelRouter(engine)
+    router.BATCH_DEBOUNCE = 0
+    router.register(_StubChannel(automatic_responses=False))
+
+    await router.handle_message(InboundMessage(
+        channel_name="buzz",
+        channel_key="buzz:channel-1",
+        sender_id="channel-1",
+        text="hello",
+        session_title="Buzz · General",
+    ))
+
+    engine.sessions.get_active_session.assert_awaited_once_with(
+        "buzz:channel-1",
+        source="buzz",
+        title="Buzz · General",
+    )
+
+
+@pytest.mark.asyncio
 async def test_explicit_text_delivery_uses_matching_session_context():
     engine = MagicMock()
     router = ChannelRouter(engine)

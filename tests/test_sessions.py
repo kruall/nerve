@@ -116,11 +116,75 @@ class TestChannelMapping:
 
     async def test_auto_session_created_on_first_message(self, sm: SessionManager, db: Database):
         """When a channel has no mapping, a new session is created automatically."""
-        sid = await sm.get_active_session("telegram:999", source="telegram")
+        sid = await sm.get_active_session(
+            "telegram:999",
+            source="telegram",
+            title="Telegram · test",
+        )
         assert len(sid) == 8  # Short UUID
         session = await db.get_session(sid)
         assert session is not None
         assert session["source"] == "telegram"
+        assert session["title"] == "Telegram · test"
+
+    async def test_reused_session_backfills_default_id_title(
+        self, sm: SessionManager, db: Database,
+    ):
+        sid = await sm.get_active_session("buzz:general", source="buzz")
+
+        reused = await sm.get_active_session(
+            "buzz:general",
+            source="buzz",
+            title="Buzz · General",
+        )
+
+        assert reused == sid
+        session = await db.get_session(sid)
+        assert session["title"] == "Buzz · General"
+
+    async def test_reused_session_preserves_meaningful_title(
+        self, sm: SessionManager, db: Database,
+    ):
+        sid = await sm.get_active_session(
+            "buzz:general",
+            source="buzz",
+            title="Custom name",
+        )
+
+        reused = await sm.get_active_session(
+            "buzz:general",
+            source="buzz",
+            title="Buzz · General",
+        )
+
+        assert reused == sid
+        session = await db.get_session(sid)
+        assert session["title"] == "Custom name"
+
+    @pytest.mark.parametrize("legacy_title", [
+        "[Это сообщение из общего канала Buzz;...",
+        "[Это сообщение из личного чата Buzz;...",
+        "[This message is from a shared Buzz channel;...",
+        "[This message is from a private Buzz chat;...",
+    ])
+    async def test_reused_buzz_session_backfills_legacy_placeholder(
+        self,
+        sm: SessionManager,
+        db: Database,
+        legacy_title: str,
+    ):
+        sid = await sm.get_active_session("buzz:general", source="buzz")
+        await db.update_session_title(sid, legacy_title)
+
+        reused = await sm.get_active_session(
+            "buzz:general",
+            source="buzz",
+            title="Buzz · General",
+        )
+
+        assert reused == sid
+        session = await db.get_session(sid)
+        assert session["title"] == "Buzz · General"
 
     async def test_simultaneous_first_messages_share_one_session(
         self, sm: SessionManager,

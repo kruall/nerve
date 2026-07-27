@@ -111,7 +111,9 @@ class ChannelRouter:
             )
         else:
             session_id = await self.engine.sessions.get_active_session(
-                msg.channel_key, source=msg.channel_name,
+                msg.channel_key,
+                source=msg.channel_name,
+                title=msg.session_title,
             )
 
         # Store message context for reaction support

@@ -174,10 +174,14 @@ export function SessionSidebar({ sessions, activeSession, agentStatus, onCreate,
 
   const { conversations, systemSessions } = useMemo(() => {
     // External = Codex/Claude-Code/Cursor satellite sessions (MCP server +
-    // Codex thread sync). Live alongside web/telegram conversations.
-    const convos = sessions.filter(
-      s => s.source === 'web' || s.source === 'telegram' || s.source === 'api' || s.source === 'external',
-    );
+    // Codex thread sync). Live alongside web/telegram/Buzz conversations.
+    const convos = sessions.filter(s => (
+      s.source === 'web'
+      || s.source === 'telegram'
+      || s.source === 'buzz'
+      || s.source === 'api'
+      || s.source === 'external'
+    ));
     const system = sessions.filter(s => s.source === 'cron' || s.source === 'hook');
     return { conversations: convos, systemSessions: system };
   }, [sessions]);

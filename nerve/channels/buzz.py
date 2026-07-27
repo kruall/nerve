@@ -354,6 +354,9 @@ class BuzzChannel(BaseChannel):
             channel_key=f"buzz:{channel_id}",
             sender_id=channel_id,
             text=context + author_context + content,
+            session_title=self._session_title(
+                channel_id, peer_pubkey=author, is_dm=is_dm,
+            ),
             metadata={
                 "message_id": str(event["id"]),
                 "buzz_channel_id": channel_id,
@@ -398,6 +401,18 @@ class BuzzChannel(BaseChannel):
 
     def _source_name(self, channel_id: str) -> str:
         return self._source_names.get(channel_id, f"buzz:{channel_id}")
+
+    def _session_title(
+        self,
+        channel_id: str,
+        *,
+        peer_pubkey: str,
+        is_dm: bool,
+    ) -> str:
+        if is_dm:
+            return f"Buzz DM · {peer_pubkey[:12]}"
+        channel_name = self._channel_names.get(channel_id)
+        return f"Buzz · {channel_name or channel_id[:12]}"
 
     @staticmethod
     def _community_from_relay_url(relay_url: str) -> str:

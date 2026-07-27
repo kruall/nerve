@@ -52,6 +52,7 @@ class InboundMessage:
     sender_id: str                                  # User identifier within the channel
     text: str                                       # The message content
     session_id: str | None = None                   # Explicit session override (web sends this)
+    session_title: str | None = None                 # Title for an implicitly created session
     metadata: dict[str, Any] = field(default_factory=dict)
     steer_if_busy: bool = False                     # Inject into an active turn when supported
 
