@@ -232,18 +232,26 @@ Sources pull data from external services on a schedule. See [sources.md](sources
 | `sync.plane.projects` | list[UUID] | `[]` | Required project allowlist; empty is fail-closed |
 | `sync.plane.api_key` | string | `""` | PAT/API key; set only in `config.local.yaml` |
 | `sync.plane.api_key_env` | string | `PLANE_API_KEY` | Environment variable used when `api_key` is empty |
+| `sync.plane.api_key_file` | path | unset | Absolute owner-only env file used when direct/env keys are empty |
+| `sync.plane.api_key_file_env` | string | `PLANE_API_TOKEN` | Variable to read from `api_key_file` |
 | `sync.plane.schedule` | cron | `*/5 * * * *` | Fetch frequency |
 | `sync.plane.initial_backfill` | bool | `false` | Emit the existing backlog on first run; default establishes a baseline |
 | `sync.plane.max_pages_per_project` | int | `20` | Safety cap for one project snapshot |
 
 Plane uses one shared, allowlisted client for the source and MCP tools. Keep
 the credential out of `config.yaml`; prefer a service environment variable or
-`config.local.yaml` with restrictive permissions. The MCP surface provides
+an absolute `api_key_file` owned by the service user with mode `0600`. Nerve
+reads the named value without sourcing or copying the file and rejects
+symlinks, non-regular files, wrong ownership, broad permissions, oversized
+files, and missing/empty values. The MCP surface provides
 allowlisted inventory plus individual create/update/comment/link mutations.
 Every update/comment/link requires the exact `updated_at` from a preceding
 read; handlers perform collision checks and verify successful writes by
 read-back. No delete, archive, role, membership, credential, workspace, or
 project-admin tools are exposed.
+
+See [plane.md](plane.md) for the end-to-end data flow, MCP examples, safety
+model, and rollout checklist.
 
 ## Memory (memU)
 

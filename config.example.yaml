@@ -126,7 +126,9 @@ sync:
     base_url: ""                   # Instance origin, e.g. https://plane.example.com
     workspace_slug: ""
     projects: []                   # Required project UUID allowlist
-    api_key_env: PLANE_API_KEY     # Or set api_key only in config.local.yaml
+    api_key_env: PLANE_API_KEY     # First choice: existing service environment
+    api_key_file: ""               # Or owner-only env file, absolute path
+    api_key_file_env: PLANE_API_TOKEN
     schedule: "*/5 * * * *"
     batch_size: 50
     initial_backfill: false        # Baseline current state without inbox flood

@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -490,6 +491,8 @@ class PlaneSyncConfig:
     projects: list[str] = field(default_factory=list)
     api_key: str = ""
     api_key_env: str = "PLANE_API_KEY"
+    api_key_file: Path | None = None
+    api_key_file_env: str = "PLANE_API_TOKEN"
     schedule: str = "*/5 * * * *"
     batch_size: int = 50
     condense: bool = False
@@ -513,6 +516,10 @@ class PlaneSyncConfig:
             ],
             api_key=str(d.get("api_key", "") or ""),
             api_key_env=str(d.get("api_key_env", "PLANE_API_KEY") or "").strip(),
+            api_key_file=_expand_path(d.get("api_key_file") or None),
+            api_key_file_env=str(
+                d.get("api_key_file_env", "PLANE_API_TOKEN") or ""
+            ).strip(),
             schedule=str(d.get("schedule", "*/5 * * * *")),
             batch_size=int(d.get("batch_size", 50)),
             condense=bool(d.get("condense", False)),
@@ -526,12 +533,93 @@ class PlaneSyncConfig:
 
     @property
     def effective_api_key(self) -> str:
-        """Resolve the configured key without persisting environment secrets."""
+        """Resolve the key without copying file-backed secrets into config."""
         if self.api_key:
             return self.api_key
         if self.api_key_env:
-            return os.environ.get(self.api_key_env, "")
+            value = os.environ.get(self.api_key_env, "")
+            if value:
+                return value
+        if self.api_key_file is not None:
+            return self._read_api_key_file()
         return ""
+
+    def _read_api_key_file(self) -> str:
+        """Read one named value from a strict owner-only env file."""
+        path = self.api_key_file
+        if path is None:
+            return ""
+        if not path.is_absolute():
+            raise ValueError("Plane api_key_file must be an absolute path")
+        flags = os.O_RDONLY
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        file_descriptor = -1
+        try:
+            if path.is_symlink():
+                raise ValueError(
+                    "Plane api_key_file must be a regular non-symlink"
+                )
+            file_descriptor = os.open(path, flags)
+            file_stat = os.fstat(file_descriptor)
+        except OSError as exc:
+            raise ValueError("Plane api_key_file is unavailable") from exc
+        try:
+            if not stat.S_ISREG(file_stat.st_mode):
+                raise ValueError(
+                    "Plane api_key_file must be a regular non-symlink"
+                )
+            if file_stat.st_uid != os.geteuid():
+                raise ValueError(
+                    "Plane api_key_file must be owned by the service user"
+                )
+            if stat.S_IMODE(file_stat.st_mode) & 0o077:
+                raise ValueError(
+                    "Plane api_key_file permissions must be 0600 or stricter"
+                )
+            if file_stat.st_size > 16_384:
+                raise ValueError("Plane api_key_file is unexpectedly large")
+            try:
+                with os.fdopen(
+                    file_descriptor,
+                    "r",
+                    encoding="utf-8",
+                ) as credential_file:
+                    file_descriptor = -1
+                    content = credential_file.read(16_385)
+            except (OSError, UnicodeError) as exc:
+                raise ValueError(
+                    "Plane api_key_file could not be read"
+                ) from exc
+            if len(content.encode("utf-8")) > 16_384:
+                raise ValueError("Plane api_key_file is unexpectedly large")
+        finally:
+            if file_descriptor >= 0:
+                os.close(file_descriptor)
+
+        target = self.api_key_file_env
+        if not target:
+            raise ValueError("Plane api_key_file_env must not be empty")
+        for raw_line in content.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[7:].lstrip()
+            key, separator, value = line.partition("=")
+            if not separator or key.strip() != target:
+                continue
+            value = value.strip()
+            if (
+                len(value) >= 2
+                and value[0] == value[-1]
+                and value[0] in {"'", '"'}
+            ):
+                value = value[1:-1]
+            if not value:
+                raise ValueError("Plane api_key_file value is empty")
+            return value
+        raise ValueError("Plane api_key_file_env was not found")
 
 
 @dataclass

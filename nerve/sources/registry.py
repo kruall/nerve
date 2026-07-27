@@ -171,14 +171,19 @@ def build_source_runners(
         from nerve.sources.plane import PlaneSource
 
         missing = []
+        try:
+            plane_api_key = plane.effective_api_key
+        except ValueError as exc:
+            logger.warning("Source plane credential rejected: %s", exc)
+            plane_api_key = ""
         if not plane.base_url:
             missing.append("base_url")
         if not plane.workspace_slug:
             missing.append("workspace_slug")
         if not plane.projects:
             missing.append("projects")
-        if not plane.effective_api_key:
-            missing.append(f"api_key/{plane.api_key_env or 'env'}")
+        if not plane_api_key:
+            missing.append("api_key/api_key_env/api_key_file")
 
         if missing:
             logger.warning(
@@ -190,7 +195,7 @@ def build_source_runners(
                 "base_url": plane.base_url,
                 "workspace_slug": plane.workspace_slug,
                 "projects": plane.projects,
-                "api_key": plane.effective_api_key,
+                "api_key": plane_api_key,
                 "timeout_seconds": plane.timeout_seconds,
                 "initial_backfill": plane.initial_backfill,
                 "max_pages_per_project": plane.max_pages_per_project,

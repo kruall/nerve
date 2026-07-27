@@ -115,6 +115,80 @@ def test_plane_config_resolves_env_key(monkeypatch):
     assert config.sync.plane.effective_api_key == "env-secret"
 
 
+def test_plane_config_resolves_strict_env_file(tmp_path, monkeypatch):
+    monkeypatch.delenv("SYNTHETIC_PLANE_KEY", raising=False)
+    credentials = tmp_path / "plane.env"
+    credentials.write_text(
+        "# dedicated agent credential\n"
+        "PLANE_AGENT_TOKEN='file-secret'\n",
+        encoding="utf-8",
+    )
+    credentials.chmod(0o600)
+    config = NerveConfig.from_dict({
+        "sync": {
+            "plane": {
+                "enabled": True,
+                "base_url": "https://plane.invalid",
+                "workspace_slug": "synthetic",
+                "projects": [PROJECT_A],
+                "api_key_env": "SYNTHETIC_PLANE_KEY",
+                "api_key_file": str(credentials),
+                "api_key_file_env": "PLANE_AGENT_TOKEN",
+            },
+        },
+    })
+
+    assert config.sync.plane.effective_api_key == "file-secret"
+
+
+@pytest.mark.parametrize("mode", [0o640, 0o604, 0o644])
+def test_plane_config_rejects_broad_credential_file_permissions(
+    tmp_path,
+    monkeypatch,
+    mode,
+):
+    monkeypatch.delenv("SYNTHETIC_PLANE_KEY", raising=False)
+    credentials = tmp_path / "plane.env"
+    credentials.write_text(
+        "PLANE_AGENT_TOKEN=file-secret\n",
+        encoding="utf-8",
+    )
+    credentials.chmod(mode)
+    config = NerveConfig.from_dict({
+        "sync": {
+            "plane": {
+                "api_key_env": "SYNTHETIC_PLANE_KEY",
+                "api_key_file": str(credentials),
+                "api_key_file_env": "PLANE_AGENT_TOKEN",
+            },
+        },
+    })
+
+    with pytest.raises(ValueError, match="permissions"):
+        _ = config.sync.plane.effective_api_key
+
+
+def test_plane_config_rejects_credential_file_symlink(tmp_path, monkeypatch):
+    monkeypatch.delenv("SYNTHETIC_PLANE_KEY", raising=False)
+    target = tmp_path / "target.env"
+    target.write_text("PLANE_AGENT_TOKEN=file-secret\n", encoding="utf-8")
+    target.chmod(0o600)
+    credentials = tmp_path / "plane.env"
+    credentials.symlink_to(target)
+    config = NerveConfig.from_dict({
+        "sync": {
+            "plane": {
+                "api_key_env": "SYNTHETIC_PLANE_KEY",
+                "api_key_file": str(credentials),
+                "api_key_file_env": "PLANE_AGENT_TOKEN",
+            },
+        },
+    })
+
+    with pytest.raises(ValueError, match="non-symlink"):
+        _ = config.sync.plane.effective_api_key
+
+
 @pytest.mark.asyncio
 async def test_registry_builds_plane_runner_from_config(db, monkeypatch):
     monkeypatch.setenv("SYNTHETIC_PLANE_KEY", "env-secret")

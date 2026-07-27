@@ -171,7 +171,9 @@ sync:
     base_url: "https://plane.example.com"
     workspace_slug: "my-workspace"
     projects: []                  # Required project UUID allowlist
-    api_key_env: "PLANE_API_KEY"  # Or api_key in config.local.yaml
+    api_key_env: "PLANE_API_KEY"
+    api_key_file: ""              # Alternative owner-only env file
+    api_key_file_env: "PLANE_API_TOKEN"
     schedule: "*/5 * * * *"
     batch_size: 50
     initial_backfill: false
@@ -339,6 +341,9 @@ an exact `expected_updated_at`; create checks exact-title collisions; state
 changes enforce `blocked_by`; every successful write is read back. Source
 records remain untrusted input: discovering a work-item update is not itself
 authority to mutate Plane.
+
+For the complete architecture and operational flow, see
+[Plane integration](plane.md).
 
 ## CLI Usage
 
