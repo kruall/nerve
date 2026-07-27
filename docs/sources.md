@@ -316,7 +316,7 @@ read_source(source="github", after_seq=1000, limit=10)    # paginate forwards
 ### `sync_status` (legacy)
 Check the status of sync source fetch cursors. Kept for backward compatibility.
 
-## Plane MCP Reads
+## Plane MCP Tools
 
 When `sync.plane.enabled` is true, Nerve also exposes a small first-party Plane
 MCP surface backed by the same workspace/project allowlist and credential:
@@ -324,13 +324,21 @@ MCP surface backed by the same workspace/project allowlist and credential:
 - `plane_list_projects`
 - `plane_list_states`
 - `plane_list_members` (redacted identity/role view)
+- `plane_list_labels`
 - `plane_list_work_items`
 - `plane_get_work_item`
+- `plane_create_work_item`
+- `plane_update_work_item`
+- `plane_add_comment`
+- `plane_add_link`
 
 This avoids attaching Plane's full 100+ tool MCP surface to every session. In
-particular, destructive and administrative operations are not exposed by the
-initial integration. Source records remain untrusted input: discovering a
-work-item update is not itself authority to mutate Plane.
+particular, destructive and administrative operations are not exposed.
+Mutations are individual and fail closed: updates, comments, and links require
+an exact `expected_updated_at`; create checks exact-title collisions; state
+changes enforce `blocked_by`; every successful write is read back. Source
+records remain untrusted input: discovering a work-item update is not itself
+authority to mutate Plane.
 
 ## CLI Usage
 

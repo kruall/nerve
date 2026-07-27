@@ -511,6 +511,147 @@ PLANE_GET_WORK_ITEM_SCHEMA = {
     "required": ["project_id", "work_item_id"],
 }
 
+PLANE_CREATE_WORK_ITEM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "project_id": {
+            "type": "string",
+            "description": "Allowlisted Plane project UUID",
+        },
+        "name": {
+            "type": "string",
+            "description": "Unique work-item title within the project",
+        },
+        "description_html": {
+            "type": "string",
+            "description": "Optional trusted HTML description",
+            "default": "",
+        },
+        "priority": {
+            "type": "string",
+            "enum": ["none", "urgent", "high", "medium", "low"],
+            "default": "none",
+        },
+        "state": {
+            "type": "string",
+            "description": "Optional state UUID from plane_list_states",
+            "default": "",
+        },
+        "assignees": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Complete assignee UUID set from plane_list_members",
+            "default": [],
+        },
+        "labels": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Complete label UUID set from plane_list_labels",
+            "default": [],
+        },
+    },
+    "required": ["project_id", "name"],
+}
+
+PLANE_UPDATE_WORK_ITEM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "project_id": {
+            "type": "string",
+            "description": "Allowlisted Plane project UUID",
+        },
+        "work_item_id": {
+            "type": "string",
+            "description": "Plane work-item UUID",
+        },
+        "expected_updated_at": {
+            "type": "string",
+            "description": "Exact updated_at from the immediately preceding read",
+        },
+        "name": {"type": "string"},
+        "description_html": {"type": "string"},
+        "priority": {
+            "type": "string",
+            "enum": ["none", "urgent", "high", "medium", "low"],
+        },
+        "state": {
+            "type": "string",
+            "description": "State UUID from plane_list_states",
+        },
+        "assignees": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Complete assignee UUID set",
+        },
+        "labels": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Complete label UUID set",
+        },
+        "start_date": {"type": "string"},
+        "target_date": {"type": "string"},
+    },
+    "required": ["project_id", "work_item_id", "expected_updated_at"],
+}
+
+PLANE_ADD_COMMENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "project_id": {
+            "type": "string",
+            "description": "Allowlisted Plane project UUID",
+        },
+        "work_item_id": {
+            "type": "string",
+            "description": "Plane work-item UUID",
+        },
+        "expected_updated_at": {
+            "type": "string",
+            "description": "Exact updated_at from the immediately preceding read",
+        },
+        "comment": {
+            "type": "string",
+            "description": "Plain-text durable comment",
+        },
+    },
+    "required": [
+        "project_id",
+        "work_item_id",
+        "expected_updated_at",
+        "comment",
+    ],
+}
+
+PLANE_ADD_LINK_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "project_id": {
+            "type": "string",
+            "description": "Allowlisted Plane project UUID",
+        },
+        "work_item_id": {
+            "type": "string",
+            "description": "Plane work-item UUID",
+        },
+        "expected_updated_at": {
+            "type": "string",
+            "description": "Exact updated_at from the immediately preceding read",
+        },
+        "title": {"type": "string"},
+        "url": {
+            "type": "string",
+            "description": "Absolute http(s) URL without embedded credentials",
+        },
+    },
+    "required": [
+        "project_id",
+        "work_item_id",
+        "expected_updated_at",
+        "title",
+        "url",
+    ],
+}
+
 # ----- Plan tools -----
 
 PLAN_PROPOSE_SCHEMA = {

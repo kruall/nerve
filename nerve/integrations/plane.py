@@ -1,8 +1,9 @@
 """Minimal, allowlisted async client for the Plane REST API.
 
 The client is intentionally narrower than Plane's full API. It provides the
-read surface shared by the Plane source and Nerve's first-party MCP tools while
-enforcing the configured workspace and project allowlist in one place.
+surface shared by the Plane source and Nerve's first-party MCP tools while
+enforcing the configured workspace and project allowlist in one place. Write
+methods issue exactly one request and never retry ambiguous mutations.
 """
 
 from __future__ import annotations
@@ -42,6 +43,8 @@ def _normalize_base_url(value: str) -> str:
         raise ValueError("plane base_url must not contain credentials")
     if parsed.query or parsed.fragment:
         raise ValueError("plane base_url must not contain query or fragment")
+    if parsed.path not in {"", "/"}:
+        raise ValueError("plane base_url must be an instance origin")
     return base_url
 
 
@@ -119,22 +122,47 @@ class PlaneClient:
             )
         return self._client
 
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> Any:
+        client = await self._http()
+        try:
+            response = await client.request(
+                method,
+                path,
+                params=params,
+                json=payload,
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            raise PlaneAPIError(
+                f"Plane {method} failed with HTTP {status}"
+            ) from exc
+        except (httpx.HTTPError, ValueError) as exc:
+            raise PlaneAPIError(
+                f"Plane {method} failed: {type(exc).__name__}"
+            ) from exc
+
     async def _get(
         self,
         path: str,
         *,
         params: dict[str, Any] | None = None,
     ) -> Any:
-        client = await self._http()
-        try:
-            response = await client.get(path, params=params)
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code
-            raise PlaneAPIError(f"Plane GET failed with HTTP {status}") from exc
-        except (httpx.HTTPError, ValueError) as exc:
-            raise PlaneAPIError(f"Plane GET failed: {type(exc).__name__}") from exc
+        return await self._request("GET", path, params=params)
+
+    async def _post(self, path: str, payload: dict[str, Any]) -> Any:
+        return await self._request("POST", path, payload=payload)
+
+    async def _patch(self, path: str, payload: dict[str, Any]) -> Any:
+        return await self._request("PATCH", path, payload=payload)
 
     async def get_project(self, project_id: str) -> dict[str, Any]:
         data = await self._get(f"{self._project_path(project_id)}/")
@@ -150,6 +178,10 @@ class PlaneClient:
         data = await self._get(f"{self._project_path(project_id)}/members/")
         return self._results(data, resource="members")
 
+    async def list_project_labels(self, project_id: str) -> list[dict[str, Any]]:
+        data = await self._get(f"{self._project_path(project_id)}/labels/")
+        return self._results(data, resource="labels")
+
     async def get_work_item(
         self,
         project_id: str,
@@ -164,6 +196,99 @@ class PlaneClient:
         )
         if not isinstance(data, dict):
             raise PlaneAPIError("Plane work-item response is not an object")
+        return data
+
+    async def create_work_item(
+        self,
+        project_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        data = await self._post(
+            f"{self._project_path(project_id)}/work-items/",
+            payload,
+        )
+        if not isinstance(data, dict):
+            raise PlaneAPIError("Plane create work-item response is not an object")
+        return data
+
+    async def update_work_item(
+        self,
+        project_id: str,
+        work_item_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        item_id = _path_segment(work_item_id, resource="work_item_id")
+        data = await self._patch(
+            f"{self._project_path(project_id)}/work-items/{item_id}/",
+            payload,
+        )
+        if not isinstance(data, dict):
+            raise PlaneAPIError("Plane update work-item response is not an object")
+        return data
+
+    async def list_work_item_comments(
+        self,
+        project_id: str,
+        work_item_id: str,
+    ) -> list[dict[str, Any]]:
+        item_id = _path_segment(work_item_id, resource="work_item_id")
+        data = await self._get(
+            f"{self._project_path(project_id)}/work-items/{item_id}/comments/"
+        )
+        return self._results(data, resource="work-item comments")
+
+    async def add_work_item_comment(
+        self,
+        project_id: str,
+        work_item_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        item_id = _path_segment(work_item_id, resource="work_item_id")
+        data = await self._post(
+            f"{self._project_path(project_id)}/work-items/{item_id}/comments/",
+            payload,
+        )
+        if not isinstance(data, dict):
+            raise PlaneAPIError("Plane create comment response is not an object")
+        return data
+
+    async def list_work_item_links(
+        self,
+        project_id: str,
+        work_item_id: str,
+    ) -> list[dict[str, Any]]:
+        item_id = _path_segment(work_item_id, resource="work_item_id")
+        data = await self._get(
+            f"{self._project_path(project_id)}/work-items/{item_id}/links/"
+        )
+        return self._results(data, resource="work-item links")
+
+    async def add_work_item_link(
+        self,
+        project_id: str,
+        work_item_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        item_id = _path_segment(work_item_id, resource="work_item_id")
+        data = await self._post(
+            f"{self._project_path(project_id)}/work-items/{item_id}/links/",
+            payload,
+        )
+        if not isinstance(data, dict):
+            raise PlaneAPIError("Plane create link response is not an object")
+        return data
+
+    async def list_work_item_relations(
+        self,
+        project_id: str,
+        work_item_id: str,
+    ) -> dict[str, Any]:
+        item_id = _path_segment(work_item_id, resource="work_item_id")
+        data = await self._get(
+            f"{self._project_path(project_id)}/work-items/{item_id}/relations/"
+        )
+        if not isinstance(data, dict):
+            raise PlaneAPIError("Plane work-item relations response is not an object")
         return data
 
     async def list_work_items_page(

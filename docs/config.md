@@ -226,7 +226,7 @@ Sources pull data from external services on a schedule. See [sources.md](sources
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `sync.plane.enabled` | bool | `false` | Enable the Plane source and first-party `plane_*` MCP reads |
+| `sync.plane.enabled` | bool | `false` | Enable the Plane source and first-party `plane_*` MCP tools |
 | `sync.plane.base_url` | URL | `""` | Plane instance origin; trailing `/api` or `/api/v1` is normalized |
 | `sync.plane.workspace_slug` | string | `""` | Exact workspace slug |
 | `sync.plane.projects` | list[UUID] | `[]` | Required project allowlist; empty is fail-closed |
@@ -238,9 +238,12 @@ Sources pull data from external services on a schedule. See [sources.md](sources
 
 Plane uses one shared, allowlisted client for the source and MCP tools. Keep
 the credential out of `config.yaml`; prefer a service environment variable or
-`config.local.yaml` with restrictive permissions. The initial MCP surface is
-read-only: `plane_list_projects`, `plane_list_states`, `plane_list_members`,
-`plane_list_work_items`, and `plane_get_work_item`.
+`config.local.yaml` with restrictive permissions. The MCP surface provides
+allowlisted inventory plus individual create/update/comment/link mutations.
+Every update/comment/link requires the exact `updated_at` from a preceding
+read; handlers perform collision checks and verify successful writes by
+read-back. No delete, archive, role, membership, credential, workspace, or
+project-admin tools are exposed.
 
 ## Memory (memU)
 

@@ -161,6 +161,8 @@ class TestDefaultRegistry:
             "list_sources", "poll_source",
             # Plane
             "plane_list_projects", "plane_get_work_item",
+            "plane_create_work_item", "plane_update_work_item",
+            "plane_add_comment", "plane_add_link",
             # notifications
             "notify", "ask_user", "react", "send_sticker", "buzz_send",
             "send_file",

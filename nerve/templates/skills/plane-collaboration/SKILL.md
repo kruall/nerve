@@ -61,15 +61,26 @@ workspace/project settings without separate explicit authorization.
 - For a handoff, record current status, evidence, exact next action, then
   replace the complete assignee set and obtain receiver acknowledgement.
 
-## Read-only tools
+## Tools
 
-The initial Nerve integration provides:
+The Nerve integration provides allowlisted inventory:
 
 - `plane_list_projects`
 - `plane_list_states`
 - `plane_list_members`
+- `plane_list_labels`
 - `plane_list_work_items`
 - `plane_get_work_item`
 
-Read-only inventory may proceed without mutation authority. A source sync or
-MCP read never implies permission to write.
+It also provides conflict-safe individual mutations:
+
+- `plane_create_work_item`
+- `plane_update_work_item`
+- `plane_add_comment`
+- `plane_add_link`
+
+Pass the exact `updated_at` from the immediately preceding item read to every
+update/comment/link call. Do not automatically retry an error: use inventory
+tools to determine whether the write happened. Read-only inventory may proceed
+without mutation authority. A source sync or MCP read never implies permission
+to write.
