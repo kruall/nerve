@@ -2591,6 +2591,7 @@ class MemUBridge:
         max_tokens: int,
         profile: str | None = None,
         output_schema: dict[str, Any] | None = None,
+        system_prompt: str | None = None,
     ) -> str:
         """Call one initialized memU chat profile on the memU event loop."""
         profile = profile or self._fast_profile_name()
@@ -2600,15 +2601,40 @@ class MemUBridge:
                 prompt,
                 output_schema=output_schema,
                 max_tokens=max_tokens,
+                system_prompt=system_prompt,
             )
         else:
             # ``model`` is used only by the uninitialized fallback below;
             # initialized profiles already carry their configured model.
             del model
-            response = await client.chat(prompt, max_tokens=max_tokens)
+            response = await client.chat(
+                prompt,
+                max_tokens=max_tokens,
+                system_prompt=system_prompt,
+            )
         if isinstance(response, tuple):
             return str(response[0])
         return str(response)
+
+    async def summarize_text(
+        self,
+        text: str,
+        *,
+        system_prompt: str,
+        max_tokens: int = 1024,
+    ) -> str:
+        """Summarize text through the configured provider-neutral fast profile."""
+        if not self.available or self._service is None:
+            raise MemoryBackendUnavailable(
+                "The provider-neutral memory LLM is unavailable"
+            )
+        return await self._submit(self._memory_profile_chat(
+            text,
+            model=self._fast_model_name(),
+            max_tokens=max_tokens,
+            profile=self._fast_profile_name(),
+            system_prompt=system_prompt,
+        ))
 
     def _memory_profile_chat_sync(
         self,

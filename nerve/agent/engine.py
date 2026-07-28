@@ -689,6 +689,22 @@ class AgentEngine:
     #  Memory bridge                                                       #
     # ------------------------------------------------------------------ #
 
+    async def summarize_text(
+        self,
+        text: str,
+        *,
+        system_prompt: str,
+        max_tokens: int = 1024,
+    ) -> str:
+        """Run a small provider-neutral summarization request."""
+        if not self._memory_bridge or not self._memory_bridge.available:
+            raise RuntimeError("Provider-neutral summarization is unavailable")
+        return await self._memory_bridge.summarize_text(
+            text,
+            system_prompt=system_prompt,
+            max_tokens=max_tokens,
+        )
+
     async def _memorize_session(
         self, session_id: str, connected_at_override: str | None = None,
     ) -> None:

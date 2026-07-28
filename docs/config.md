@@ -207,10 +207,23 @@ for each agent turn. When a Discord reply is resolved, the agent input includes
 its author and up to 500 characters of the referenced text. Replies are always
 sent to the individual thread.
 
+Allowed participant messages in project-forum threads are also kept as a
+durable, bounded thread context even when they do not invoke the agent. On the
+next mention or bot reply, Nerve prepends the earlier summary and recent
+messages to the agent input. The full tail is capped by both message count and
+character size; older messages are incrementally summarized through the
+provider-neutral memory fast model. If that model is unavailable, delivery
+continues with a bounded recent tail and the unsummarized messages remain
+stored for a later compaction attempt. Messages from authors outside
+`allowed_author_ids` are never added to this context.
+
 On first connection Nerve primes each configured target without replaying old
 history. Later reconnects use durable cursors to process messages missed while
 Nerve was offline, including active conversation threads and active or recently
-archived project-forum threads.
+archived project-forum threads. The first invoked turn in an existing
+project-forum thread separately bootstraps its bounded context from Discord
+history, so enabling this behavior does not lose messages that predate its
+database checkpoint.
 
 The session stream and final answer remain internal. An agent publishes a
 deliberate Discord-visible reply only through the session-bound `discord_send`

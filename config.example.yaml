@@ -81,7 +81,8 @@ discord:
   # replies are sent deliberately through the session-bound discord_send MCP tool.
   # A mention in an ordinary text channel starts a conversation thread. Further
   # messages in that thread do not need mentions. Project-forum threads continue
-  # to require a mention for each agent turn.
+  # to require a mention for each agent turn; allowed messages between turns are
+  # retained as bounded rolling context and added to the next invoked turn.
   enabled: false
   # bot_token_file: ~/.config/nerve/discord-bot-token
   # guild_id: 123456789012345678

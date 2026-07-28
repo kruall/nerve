@@ -221,6 +221,7 @@ nerve/db/
 ├── notifications.py   # NotificationStore mixin
 ├── sources.py         # SourceStore mixin (inbox, sync cursors, consumer cursors)
 ├── cron.py            # CronStore mixin
+├── discord_context.py # Discord project-thread rolling context
 ├── skills.py          # SkillStore mixin
 ├── mcp.py             # McpStore mixin
 └── audit.py           # AuditStore mixin
@@ -236,13 +237,14 @@ To add a new migration: create `nerve/db/migrations/v017_your_feature.py` with a
 
 ### Schema
 
-SQLite with WAL mode (schema version 16):
+SQLite with WAL mode (schema version derived from the migration head):
 - `sessions` — Session metadata with lifecycle columns (`status`, `sdk_session_id`, `connected_at`, `parent_session_id`, `forked_from_message`, `last_activity_at`, `archived_at`, `message_count`, `total_cost_usd`)
 - `messages` — Conversation messages with tool call data and ordered `blocks` JSON column (preserves interleaving of text/thinking/tool_call blocks across page reloads)
 - `session_events` — Append-only lifecycle audit log (created, started, idle, stopped, archived, error)
 - `channel_sessions` — Persistent channel-to-session mapping (survives restarts)
 - `discord_session_mirrors` — Durable Nerve-session to Discord audit-thread mapping, including live-message checkpoints
 - `discord_session_mirror_items` — Per-batch Discord message IDs and content hashes for idempotent reconciliation
+- `discord_thread_contexts` — Restart-safe rolling summaries, recent allowed-author messages, and delivery checkpoints for project-forum threads
 - `session_file_snapshots` — Pre-modification file content captured via `PreToolUse` hook for session-scoped diff computation. Keyed by `(session_id, file_path)`, first-touch only. Cleaned up on session delete.
 - `tasks` — Task index (mirrors markdown files)
 - `tasks_fts` — FTS5 full-text search index for tasks

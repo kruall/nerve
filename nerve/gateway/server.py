@@ -223,7 +223,12 @@ async def lifespan(app: FastAPI):
         try:
             from nerve.channels.discord import DiscordChannel
 
-            candidate = DiscordChannel(config, _engine.router, db)
+            candidate = DiscordChannel(
+                config,
+                _engine.router,
+                db,
+                context_summarizer=_engine.summarize_text,
+            )
             _engine.register_channel(candidate)
             await candidate.start()
         except Exception:

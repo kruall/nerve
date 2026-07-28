@@ -17,6 +17,7 @@ import aiosqlite
 
 from nerve.db.audit import AuditStore
 from nerve.db.cron import CronStore
+from nerve.db.discord_context import DiscordContextStore
 from nerve.db.discord_mirror import DiscordMirrorStore
 from nerve.db.files import FileStore
 from nerve.db.maintenance import MaintenanceStore
@@ -96,6 +97,7 @@ class Database(
     NotificationStore,
     SourceStore,
     CronStore,
+    DiscordContextStore,
     DiscordMirrorStore,
     SkillStore,
     McpStore,

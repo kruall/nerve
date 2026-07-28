@@ -68,6 +68,52 @@ class TestSchemaMigration:
             "discord_message_ids", "content_hash",
         }.issubset(item_columns)
 
+    async def test_discord_thread_context_table_exists(self, db: Database):
+        async with db.db.execute(
+            "PRAGMA table_info(discord_thread_contexts)"
+        ) as cur:
+            columns = {row[1] async for row in cur}
+        assert {
+            "thread_id", "guild_id", "forum_id", "summary",
+            "summary_through_message_id", "recent_messages",
+            "last_message_id", "last_delivered_message_id",
+        }.issubset(columns)
+
+
+@pytest.mark.asyncio
+class TestDiscordThreadContext:
+    async def test_round_trip_and_monotonic_delivery_checkpoint(
+        self, db: Database,
+    ):
+        messages = [{
+            "id": "101",
+            "author": "круалл",
+            "role": "participant",
+            "content": "важный контекст",
+        }]
+        await db.upsert_discord_thread_context(
+            guild_id=1,
+            forum_id=2,
+            thread_id=3,
+            summary="резюме",
+            summary_through_message_id=100,
+            recent_messages=messages,
+            last_message_id=101,
+        )
+
+        state = await db.get_discord_thread_context(3)
+        assert state is not None
+        assert state["summary"] == "резюме"
+        assert state["recent_messages"] == messages
+        assert state["last_delivered_message_id"] == "0"
+
+        await db.mark_discord_thread_context_delivered(3, 101)
+        await db.mark_discord_thread_context_delivered(3, 99)
+
+        state = await db.get_discord_thread_context(3)
+        assert state is not None
+        assert state["last_delivered_message_id"] == "101"
+
 
 @pytest.mark.asyncio
 class TestSessionCRUD:

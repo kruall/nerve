@@ -26,6 +26,10 @@ from nerve.channels.base import (
     InboundMessage,
     OutboundMessage,
 )
+from nerve.channels.discord_context import (
+    ContextSummarizer,
+    DiscordThreadContext,
+)
 from nerve.config import NerveConfig
 
 if TYPE_CHECKING:
@@ -40,8 +44,6 @@ _MAX_THREAD_NAME_LENGTH = 100
 _MAX_REPLY_CONTEXT_LENGTH = 500
 _RECENT_MESSAGE_IDS = 4096
 _THREAD_NAME_PREFIX = "Nerve · "
-
-
 def split_discord_message(text: str, limit: int = _MAX_MESSAGE_LENGTH) -> list[str]:
     """Split text into non-empty Discord-sized messages."""
     remaining = text.strip()
@@ -72,6 +74,8 @@ class DiscordChannel(BaseChannel):
         config: NerveConfig,
         router: ChannelRouter,
         db: Database,
+        *,
+        context_summarizer: ContextSummarizer | None = None,
     ):
         self.config = config.discord
         self.router = router
@@ -91,6 +95,16 @@ class DiscordChannel(BaseChannel):
             channel_id: project
             for project, channel_id in self.config.task_forums.items()
         }
+        self._thread_context = DiscordThreadContext(
+            db=db,
+            guild_id=self.config.guild_id,
+            project_forum_ids=set(self._project_forums),
+            allowed_author_ids=self._allowed_authors,
+            bot_user_id=lambda: self._bot_user_id,
+            message_text=self._message_text,
+            safe_label=self._safe_label,
+            summarizer=context_summarizer,
+        )
 
     @property
     def name(self) -> str:
@@ -362,11 +376,26 @@ class DiscordChannel(BaseChannel):
                 self._recent_message_ids.popitem(last=False)
 
         try:
-            if self._accepts(message):
+            accepted = self._accepts(message)
+            context_block = ""
+            context_message = self._thread_context.accepts_message(message)
+            if context_message:
+                if accepted:
+                    context_block = await self._thread_context.prepare(message)
+                else:
+                    await self._thread_context.record(message)
+
+            if accepted:
                 target = message.channel
                 if int(message.channel.id) in self._text_channels:
                     target = await self._ensure_conversation_thread(message)
-                await self._dispatch(message, target=target)
+                await self._dispatch(
+                    message,
+                    target=target,
+                    context_block=context_block,
+                )
+                if context_message:
+                    await self._thread_context.mark_delivered(message)
                 if int(target.id) != int(message.channel.id):
                     await self._advance_cursor(
                         int(target.id),
@@ -636,6 +665,7 @@ class DiscordChannel(BaseChannel):
         message: discord.Message,
         *,
         target: Any | None = None,
+        context_block: str = "",
     ) -> None:
         guild_id = int(message.guild.id)
         target = target or message.channel
@@ -667,8 +697,9 @@ class DiscordChannel(BaseChannel):
         )
         text = self._message_text(message)
         reply_context = self._reply_context(message)
-        if reply_context:
-            text = f"{reply_context}\n\n{text}"
+        text = "\n\n".join(
+            part for part in (context_block, reply_context, text) if part
+        )
         title = (
             f"Discord · {project} · {channel_name or channel_id}"
             if project
