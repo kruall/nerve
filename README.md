@@ -123,6 +123,17 @@ Powered by `python-telegram-bot` v21+.
 - `/reply` command for free-text answers
 - Configurable DM policy (`open` or `pairing`)
 
+### 🐾 Discord Bot
+
+Powered by `discord.py` with a fail-closed guild, channel/forum, and author
+allowlist.
+
+- Direct-mention activation to prevent bot loops
+- One persistent Nerve session per text channel or forum thread
+- Separate forum channels can represent separate task projects
+- Durable cursors replay messages missed during a Nerve restart
+- Outbound-only Gateway connection; no public Nerve endpoint required
+
 ### ⏰ Cron Jobs
 
 Scheduled AI sessions via APScheduler. Three session modes:

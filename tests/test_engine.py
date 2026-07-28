@@ -28,13 +28,13 @@ async def test_engine_steer_persists_accepted_input():
 
     with patch("nerve.agent.engine.broadcaster.broadcast", broadcast):
         accepted = await engine.steer(
-            "s1", "new context", channel="buzz",
+            "s1", "new context", channel="manual",
         )
 
     assert accepted is True
     client.steer.assert_awaited_once_with(TurnInput(text="new context"))
     engine._store_user_message.assert_awaited_once_with(
-        "s1", "new context", "buzz", images=None, image_refs=None,
+        "s1", "new context", "manual", images=None, image_refs=None,
     )
     broadcast.assert_awaited_once_with("s1", {
         "type": "user_message",
@@ -50,7 +50,7 @@ async def test_engine_steer_rejects_session_without_active_client():
     engine.sessions = MagicMock()
     engine.sessions.is_running.return_value = False
 
-    assert await engine.steer("s1", "later", channel="buzz") is False
+    assert await engine.steer("s1", "later", channel="manual") is False
     engine.sessions.get_client.assert_not_called()
 
 

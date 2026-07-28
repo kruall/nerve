@@ -1213,8 +1213,8 @@ class TestConsumerCursors:
         assert len(messages) == 0
 
     async def test_rename_source_preserves_messages_cursors_and_history(self, db: Database):
-        old_source = "buzz:71560b67-4553-5a3a-a0c5-1dc813fb52b6"
-        new_source = "buzz:acme:general"
+        old_source = "channel:71560b67-4553-5a3a-a0c5-1dc813fb52b6"
+        new_source = "channel:acme:general"
         rowids = await self._insert_messages(db, old_source, 2)
         await db.set_sync_cursor(old_source, "42")
         await db.set_consumer_cursor("inbox", old_source, rowids[0])

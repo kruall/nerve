@@ -175,6 +175,53 @@ An unauthorized `/start` gets a reply with the sender's numeric ID and
 pairing instructions (rate-limited); all other messages from unauthorized
 users are ignored.
 
+## Discord
+
+Discord is disabled by default and connects through an outbound Gateway
+WebSocket. It does not require an inbound listener or a public Nerve endpoint.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `discord.enabled` | bool | `false` | Enable the Discord adapter |
+| `discord.bot_token` | string | - | Bot token; keep only in `config.local.yaml` |
+| `discord.bot_token_file` | path | - | Preferred mode-0600 file containing one bot token |
+| `discord.guild_id` | int | `0` | The only server the Nerve instance accepts |
+| `discord.channel_ids` | list[int] | `[]` | Allowed ordinary text channels |
+| `discord.task_forums` | map[string, int] | `{}` | Project name to Discord forum-channel ID |
+| `discord.allowed_author_ids` | list[int] | `[]` | Human and peer-bot IDs allowed to invoke Nerve |
+| `discord.require_mention` | bool | `true` | Require a direct mention of this bot |
+
+The adapter is fail-closed: enabling it without a guild, at least one channel
+or project forum, an author allowlist, and a token fails startup. A forum post
+is a thread, so the forum's parent ID belongs in `task_forums`; replies are
+sent to the individual thread. On first connection Nerve primes each configured
+target without replaying old history. Later reconnects use durable cursors to
+process messages missed while Nerve was offline, including active and recently
+archived project-forum threads.
+
+The session stream and final answer remain internal. An agent publishes a
+deliberate Discord-visible reply only through the session-bound `discord_send`
+MCP tool. The tool cannot select a destination: it sends only to the text
+channel or forum thread that drove the active Discord turn.
+
+Enable the **Message Content Intent** for the bot in Discord's Developer
+Portal. Grant only the channel permissions required by the deployment:
+View Channels, Read Message History, Send Messages, Send Messages in Threads,
+and (for later task-tag management) Manage Threads. Administrator is not
+required.
+
+```yaml
+discord:
+  enabled: true
+  bot_token_file: ~/.config/nerve/discord-bot-token
+  guild_id: 123456789012345678
+  channel_ids: [123456789012345679]
+  task_forums:
+    YDB: 123456789012345680
+  allowed_author_ids: [123456789012345681]
+  require_mention: true
+```
+
 ## Quiet Hours
 
 | Key | Type | Default | Description |

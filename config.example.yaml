@@ -73,28 +73,21 @@ telegram:
   # allowed_users: [123456789]   # numeric Telegram user IDs (or pair instead)
   stream_mode: partial           # "partial" (edit messages) or "full" (wait for complete)
 
-# Native Buzz channel. Keep the private key in config.local.yaml or in a
-# chmod 600 file outside this repository. Empty allowed_pubkeys means no one
-# can invoke Nerve; that is intentional.
-buzz:
-  # Agent session output is never forwarded automatically. Buzz-visible
-  # replies are sent deliberately through the session-bound buzz_send MCP tool.
+# Native Discord channel. Keep the bot token in config.local.yaml or,
+# preferably, in a chmod-600 file outside this repository. The adapter accepts
+# messages only from the configured guild, channels/project forums, and authors.
+discord:
+  # Agent session output is never forwarded automatically. Discord-visible
+  # replies are sent deliberately through the session-bound discord_send MCP tool.
   enabled: false
-  relay_url: http://10.77.77.8:3001
-  # Human-readable community label used in source names. When omitted, the
-  # relay host is used (for example, buzz:relay.example:general).
-  # community_name: my-team
-  binary_path: /home/nerve/buzz/target/release/buzz
-  # private_key_file: ~/.config/buzz-nerve/identity
-  # bot_pubkey: "<Doggy public key>"
-  # Public/group channels to poll. Direct-message conversations are discovered
-  # automatically; leave this empty for a DM-only bot.
-  # channel_ids: ["<Buzz channel UUID>"]
-  # allowed_pubkeys: ["<your Buzz public key>"]
+  # bot_token_file: ~/.config/nerve/discord-bot-token
+  # guild_id: 123456789012345678
+  # channel_ids: [123456789012345679]
+  # Each project uses a separate Discord forum channel.
+  # task_forums:
+  #   YDB: 123456789012345680
+  # allowed_author_ids: [123456789012345681]
   require_mention: true
-  poll_interval_seconds: 3
-  direct_messages: false         # Poll DMs whose members are all allowed.
-  direct_message_refresh_seconds: 30
 
 # Quiet hours (local timezone)
 quiet_start: "02:00"

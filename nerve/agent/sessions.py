@@ -28,18 +28,6 @@ DEFAULT_MAX_SESSIONS = 500
 # Sources treated as interactive for the opt-in short idle auto-close. Cron and
 # source-runner sessions are excluded so their context continuity is preserved.
 INTERACTIVE_SOURCES = ["web", "telegram", "discord", "slack", "whatsapp"]
-# Before Buzz supplied session titles, the generic first-message placeholder
-# was built from Nerve's injected Buzz context wrapper. These exact prefixes
-# identify that legacy machine-generated title without treating arbitrary
-# user or manually assigned titles as replaceable.
-LEGACY_BUZZ_TITLE_PREFIXES = (
-    "[Это сообщение из общего канала Buzz;",
-    "[Это сообщение из личного чата Buzz;",
-    "[This message is from a shared Buzz channel;",
-    "[This message is from a private Buzz chat;",
-)
-
-
 class SessionStatus(StrEnum):
     CREATED = "created"
     ACTIVE = "active"
@@ -274,7 +262,7 @@ class SessionManager:
         Reuses the channel's mapped session when it is currently active
         (a turn is in flight) or when its last activity falls within the
         sticky period. A supplied title backfills only the default ID title
-        or a recognized legacy Buzz placeholder on a reused session.
+        on a reused session.
         Otherwise creates a fresh titled session and remaps.
         """
         lock = self._channel_locks.setdefault(channel_key, asyncio.Lock())
@@ -307,11 +295,7 @@ class SessionManager:
         current = session.get("title")
         if current == session_id:
             return True
-        return (
-            session.get("source") == "buzz"
-            and isinstance(current, str)
-            and current.startswith(LEGACY_BUZZ_TITLE_PREFIXES)
-        )
+        return False
 
     def _is_within_sticky_period(self, session: dict) -> bool:
         """Check whether a session is still the channel's owner.

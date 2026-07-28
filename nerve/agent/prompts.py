@@ -157,15 +157,16 @@ You have access to the following custom tools:
 {_format_tool_list(excluded_tools)}"""
     parts.append(context)
 
-    if source == "buzz":
+    if source == "discord":
         parts.append(
-            """# Buzz Output Contract
+            """# Discord Output Contract
 
-The session stream and final answer are internal and are NOT delivered to Buzz.
-To send any user-facing message, call `mcp__nerve__buzz_send`; it is the only
-public output path for this Buzz session. Send only deliberate messages meant
-for everyone in the current Buzz chat. Never publish private reasoning, tool
-traces, credentials, or other internal session content."""
+The session stream and final answer are internal and are NOT delivered to
+Discord. To send any user-facing message, call
+`mcp__nerve__discord_send`; it is the only public output path for this Discord
+session. Send only deliberate messages meant for everyone in the current
+Discord chat. Never publish private reasoning, tool traces, credentials, or
+other internal session content."""
         )
 
     # Skills summary (progressive disclosure level 1: name + description only)

@@ -130,61 +130,36 @@ class TestChannelMapping:
     async def test_reused_session_backfills_default_id_title(
         self, sm: SessionManager, db: Database,
     ):
-        sid = await sm.get_active_session("buzz:general", source="buzz")
+        sid = await sm.get_active_session("manual:general", source="manual")
 
         reused = await sm.get_active_session(
-            "buzz:general",
-            source="buzz",
-            title="Buzz · General",
+            "manual:general",
+            source="manual",
+            title="Manual · General",
         )
 
         assert reused == sid
         session = await db.get_session(sid)
-        assert session["title"] == "Buzz · General"
+        assert session["title"] == "Manual · General"
 
     async def test_reused_session_preserves_meaningful_title(
         self, sm: SessionManager, db: Database,
     ):
         sid = await sm.get_active_session(
-            "buzz:general",
-            source="buzz",
+            "manual:general",
+            source="manual",
             title="Custom name",
         )
 
         reused = await sm.get_active_session(
-            "buzz:general",
-            source="buzz",
-            title="Buzz · General",
+            "manual:general",
+            source="manual",
+            title="Manual · General",
         )
 
         assert reused == sid
         session = await db.get_session(sid)
         assert session["title"] == "Custom name"
-
-    @pytest.mark.parametrize("legacy_title", [
-        "[Это сообщение из общего канала Buzz;...",
-        "[Это сообщение из личного чата Buzz;...",
-        "[This message is from a shared Buzz channel;...",
-        "[This message is from a private Buzz chat;...",
-    ])
-    async def test_reused_buzz_session_backfills_legacy_placeholder(
-        self,
-        sm: SessionManager,
-        db: Database,
-        legacy_title: str,
-    ):
-        sid = await sm.get_active_session("buzz:general", source="buzz")
-        await db.update_session_title(sid, legacy_title)
-
-        reused = await sm.get_active_session(
-            "buzz:general",
-            source="buzz",
-            title="Buzz · General",
-        )
-
-        assert reused == sid
-        session = await db.get_session(sid)
-        assert session["title"] == "Buzz · General"
 
     async def test_simultaneous_first_messages_share_one_session(
         self, sm: SessionManager,
@@ -200,8 +175,8 @@ class TestChannelMapping:
 
         sm._create_session = slow_create
         first, second = await asyncio.gather(
-            sm.get_active_session("buzz:shared", source="buzz"),
-            sm.get_active_session("buzz:shared", source="buzz"),
+            sm.get_active_session("manual:shared", source="manual"),
+            sm.get_active_session("manual:shared", source="manual"),
         )
 
         assert first == second

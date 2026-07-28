@@ -11,6 +11,7 @@ import pytest
 import yaml
 
 from nerve.config import (
+    DiscordConfig,
     NerveConfig,
     TelegramConfig,
     append_telegram_allowed_user,
@@ -234,6 +235,43 @@ class TestTelegramDmPolicy:
     def test_allowed_users_coerced_to_int(self):
         cfg = TelegramConfig.from_dict({"allowed_users": ["123", 456]})
         assert cfg.allowed_users == [123, 456]
+
+
+class TestDiscordConfig:
+    def test_defaults_are_fail_closed(self):
+        cfg = DiscordConfig.from_dict({})
+        assert cfg.enabled is False
+        assert cfg.guild_id == 0
+        assert cfg.channel_ids == []
+        assert cfg.task_forums == {}
+        assert cfg.allowed_author_ids == []
+        assert cfg.require_mention is True
+
+    def test_ids_are_coerced_to_int_and_projects_are_preserved(self):
+        cfg = DiscordConfig.from_dict({
+            "guild_id": "100",
+            "channel_ids": ["200"],
+            "task_forums": {"YDB": "300"},
+            "allowed_author_ids": ["400", 500],
+        })
+        assert cfg.guild_id == 100
+        assert cfg.channel_ids == [200]
+        assert cfg.task_forums == {"YDB": 300}
+        assert cfg.allowed_author_ids == [400, 500]
+
+    def test_known_keys_pass_validation(self):
+        merged = {
+            "discord": {
+                "enabled": True,
+                "bot_token_file": "~/.config/nerve/discord-token",
+                "guild_id": 100,
+                "channel_ids": [200],
+                "task_forums": {"YDB": 300},
+                "allowed_author_ids": [400],
+                "require_mention": True,
+            },
+        }
+        assert validate_config_keys(merged) == []
 
 
 class TestAppendTelegramAllowedUser:

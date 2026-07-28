@@ -80,9 +80,10 @@ Abstract communication layer with three components:
 
 Implementations:
 - **Telegram** — python-telegram-bot v21+ with partial message streaming (edit-in-place, 1.5s rate limit), inline keyboard buttons for notification questions, `/reply` command for free-text answers
+- **Discord** — discord.py Gateway client with guild/channel/author allowlists, direct-mention activation, durable restart catch-up, one session per text channel or forum thread, and deliberate output through the session-bound `discord_send` MCP tool
 - **Web** — Passive channel using gateway WebSocket
 
-Adding a new channel (Discord, WhatsApp, etc.) requires implementing ~5 methods and zero session/routing logic.
+Adding a new channel (WhatsApp, etc.) requires implementing ~5 methods and zero session/routing logic.
 
 ### Notifications (`nerve/notifications/`)
 Async notification system for agent→user communication:
@@ -264,7 +265,7 @@ memU SQLite (`~/.nerve/memu.sqlite`):
 5. Recover orphan sessions (active in DB but no live client → idle or stopped)
 6. Start cron service (load system.yaml + jobs.yaml, register source runners, catch up missed jobs)
 7. Start gateway (FastAPI + uvicorn, WebSocket, static files)
-8. Start Telegram bot if configured
+8. Start Telegram and Discord channels when configured
 9. **Worker onboarding** — if worker mode and TASK.md lacks `## Mission`, run the setup agent session
 
 ## Security

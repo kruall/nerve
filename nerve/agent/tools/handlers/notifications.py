@@ -1,7 +1,7 @@
 """Notification and channel-output tool handlers.
 
 The channel-bound tools need ``ctx.session_id`` so the router can deliver
-to the correct chat (web, Telegram, Buzz). The session_id arrives via
+to the correct chat (web, Telegram, or Discord). The session_id arrives via
 :class:`ToolContext`; delivery remains bound to the active session.
 
 ``propose_action`` files an ``approval``-kind notification whose answer
@@ -25,7 +25,7 @@ from pathlib import Path
 from nerve.agent.tools.registry import ToolContext, ToolResult, ToolSpec
 from nerve.agent.tools.schemas import (
     ASK_USER_SCHEMA,
-    BUZZ_SEND_SCHEMA,
+    DISCORD_SEND_SCHEMA,
     NOTIFICATION_SILENCE_SCHEMA,
     NOTIFY_SCHEMA,
     PROPOSE_ACTION_SCHEMA,
@@ -391,20 +391,21 @@ async def send_sticker_handler(ctx: ToolContext, args: dict) -> ToolResult:
         return ToolResult.text(f"Failed to send sticker: {e}")
 
 
-async def buzz_send_handler(ctx: ToolContext, args: dict) -> ToolResult:
-    """Publish an intentional message to the Buzz chat driving this turn."""
+async def discord_send_handler(ctx: ToolContext, args: dict) -> ToolResult:
+    """Publish an intentional message to the Discord chat driving this turn."""
     raw_message = args.get("message")
     if not isinstance(raw_message, str) or not raw_message.strip():
         return ToolResult.text(
-            "buzz_send: message is required.",
+            "discord_send: message is required.",
             is_error=True,
         )
     message = raw_message.strip()
     if ctx.engine is None:
-        return ToolResult.text("buzz_send: engine not available.", is_error=True)
-    if ctx.engine.get_active_channel(ctx.session_id) != "buzz":
+        return ToolResult.text("discord_send: engine not available.", is_error=True)
+    if ctx.engine.get_active_channel(ctx.session_id) != "discord":
         return ToolResult.text(
-            "buzz_send is available only while a Buzz message is driving this session.",
+            "discord_send is available only while a Discord message is driving "
+            "this session.",
             is_error=True,
         )
 
@@ -412,21 +413,21 @@ async def buzz_send_handler(ctx: ToolContext, args: dict) -> ToolResult:
         delivered = await ctx.engine.router.send_text(
             ctx.session_id,
             message,
-            channel="buzz",
+            channel="discord",
         )
     except Exception as exc:
-        logger.error("buzz_send dispatch failed: %s", exc)
+        logger.error("discord_send dispatch failed: %s", exc)
         return ToolResult.text(
-            f"Failed to send Buzz message: {exc}",
+            f"Failed to send Discord message: {exc}",
             is_error=True,
         )
 
     if not delivered:
         return ToolResult.text(
-            "Cannot send Buzz message: current chat context is unavailable.",
+            "Cannot send Discord message: current chat context is unavailable.",
             is_error=True,
         )
-    return ToolResult.text("Buzz message sent.")
+    return ToolResult.text("Discord message sent.")
 
 
 async def send_file_handler(ctx: ToolContext, args: dict) -> ToolResult:
@@ -555,16 +556,16 @@ SEND_STICKER_SPEC = ToolSpec(
     handler=send_sticker_handler,
 )
 
-BUZZ_SEND_SPEC = ToolSpec(
-    name="buzz_send",
+DISCORD_SEND_SPEC = ToolSpec(
+    name="discord_send",
     description=(
-        "Send an intentional user-facing message to the current Buzz chat. "
-        "Buzz session output is not published automatically, so use this for "
-        "every message that Buzz participants should see. The destination is "
-        "bound to the Buzz message driving the current turn and cannot be chosen."
+        "Send an intentional user-facing message to the current Discord chat. "
+        "Discord session output is not published automatically, so use this for "
+        "every message that Discord participants should see. The destination is "
+        "bound to the Discord message driving the current turn and cannot be chosen."
     ),
-    input_schema=BUZZ_SEND_SCHEMA,
-    handler=buzz_send_handler,
+    input_schema=DISCORD_SEND_SCHEMA,
+    handler=discord_send_handler,
 )
 
 SEND_FILE_SPEC = ToolSpec(
@@ -586,6 +587,6 @@ NOTIFICATION_SPECS = [
     NOTIFICATION_SILENCE_SPEC,
     REACT_SPEC,
     SEND_STICKER_SPEC,
-    BUZZ_SEND_SPEC,
+    DISCORD_SEND_SPEC,
     SEND_FILE_SPEC,
 ]

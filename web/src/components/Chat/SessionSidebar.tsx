@@ -174,10 +174,11 @@ export function SessionSidebar({ sessions, activeSession, agentStatus, onCreate,
 
   const { conversations, systemSessions } = useMemo(() => {
     // External = Codex/Claude-Code/Cursor satellite sessions (MCP server +
-    // Codex thread sync). Live alongside web/telegram/Buzz conversations.
+    // Codex thread sync). Historical Buzz conversations remain visible.
     const convos = sessions.filter(s => (
       s.source === 'web'
       || s.source === 'telegram'
+      || s.source === 'discord'
       || s.source === 'buzz'
       || s.source === 'api'
       || s.source === 'external'

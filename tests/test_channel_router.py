@@ -20,7 +20,7 @@ class _StubChannel(BaseChannel):
 
     @property
     def name(self) -> str:
-        return "buzz"
+        return "manual"
 
     @property
     def capabilities(self) -> ChannelCapability:
@@ -51,17 +51,17 @@ async def test_implicit_session_resolution_forwards_channel_title():
     router.register(_StubChannel(automatic_responses=False))
 
     await router.handle_message(InboundMessage(
-        channel_name="buzz",
-        channel_key="buzz:channel-1",
+        channel_name="manual",
+        channel_key="manual:channel-1",
         sender_id="channel-1",
         text="hello",
-        session_title="Buzz · General",
+        session_title="Manual · General",
     ))
 
     engine.sessions.get_active_session.assert_awaited_once_with(
-        "buzz:channel-1",
-        source="buzz",
-        title="Buzz · General",
+        "manual:channel-1",
+        source="manual",
+        title="Manual · General",
     )
 
 
@@ -72,13 +72,13 @@ async def test_explicit_text_delivery_uses_matching_session_context():
     channel = _StubChannel()
     router.register(channel)
     router._message_context["shared"] = {
-        "channel_name": "buzz",
+        "channel_name": "manual",
         "target": "channel-1",
         "message_id": "event-1",
     }
 
     assert await router.send_text(
-        "shared", "deliberate reply", channel="buzz",
+        "shared", "deliberate reply", channel="manual",
     ) is True
     assert len(channel.sent) == 1
     assert channel.sent[0].target == "channel-1"
@@ -99,10 +99,10 @@ async def test_explicit_text_delivery_refuses_stale_or_mismatched_context():
     }
 
     assert await router.send_text(
-        "shared", "must not leak", channel="buzz",
+        "shared", "must not leak", channel="manual",
     ) is False
     assert await router.send_text(
-        "missing", "must not leak", channel="buzz",
+        "missing", "must not leak", channel="manual",
     ) is False
     assert channel.sent == []
 
@@ -120,8 +120,8 @@ async def test_run_without_automatic_responses_does_not_register_adapter():
     response = await router._run_single(
         channel,
         InboundMessage(
-            channel_name="buzz",
-            channel_key="buzz:channel-1",
+            channel_name="manual",
+            channel_key="manual:channel-1",
             sender_id="channel-1",
             text="hello",
         ),
@@ -147,8 +147,8 @@ async def test_busy_session_steers_opted_in_message():
     router._session_locks["shared"] = lock
     try:
         result = await router.handle_message(InboundMessage(
-            channel_name="buzz",
-            channel_key="buzz:channel-1",
+            channel_name="manual",
+            channel_key="manual:channel-1",
             sender_id="channel-1",
             text="second participant",
             steer_if_busy=True,
@@ -160,7 +160,7 @@ async def test_busy_session_steers_opted_in_message():
     engine.steer.assert_awaited_once_with(
         session_id="shared",
         user_message="second participant",
-        channel="buzz",
+        channel="manual",
         images=None,
     )
     assert "shared" not in router._pending_batches
@@ -179,8 +179,8 @@ async def test_failed_steer_falls_back_to_pending_queue():
     await lock.acquire()
     router._session_locks["shared"] = lock
     task = asyncio.create_task(router.handle_message(InboundMessage(
-        channel_name="buzz",
-        channel_key="buzz:channel-1",
+        channel_name="manual",
+        channel_key="manual:channel-1",
         sender_id="channel-1",
         text="queue this safely",
         steer_if_busy=True,
