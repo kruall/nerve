@@ -94,10 +94,25 @@ async def test_mirror_creates_one_thread_and_incrementally_appends(db):
     await db.create_session(
         "session-1",
         title="Investigate",
-        source="cron",
+        source="web",
         backend="codex",
     )
     await db.log_session_event("session-1", "created", {"source": "cron"})
+    await db.log_session_event(
+        "session-1",
+        "codex_rate_limits",
+        {"rateLimits": {"primary": {"usedPercent": 25}}},
+    )
+    await db.log_session_event(
+        "session-1",
+        "external_tool_call",
+        {
+            "tool": "notify",
+            "args": "{\"body\":\"private details\"}",
+            "result": "Notification sent",
+            "is_error": False,
+        },
+    )
     await db.add_message("session-1", "user", "check the system")
 
     client = _Client()
@@ -120,6 +135,11 @@ async def test_mirror_creates_one_thread_and_incrementally_appends(db):
     assert any("Nerve session mirror" in value for value in contents)
     assert any("event · created" in value for value in contents)
     assert any("check the system" in value for value in contents)
+    assert all("codex_rate_limits" not in value for value in contents)
+    assert all("usedPercent" not in value for value in contents)
+    assert any("`[notify]`" in value for value in contents)
+    assert all("private details" not in value for value in contents)
+    assert all("Notification sent" not in value for value in contents)
     assert any(
         "event · created" in value and "check the system" in value
         for value in contents
@@ -145,7 +165,9 @@ async def test_mirror_creates_one_thread_and_incrementally_appends(db):
 
     assert len(forum.created) == 1
     contents = _contents(thread)
-    assert any("tool · `Read`" in value for value in contents)
+    assert any("`[Read]`" in value for value in contents)
+    assert all("README.md" not in value for value in contents)
+    assert all("contents" not in value for value in contents)
     assert any("done" in value for value in contents)
     assert all("private reasoning" not in value for value in contents)
     assert all("hidden" not in value for value in contents)
@@ -215,7 +237,7 @@ async def test_mirror_edits_live_turn_then_replaces_it_with_persisted_message(db
 
     thread = forum.created[0][2].thread
     assert any("live turn" in value for value in _contents(thread))
-    assert any("tool · `Bash`" in value for value in _contents(thread))
+    assert any("`[Bash]`" in value for value in _contents(thread))
 
     await db.add_message("session-2", "assistant", "finished")
     await mirror._on_stream_event("session-2", {"type": "done"})
@@ -356,3 +378,69 @@ async def test_reconcile_skips_old_unmapped_sessions_but_keeps_mapped_ones(db):
         "old-session",
         "new-session",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("session_id", "source"),
+    [
+        ("cron:task-planner:run-1", "cron"),
+        ("internal-run", "system"),
+    ],
+)
+async def test_mirror_skips_system_sessions(db, session_id, source):
+    await db.create_session(session_id, title="System run", source=source)
+    await db.add_message(session_id, "user", "internal trigger")
+
+    client = _Client()
+    forum = _Forum(client)
+    client.channels[forum.id] = forum
+    mirror = DiscordSessionMirror(
+        client=client,
+        db=db,
+        guild_id=100,
+        forum_id=forum.id,
+        stream=StreamBroadcaster(),
+    )
+    mirror._forum = forum
+
+    await mirror._sync_session(session_id)
+
+    assert forum.created == []
+    assert await db.get_discord_session_mirror(session_id) is None
+    eligible = await db.list_discord_mirror_sessions(
+        active_after="2000-01-01T00:00:00+00:00",
+    )
+    assert session_id not in {session["id"] for session in eligible}
+
+
+def test_tool_calls_are_compact_and_grouped_like_telegram():
+    mirror = DiscordSessionMirror(
+        client=_Client(),
+        db=AsyncMock(),
+        guild_id=100,
+        forum_id=200,
+        stream=StreamBroadcaster(),
+    )
+    body = mirror._render_message_body({
+        "content": "",
+        "details": [
+            {
+                "type": "tool_call",
+                "tool": "Read",
+                "input": {"path": "secret.txt"},
+                "result": "sensitive output",
+            },
+            {
+                "type": "tool_call",
+                "tool": "Read",
+                "input": {"path": "other.txt"},
+                "result": "more output",
+            },
+            {"type": "text", "content": "Done"},
+        ],
+    })
+
+    assert body == "`[Read] x2`\n\nDone"
+    assert "secret.txt" not in body
+    assert "sensitive output" not in body

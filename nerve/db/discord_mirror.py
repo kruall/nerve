@@ -194,7 +194,9 @@ class DiscordMirrorStore:
             f"""SELECT s.*
                 FROM sessions s
                 LEFT JOIN discord_session_mirrors m ON m.session_id = s.id
-                WHERE {where}
+                WHERE ({where})
+                  AND s.id NOT LIKE 'cron:%'
+                  AND lower(COALESCE(s.source, '')) NOT IN ('cron', 'system')
                 ORDER BY s.created_at ASC, s.id ASC
                 LIMIT ? OFFSET ?""",
             params,
@@ -213,7 +215,9 @@ class DiscordMirrorStore:
                SELECT 'event' AS item_kind, id AS item_id,
                       event_type AS item_type, NULL AS content,
                       NULL AS thinking, details, created_at
-               FROM session_events WHERE session_id = ?
+               FROM session_events
+               WHERE session_id = ?
+                 AND event_type != 'codex_rate_limits'
                ORDER BY created_at ASC, item_kind ASC, item_id ASC""",
             (session_id, session_id),
         ) as cursor:

@@ -70,6 +70,13 @@ def _timestamp(value: Any) -> str:
     return text[:19] + (" UTC" if text else "")
 
 
+def _compact_tool_label(tool: Any, count: int = 1) -> str:
+    label = f"[{str(tool or 'tool')}]"
+    if count > 1:
+        label += f" x{count}"
+    return f"`{label}`"
+
+
 class DiscordSessionMirror:
     """Durable projector from Nerve sessions to a Discord forum."""
 
@@ -365,6 +372,13 @@ class DiscordSessionMirror:
     async def _sync_session(self, session_id: str) -> None:
         session = await self.db.get_session(session_id)
         if session is None:
+            self._live_blocks.pop(session_id, None)
+            self._live_hashes.pop(session_id, None)
+            self._terminal_sessions.discard(session_id)
+            return
+        if self._is_system_session(session):
+            # System/cron runs stay in Nerve's own UI and logs. Do not create
+            # or update Discord audit threads for them.
             self._live_blocks.pop(session_id, None)
             self._live_hashes.pop(session_id, None)
             self._terminal_sessions.discard(session_id)
@@ -667,10 +681,17 @@ class DiscordSessionMirror:
     def _render_item(self, item: dict[str, Any]) -> str:
         created = _timestamp(item.get("created_at"))
         if item["item_kind"] == "event":
-            text = f"**event · {item['item_type']}**"
+            item_type = str(item.get("item_type") or "event")
+            details = item.get("details")
+            if item_type == "external_tool_call" and isinstance(details, dict):
+                text = _compact_tool_label(details.get("tool"))
+                if created:
+                    text += f" · `{created}`"
+                return text
+
+            text = f"**event · {item_type}**"
             if created:
                 text += f" · `{created}`"
-            details = item.get("details")
             if details:
                 text += "\n```json\n" + _json(details) + "\n```"
             return text
@@ -690,20 +711,37 @@ class DiscordSessionMirror:
 
         rendered: list[str] = []
         has_text_block = False
+        tool_name: str | None = None
+        tool_count = 0
+        tool_index = -1
         for block in blocks:
             if not isinstance(block, dict):
+                tool_name = None
                 rendered.append(_json(block))
                 continue
             block_type = str(block.get("type") or "")
             if block_type == "thinking":
                 continue
             if block_type == "text":
+                tool_name = None
                 has_text_block = True
                 rendered.append(str(block.get("content") or ""))
                 continue
             if block_type == "tool_call":
-                rendered.append(self._render_tool_block(block))
+                current_tool = str(block.get("tool") or "tool")
+                if current_tool == tool_name:
+                    tool_count += 1
+                    rendered[tool_index] = _compact_tool_label(
+                        current_tool,
+                        tool_count,
+                    )
+                else:
+                    tool_name = current_tool
+                    tool_count = 1
+                    tool_index = len(rendered)
+                    rendered.append(_compact_tool_label(current_tool))
                 continue
+            tool_name = None
             rendered.append(
                 f"**{block_type or 'block'}**\n```json\n{_json(block)}\n```"
             )
@@ -712,30 +750,33 @@ class DiscordSessionMirror:
         return "\n\n".join(part for part in rendered if part)
 
     def _render_tool_block(self, block: dict[str, Any]) -> str:
-        tool = str(block.get("tool") or "tool")
-        parts = [f"**tool · `{tool}`**"]
-        if block.get("input") is not None:
-            parts.append("input:\n```json\n" + _json(block["input"]) + "\n```")
-        if block.get("result") is not None:
-            label = "error" if block.get("is_error") else "result"
-            result = block["result"]
-            rendered = result if isinstance(result, str) else _json(result)
-            parts.append(f"{label}:\n```\n{rendered}\n```")
-        if block.get("workflow") is not None:
-            parts.append(
-                "workflow:\n```json\n" + _json(block["workflow"]) + "\n```"
-            )
-        return "\n".join(parts)
+        return _compact_tool_label(block.get("tool"))
 
     def _render_live(self, blocks: list[dict[str, Any]]) -> str:
         rendered = ["**live turn** · updating"]
+        tool_name: str | None = None
+        tool_count = 0
+        tool_index = -1
         for block in blocks:
             kind = block.get("kind")
             if kind == "assistant":
+                tool_name = None
                 rendered.append(str(block.get("content") or ""))
             elif kind == "tool":
-                rendered.append(self._render_tool_block(block))
+                current_tool = str(block.get("tool") or "tool")
+                if current_tool == tool_name:
+                    tool_count += 1
+                    rendered[tool_index] = _compact_tool_label(
+                        current_tool,
+                        tool_count,
+                    )
+                else:
+                    tool_name = current_tool
+                    tool_count = 1
+                    tool_index = len(rendered)
+                    rendered.append(_compact_tool_label(current_tool))
             else:
+                tool_name = None
                 label = str(block.get("label") or "system")
                 content = str(block.get("content") or "")
                 rendered.append(
@@ -752,3 +793,9 @@ class DiscordSessionMirror:
             "in full.*\n\n"
             + tail
         )
+
+    @staticmethod
+    def _is_system_session(session: dict[str, Any]) -> bool:
+        session_id = str(session.get("id") or "")
+        source = str(session.get("source") or "").lower()
+        return session_id.startswith("cron:") or source in {"cron", "system"}
