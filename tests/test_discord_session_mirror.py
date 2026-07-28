@@ -282,6 +282,36 @@ def test_compacts_assistant_wakeup_and_adjacent_timeline_items():
 
 
 @pytest.mark.asyncio
+async def test_persisted_timeline_orders_mixed_timestamp_formats(db):
+    await db.create_session("session-timeline", title="Timeline")
+    event_id = await db.log_session_event(
+        "session-timeline",
+        "created",
+        {"source": "discord"},
+    )
+    await db._write(
+        "UPDATE session_events SET created_at = ? WHERE id = ?",
+        ("2026-07-28T12:04:00.500000+00:00", event_id),
+    )
+    await db.add_message(
+        "session-timeline",
+        "user",
+        "later message",
+        created_at="2026-07-28 12:05:00",
+    )
+
+    items = await db.get_discord_mirror_content_items("session-timeline")
+
+    assert [
+        (item["item_kind"], item["item_type"], item["created_at"])
+        for item in items
+    ] == [
+        ("event", "created", "2026-07-28T12:04:00.500000+00:00"),
+        ("message", "user", "2026-07-28 12:05:00"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_batch_window_coalesces_updates_and_terminal_flushes(db):
     mirror = DiscordSessionMirror(
         client=_Client(),

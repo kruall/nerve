@@ -212,20 +212,26 @@ class DiscordMirrorStore:
         MCP audit events include the same calls and are intentionally omitted.
         """
         async with self.db.execute(
-            """SELECT 'message' AS item_kind, id AS item_id, role AS item_type,
-                      content, thinking, blocks AS details, created_at
-               FROM messages WHERE session_id = ?
-               UNION ALL
-               SELECT 'event' AS item_kind, id AS item_id,
-                      event_type AS item_type, NULL AS content,
-                      NULL AS thinking, details, created_at
-               FROM session_events
-               WHERE session_id = ?
-                 AND event_type NOT IN (
-                     'codex_rate_limits',
-                     'external_tool_call'
-                 )
-               ORDER BY created_at ASC, item_kind ASC, item_id ASC""",
+            """SELECT *
+               FROM (
+                   SELECT 'message' AS item_kind, id AS item_id,
+                          role AS item_type, content, thinking,
+                          blocks AS details, created_at
+                   FROM messages WHERE session_id = ?
+                   UNION ALL
+                   SELECT 'event' AS item_kind, id AS item_id,
+                          event_type AS item_type, NULL AS content,
+                          NULL AS thinking, details, created_at
+                   FROM session_events
+                   WHERE session_id = ?
+                     AND event_type NOT IN (
+                         'codex_rate_limits',
+                         'external_tool_call'
+                     )
+               )
+               ORDER BY julianday(created_at) ASC,
+                        item_kind ASC,
+                        item_id ASC""",
             (session_id, session_id),
         ) as cursor:
             rows = [dict(row) async for row in cursor]
