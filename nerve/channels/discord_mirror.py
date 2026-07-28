@@ -568,6 +568,25 @@ class DiscordSessionMirror:
     async def _delete_messages(
         self, thread: Any, message_ids: list[int],
     ) -> None:
+        bulk_delete = getattr(thread, "delete_messages", None)
+        if bulk_delete is not None and len(message_ids) > 1:
+            try:
+                for start in range(0, len(message_ids), 100):
+                    await bulk_delete(
+                        [
+                            discord.Object(id=message_id)
+                            for message_id
+                            in message_ids[start:start + 100]
+                        ],
+                        reason="Nerve session mirror batch reconciliation",
+                    )
+                return
+            except discord.HTTPException:
+                logger.info(
+                    "Discord bulk delete failed; falling back to individual "
+                    "message deletion",
+                    exc_info=True,
+                )
         for message_id in message_ids:
             try:
                 message = await thread.fetch_message(message_id)

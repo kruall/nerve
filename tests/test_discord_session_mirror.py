@@ -30,6 +30,7 @@ class _Thread:
     def __init__(self, thread_id: int, starter_id: int, starter: str):
         self.id = thread_id
         self._next_id = starter_id + 1
+        self.bulk_delete_calls = 0
         self.messages = {
             starter_id: _Message(starter_id, starter),
         }
@@ -42,6 +43,11 @@ class _Thread:
         self.messages[message.id] = message
         self._next_id += 1
         return message
+
+    async def delete_messages(self, messages, **kwargs):
+        self.bulk_delete_calls += 1
+        for message in messages:
+            self.messages[message.id].deleted = True
 
 
 class _Forum:
@@ -252,12 +258,38 @@ async def test_mirror_replaces_legacy_per_item_checkpoints_with_batches(db):
     await mirror._sync_session("session-legacy")
 
     assert thread.messages[old_message_id].deleted is True
+    assert thread.bulk_delete_calls == 0
     checkpoints = await db.get_discord_mirror_items("session-legacy")
     assert set(checkpoints) == {("batch", 1)}
     assert any(
         "event · started" in value and "one batched update" in value
         for value in _contents(thread)
     )
+
+
+@pytest.mark.asyncio
+async def test_mirror_bulk_deletes_large_checkpoint_sets(db):
+    client = _Client()
+    thread = _Thread(1000, 2000, "starter")
+    for index in range(250):
+        await thread.send(f"legacy {index}")
+    message_ids = [
+        message_id
+        for message_id in thread.messages
+        if message_id != 2000
+    ]
+    mirror = DiscordSessionMirror(
+        client=client,
+        db=db,
+        guild_id=100,
+        forum_id=200,
+        stream=StreamBroadcaster(),
+    )
+
+    await mirror._delete_messages(thread, message_ids)
+
+    assert thread.bulk_delete_calls == 3
+    assert all(thread.messages[value].deleted for value in message_ids)
 
 
 @pytest.mark.asyncio
