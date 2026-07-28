@@ -105,6 +105,11 @@ async def test_mirror_creates_one_thread_and_incrementally_appends(db):
     )
     await db.log_session_event(
         "session-1",
+        "error",
+        {"error": "Agent error: provider stopped"},
+    )
+    await db.log_session_event(
+        "session-1",
         "codex_rate_limits",
         {"rateLimits": {"primary": {"usedPercent": 25}}},
     )
@@ -138,8 +143,13 @@ async def test_mirror_creates_one_thread_and_incrementally_appends(db):
     thread = forum.created[0][2].thread
     contents = _contents(thread)
     assert any("Nerve session mirror" in value for value in contents)
-    assert any("event · created" in value for value in contents)
+    assert any("`[created]`" in value for value in contents)
     assert any("`[started]`" in value for value in contents)
+    assert any(
+        "`[error]`" in value and "Agent error: provider stopped" in value
+        for value in contents
+    )
+    assert all('"error":' not in value for value in contents)
     assert all("sdk_session_id" not in value for value in contents)
     assert any("check the system" in value for value in contents)
     assert all("codex_rate_limits" not in value for value in contents)
@@ -148,9 +158,10 @@ async def test_mirror_creates_one_thread_and_incrementally_appends(db):
     assert all("private details" not in value for value in contents)
     assert all("Notification sent" not in value for value in contents)
     assert any(
-        "event · created" in value and "check the system" in value
+        "`[created]`" in value and "check the system" in value
         for value in contents
     )
+    assert all("———" not in value for value in contents)
 
     await db.add_message(
         "session-1",
@@ -182,6 +193,66 @@ async def test_mirror_creates_one_thread_and_incrementally_appends(db):
     message_count = len(contents)
     await mirror._sync_session("session-1")
     assert len(_contents(thread)) == message_count
+
+
+def test_compacts_assistant_wakeup_and_adjacent_timeline_items():
+    mirror = DiscordSessionMirror(
+        client=_Client(),
+        db=AsyncMock(),
+        guild_id=100,
+        forum_id=200,
+        stream=StreamBroadcaster(),
+    )
+    created_at = "2026-07-28T15:57:09+00:00"
+    assistant = mirror._render_item({
+        "item_kind": "message",
+        "item_type": "assistant",
+        "created_at": created_at,
+        "content": "",
+        "details": [{"type": "wakeup"}],
+    })
+
+    assert assistant == (
+        "`[assistant]` · `2026-07-28 15:57:09 UTC`\n"
+        "`[wakeup]`"
+    )
+
+    batches = mirror._render_persisted_batches([
+        {
+            "item_kind": "event",
+            "item_type": "created",
+            "created_at": created_at,
+            "details": {"source": "discord"},
+        },
+        {
+            "item_kind": "event",
+            "item_type": "started",
+            "created_at": created_at,
+            "details": {"sdk_session_id": "private"},
+        },
+        {
+            "item_kind": "event",
+            "item_type": "external_tool_call",
+            "created_at": created_at,
+            "details": {"tool": "read_source"},
+        },
+        {
+            "item_kind": "event",
+            "item_type": "error",
+            "created_at": created_at,
+            "details": {"error": "Agent error: provider stopped"},
+        },
+    ])
+
+    assert len(batches) == 1
+    assert "———" not in batches[0]
+    assert batches[0].splitlines() == [
+        "`[created]` · `2026-07-28 15:57:09 UTC`",
+        "`[started]` · `2026-07-28 15:57:09 UTC`",
+        "`[read_source]` · `2026-07-28 15:57:09 UTC`",
+        "`[error]` · `2026-07-28 15:57:09 UTC`",
+        "Agent error: provider stopped",
+    ]
 
 
 @pytest.mark.asyncio
@@ -453,7 +524,7 @@ def test_tool_calls_are_compact_and_grouped_like_telegram():
     assert "sensitive output" not in body
 
 
-def test_live_started_and_idle_events_are_compact():
+def test_live_lifecycle_events_are_compact():
     mirror = DiscordSessionMirror(
         client=_Client(),
         db=AsyncMock(),
@@ -473,8 +544,19 @@ def test_live_started_and_idle_events_are_compact():
             "label": "idle",
             "content": '{"duration_ms":1234}',
         },
+        {
+            "kind": "system",
+            "label": "error",
+            "content": "Agent error: provider stopped",
+        },
     ])
 
-    assert rendered == "**live turn** · updating\n\n`[started]`\n\n`[idle]`"
+    assert rendered == (
+        "**live turn** · updating\n\n"
+        "`[started]`\n\n"
+        "`[idle]`\n\n"
+        "`[error]`\nAgent error: provider stopped"
+    )
     assert "sdk_session_id" not in rendered
     assert "duration_ms" not in rendered
+    assert '"error":' not in rendered

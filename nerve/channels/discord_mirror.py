@@ -30,8 +30,9 @@ _DEFAULT_BATCH_WINDOW_SECONDS = 60.0
 _RECONCILE_PAGE_SIZE = 100
 _MAX_LIVE_BLOCK_CHARS = 20_000
 _MAX_LIVE_RENDER_CHARS = 12_000
-_BATCH_SEPARATOR = "\n\n———\n\n"
-_COMPACT_EVENT_TYPES = {"idle", "started"}
+_BATCH_SEPARATOR = "\n\n"
+_COMPACT_BATCH_SEPARATOR = "\n"
+_COMPACT_EVENT_TYPES = {"created", "idle", "started"}
 
 
 def _split_message(text: str, limit: int = _MAX_DISCORD_MESSAGE) -> list[str]:
@@ -190,15 +191,14 @@ class DiscordSessionMirror:
             )
         elif event_type == "error":
             self._terminal_sessions.add(session_id)
-            payload = {
-                key: value
-                for key, value in event.items()
-                if key not in {"type", "session_id"}
-            }
             self._append_live_block(session_id, {
                 "kind": "system",
                 "label": "error",
-                "content": _json(payload) if payload else "",
+                "content": str(
+                    event.get("error")
+                    or event.get("message")
+                    or ""
+                ),
             })
         elif event_type == "token":
             blocks = self._live_blocks.setdefault(session_id, [])
@@ -634,12 +634,19 @@ class DiscordSessionMirror:
         batches: list[str] = []
         current = ""
         batch_started_at: float | None = None
+        previous_compact = False
 
         for item in items:
             item_started_at = self._item_timestamp(item)
+            item_compact = self._is_compact_item(item)
             for piece in _split_message(self._render_item(item)):
+                separator = (
+                    _COMPACT_BATCH_SEPARATOR
+                    if previous_compact and item_compact
+                    else _BATCH_SEPARATOR
+                )
                 candidate = (
-                    current + _BATCH_SEPARATOR + piece
+                    current + separator + piece
                     if current
                     else piece
                 )
@@ -661,10 +668,21 @@ class DiscordSessionMirror:
                     current = candidate
                     if batch_started_at is None:
                         batch_started_at = item_started_at
+                previous_compact = item_compact
 
         if current:
             batches.append(current)
         return batches
+
+    @staticmethod
+    def _is_compact_item(item: dict[str, Any]) -> bool:
+        if item.get("item_kind") != "event":
+            return False
+        item_type = str(item.get("item_type") or "event")
+        return (
+            item_type in _COMPACT_EVENT_TYPES
+            or item_type in {"error", "external_tool_call"}
+        )
 
     @staticmethod
     def _item_timestamp(item: dict[str, Any]) -> float | None:
@@ -689,6 +707,15 @@ class DiscordSessionMirror:
                 if created:
                     text += f" · `{created}`"
                 return text
+            if item_type == "error":
+                text = "`[error]`"
+                if created:
+                    text += f" · `{created}`"
+                if isinstance(details, dict):
+                    error = str(details.get("error") or "").strip()
+                    if error:
+                        text += f"\n{error}"
+                return text
             if item_type == "external_tool_call" and isinstance(details, dict):
                 text = _compact_tool_label(details.get("tool"))
                 if created:
@@ -703,7 +730,7 @@ class DiscordSessionMirror:
             return text
 
         role = str(item.get("item_type") or "message")
-        text = f"**{role}**"
+        text = f"`[{role}]`" if role == "assistant" else f"**{role}**"
         if created:
             text += f" · `{created}`"
         body = self._render_message_body(item)
@@ -747,6 +774,10 @@ class DiscordSessionMirror:
                     tool_index = len(rendered)
                     rendered.append(_compact_tool_label(current_tool))
                 continue
+            if block_type == "wakeup":
+                tool_name = None
+                rendered.append("`[wakeup]`")
+                continue
             tool_name = None
             rendered.append(
                 f"**{block_type or 'block'}**\n```json\n{_json(block)}\n```"
@@ -787,6 +818,10 @@ class DiscordSessionMirror:
                 content = str(block.get("content") or "")
                 if label in _COMPACT_EVENT_TYPES:
                     rendered.append(f"`[{label}]`")
+                elif label == "error":
+                    rendered.append(
+                        "`[error]`" + (f"\n{content}" if content else "")
+                    )
                 else:
                     rendered.append(
                         f"**system · `{label}`**"
