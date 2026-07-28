@@ -32,7 +32,7 @@ _MAX_LIVE_BLOCK_CHARS = 20_000
 _MAX_LIVE_RENDER_CHARS = 12_000
 _BATCH_SEPARATOR = "\n\n"
 _COMPACT_BATCH_SEPARATOR = "\n"
-_COMPACT_EVENT_TYPES = {"created", "idle", "started", "stopped"}
+_COMPACT_EVENT_TYPES = {"created", "idle", "started", "stopped", "wakeup"}
 
 
 def _split_message(text: str, limit: int = _MAX_DISCORD_MESSAGE) -> list[str]:
@@ -182,6 +182,13 @@ class DiscordSessionMirror:
         if event_type == "thinking":
             # Nerve may store model reasoning for its own UI, but the audit
             # mirror intentionally exposes only user-visible output.
+            return
+        if (
+            event_type == "backend_status"
+            and event.get("subtype") == "codex_rate_limits"
+        ):
+            # Rate-limit telemetry is high-volume backend metadata, not
+            # user-visible session content. Persisted copies are filtered too.
             return
         terminal = event_type in {"done", "stopped", "error"}
         if event_type == "done":
@@ -725,7 +732,7 @@ class DiscordSessionMirror:
                     text += f" · `{created}`"
                 return text
 
-            text = f"**event · {item_type}**"
+            text = f"`[{item_type}]`"
             if created:
                 text += f" · `{created}`"
             if details:
@@ -793,7 +800,7 @@ class DiscordSessionMirror:
         return _compact_tool_label(block.get("tool"))
 
     def _render_live(self, blocks: list[dict[str, Any]]) -> str:
-        rendered = ["**live turn** · updating"]
+        rendered: list[str] = []
         tool_name: str | None = None
         tool_count = 0
         tool_index = -1
@@ -827,7 +834,7 @@ class DiscordSessionMirror:
                     )
                 else:
                     rendered.append(
-                        f"**system · `{label}`**"
+                        f"`[{label}]`"
                         + (f"\n```\n{content}\n```" if content else "")
                     )
         text = "\n\n".join(part for part in rendered if part)
@@ -835,7 +842,6 @@ class DiscordSessionMirror:
             return text
         tail = text[-_MAX_LIVE_RENDER_CHARS:]
         return (
-            "**live turn** · updating\n\n"
             "*Older live output is omitted; the completed turn is mirrored "
             "in full.*\n\n"
             + tail

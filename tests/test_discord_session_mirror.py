@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -231,6 +231,17 @@ def test_compacts_assistant_wakeup_and_adjacent_timeline_items():
         "`[assistant]` · `2026-07-28 15:57:09 UTC`\n"
         "`[wakeup]`"
     )
+    custom_event = mirror._render_item({
+        "item_kind": "event",
+        "item_type": "custom",
+        "created_at": created_at,
+        "details": {"value": 1},
+    })
+    assert custom_event == (
+        "`[custom]` · `2026-07-28 15:57:09 UTC`\n"
+        "```json\n{\n  \"value\": 1\n}\n```"
+    )
+    assert "event ·" not in custom_event
 
     batches = mirror._render_persisted_batches([
         {
@@ -329,7 +340,9 @@ async def test_mirror_edits_live_turn_then_replaces_it_with_persisted_message(db
     await mirror._sync_session("session-2")
 
     thread = forum.created[0][2].thread
-    assert any("live turn" in value for value in _contents(thread))
+    assert any("working" in value for value in _contents(thread))
+    assert all("live turn" not in value for value in _contents(thread))
+    assert all("`[live]`" not in value for value in _contents(thread))
     assert any("`[Bash]`" in value for value in _contents(thread))
 
     await db.add_message("session-2", "assistant", "finished")
@@ -338,7 +351,7 @@ async def test_mirror_edits_live_turn_then_replaces_it_with_persisted_message(db
 
     contents = _contents(thread)
     assert any("finished" in value for value in contents)
-    assert all("live turn" not in value for value in contents)
+    assert all("`[live]`" not in value for value in contents)
 
 
 @pytest.mark.asyncio
@@ -564,14 +577,46 @@ def test_live_lifecycle_events_are_compact():
             "label": "error",
             "content": "Agent error: provider stopped",
         },
+        {
+            "kind": "system",
+            "label": "wakeup",
+            "content": "",
+        },
+        {
+            "kind": "system",
+            "label": "custom",
+            "content": '{"value":1}',
+        },
     ])
 
     assert rendered == (
-        "**live turn** · updating\n\n"
         "`[started]`\n\n"
         "`[idle]`\n\n"
-        "`[error]`\nAgent error: provider stopped"
+        "`[error]`\nAgent error: provider stopped\n\n"
+        "`[wakeup]`\n\n"
+        "`[custom]`\n```\n{\"value\":1}\n```"
     )
     assert "sdk_session_id" not in rendered
     assert "duration_ms" not in rendered
     assert '"error":' not in rendered
+
+
+@pytest.mark.asyncio
+async def test_live_rate_limit_backend_status_is_ignored():
+    mirror = DiscordSessionMirror(
+        client=_Client(),
+        db=AsyncMock(),
+        guild_id=100,
+        forum_id=200,
+        stream=StreamBroadcaster(),
+    )
+    mirror._mark_dirty = MagicMock()
+
+    await mirror._on_stream_event("session-1", {
+        "type": "backend_status",
+        "subtype": "codex_rate_limits",
+        "data": {"rateLimits": {"primary": {"usedPercent": 25}}},
+    })
+
+    assert "session-1" not in mirror._live_blocks
+    mirror._mark_dirty.assert_not_called()
