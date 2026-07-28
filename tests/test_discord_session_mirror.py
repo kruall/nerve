@@ -123,6 +123,19 @@ async def test_mirror_creates_one_thread_and_incrementally_appends(db):
             "is_error": False,
         },
     )
+    await db.add_message(
+        "session-1",
+        "assistant",
+        "",
+        blocks=[
+            {
+                "type": "tool_call",
+                "tool": "mcp__nerve__notify",
+                "input": {"body": "private details"},
+                "result": "Notification sent",
+            },
+        ],
+    )
     await db.add_message("session-1", "user", "check the system")
 
     client = _Client()
@@ -155,6 +168,8 @@ async def test_mirror_creates_one_thread_and_incrementally_appends(db):
     assert all("codex_rate_limits" not in value for value in contents)
     assert all("usedPercent" not in value for value in contents)
     assert any("`[notify]`" in value for value in contents)
+    assert sum(value.count("`[notify]`") for value in contents) == 1
+    assert all("mcp__nerve__notify" not in value for value in contents)
     assert all("private details" not in value for value in contents)
     assert all("Notification sent" not in value for value in contents)
     assert any(
@@ -232,9 +247,9 @@ def test_compacts_assistant_wakeup_and_adjacent_timeline_items():
         },
         {
             "item_kind": "event",
-            "item_type": "external_tool_call",
+            "item_type": "stopped",
             "created_at": created_at,
-            "details": {"tool": "read_source"},
+            "details": {"resumable": True},
         },
         {
             "item_kind": "event",
@@ -249,7 +264,7 @@ def test_compacts_assistant_wakeup_and_adjacent_timeline_items():
     assert batches[0].splitlines() == [
         "`[created]` · `2026-07-28 15:57:09 UTC`",
         "`[started]` · `2026-07-28 15:57:09 UTC`",
-        "`[read_source]` · `2026-07-28 15:57:09 UTC`",
+        "`[stopped]` · `2026-07-28 15:57:09 UTC`",
         "`[error]` · `2026-07-28 15:57:09 UTC`",
         "Agent error: provider stopped",
     ]

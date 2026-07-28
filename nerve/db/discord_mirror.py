@@ -206,7 +206,11 @@ class DiscordMirrorStore:
     async def get_discord_mirror_content_items(
         self, session_id: str,
     ) -> list[dict[str, Any]]:
-        """Return messages and lifecycle events in one stable timeline."""
+        """Return messages and non-duplicated lifecycle events in one timeline.
+
+        Tool calls already live in assistant message blocks. Their separate
+        MCP audit events include the same calls and are intentionally omitted.
+        """
         async with self.db.execute(
             """SELECT 'message' AS item_kind, id AS item_id, role AS item_type,
                       content, thinking, blocks AS details, created_at
@@ -217,7 +221,10 @@ class DiscordMirrorStore:
                       NULL AS thinking, details, created_at
                FROM session_events
                WHERE session_id = ?
-                 AND event_type != 'codex_rate_limits'
+                 AND event_type NOT IN (
+                     'codex_rate_limits',
+                     'external_tool_call'
+                 )
                ORDER BY created_at ASC, item_kind ASC, item_id ASC""",
             (session_id, session_id),
         ) as cursor:

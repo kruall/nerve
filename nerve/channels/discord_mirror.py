@@ -32,7 +32,7 @@ _MAX_LIVE_BLOCK_CHARS = 20_000
 _MAX_LIVE_RENDER_CHARS = 12_000
 _BATCH_SEPARATOR = "\n\n"
 _COMPACT_BATCH_SEPARATOR = "\n"
-_COMPACT_EVENT_TYPES = {"created", "idle", "started"}
+_COMPACT_EVENT_TYPES = {"created", "idle", "started", "stopped"}
 
 
 def _split_message(text: str, limit: int = _MAX_DISCORD_MESSAGE) -> list[str]:
@@ -73,7 +73,10 @@ def _timestamp(value: Any) -> str:
 
 
 def _compact_tool_label(tool: Any, count: int = 1) -> str:
-    label = f"[{str(tool or 'tool')}]"
+    label = str(tool or "tool")
+    if label.startswith("mcp__nerve__"):
+        label = label.removeprefix("mcp__nerve__")
+    label = f"[{label}]"
     if count > 1:
         label += f" x{count}"
     return f"`{label}`"
