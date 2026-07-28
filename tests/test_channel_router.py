@@ -40,6 +40,17 @@ class _StubChannel(BaseChannel):
         self.sent.append(message)
 
 
+def test_unregister_removes_failed_channel():
+    engine = MagicMock()
+    router = ChannelRouter(engine)
+    channel = _StubChannel()
+    router.register(channel)
+
+    assert router.unregister("manual") is channel
+    assert router.get_channel("manual") is None
+    assert router.unregister("manual") is None
+
+
 @pytest.mark.asyncio
 async def test_implicit_session_resolution_forwards_channel_title():
     engine = MagicMock()

@@ -671,6 +671,10 @@ class AgentEngine:
         """Register a channel with the router."""
         self.router.register(channel)
 
+    def unregister_channel(self, name: str) -> Any | None:
+        """Unregister a channel that failed to start."""
+        return self.router.unregister(name)
+
     # ------------------------------------------------------------------ #
     #  File snapshot for diff tracking                                     #
     # ------------------------------------------------------------------ #
@@ -2244,6 +2248,14 @@ class AgentEngine:
             return False
         if not accepted:
             return False
+
+        # A steer accepted from an interactive channel becomes the current
+        # driver for the rest of this turn. This matters when a Discord
+        # message steers a session that was originally resumed by a wakeup:
+        # explicit output tools must be allowed to answer the new Discord
+        # input, not remain bound to the background trigger.
+        if channel is not None:
+            self._active_channel[session_id] = channel
 
         try:
             await self._store_user_message(

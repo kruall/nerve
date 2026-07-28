@@ -71,6 +71,13 @@ class ChannelRouter:
             channel.name, channel.capabilities,
         )
 
+    def unregister(self, name: str) -> BaseChannel | None:
+        """Remove and return a channel that failed or was stopped."""
+        channel = self._channels.pop(name, None)
+        if channel is not None:
+            logger.info("Unregistered channel: %s", name)
+        return channel
+
     def get_channel(self, name: str) -> BaseChannel | None:
         """Get a registered channel by name."""
         return self._channels.get(name)

@@ -219,11 +219,29 @@ async def lifespan(app: FastAPI):
     # fail-closed around one guild, explicit channels/forums, and authors.
     discord_channel = None
     if config.discord.enabled:
-        from nerve.channels.discord import DiscordChannel
-        discord_channel = DiscordChannel(config, _engine.router, db)
-        _engine.register_channel(discord_channel)
-        await discord_channel.start()
-        logger.info("Discord channel started")
+        candidate = None
+        try:
+            from nerve.channels.discord import DiscordChannel
+
+            candidate = DiscordChannel(config, _engine.router, db)
+            _engine.register_channel(candidate)
+            await candidate.start()
+        except Exception:
+            logger.exception(
+                "Discord channel failed to start; continuing without Discord"
+            )
+            if candidate is not None:
+                try:
+                    await candidate.stop()
+                except Exception:
+                    logger.warning(
+                        "Discord cleanup after failed startup raised",
+                        exc_info=True,
+                    )
+                _engine.unregister_channel(candidate.name)
+        else:
+            discord_channel = candidate
+            logger.info("Discord channel started")
 
     # Start cron service
     global _cron_service

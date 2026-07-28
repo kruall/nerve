@@ -24,6 +24,7 @@ async def test_engine_steer_persists_accepted_input():
     client.steer = AsyncMock(return_value=True)
     engine.sessions.get_client.return_value = client
     engine._store_user_message = AsyncMock()
+    engine._active_channel = {"s1": "wakeup"}
     broadcast = AsyncMock()
 
     with patch("nerve.agent.engine.broadcaster.broadcast", broadcast):
@@ -32,6 +33,7 @@ async def test_engine_steer_persists_accepted_input():
         )
 
     assert accepted is True
+    assert engine.get_active_channel("s1") == "manual"
     client.steer.assert_awaited_once_with(TurnInput(text="new context"))
     engine._store_user_message.assert_awaited_once_with(
         "s1", "new context", "manual", images=None, image_refs=None,

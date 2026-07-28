@@ -14,6 +14,7 @@ import asyncio
 import logging
 import re
 import stat
+from collections import OrderedDict
 from typing import Any, TYPE_CHECKING
 
 import discord
@@ -36,6 +37,7 @@ logger = logging.getLogger(__name__)
 _CONNECT_TIMEOUT_SECONDS = 30.0
 _MAX_MESSAGE_LENGTH = 2000
 _MAX_THREAD_NAME_LENGTH = 100
+_RECENT_MESSAGE_IDS = 4096
 _THREAD_NAME_PREFIX = "Nerve · "
 
 
@@ -75,9 +77,12 @@ class DiscordChannel(BaseChannel):
         self.db = db
         self._client: discord.Client | None = None
         self._client_task: asyncio.Task[None] | None = None
+        self._post_ready_task: asyncio.Task[None] | None = None
         self._session_mirror: Any | None = None
         self._ready = asyncio.Event()
         self._startup_error: Exception | None = None
+        self._ingest_guard = asyncio.Lock()
+        self._recent_message_ids: OrderedDict[int, None] = OrderedDict()
         self._bot_user_id = 0
         self._allowed_authors = set(self.config.allowed_author_ids)
         self._text_channels = set(self.config.channel_ids)
@@ -234,9 +239,24 @@ class DiscordChannel(BaseChannel):
     async def stop(self) -> None:
         client = self._client
         task = self._client_task
-        mirror = self._session_mirror
+        post_ready_task = self._post_ready_task
         self._client = None
         self._client_task = None
+        self._post_ready_task = None
+
+        if post_ready_task is not None:
+            post_ready_task.cancel()
+            try:
+                await post_ready_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.debug(
+                    "Discord post-ready task stopped with an error",
+                    exc_info=True,
+                )
+
+        mirror = self._session_mirror
         self._session_mirror = None
 
         if mirror is not None:
@@ -275,8 +295,23 @@ class DiscordChannel(BaseChannel):
                     "Discord bot cannot access configured channel(s): "
                     + ", ".join(str(value) for value in sorted(missing))
                 )
-            await self._sync_backlog(guild)
-            if self.config.audit_forum_id and self._session_mirror is None:
+            if (
+                self._post_ready_task is None
+                or self._post_ready_task.done()
+            ):
+                self._post_ready_task = asyncio.create_task(
+                    self._run_post_ready(guild),
+                    name="discord-post-ready",
+                )
+        except Exception as exc:
+            self._startup_error = exc
+        finally:
+            self._ready.set()
+
+    async def _run_post_ready(self, guild: discord.Guild) -> None:
+        """Start optional integrations and catch up without blocking startup."""
+        if self.config.audit_forum_id and self._session_mirror is None:
+            try:
                 from nerve.channels.discord_mirror import DiscordSessionMirror
 
                 self._session_mirror = DiscordSessionMirror(
@@ -289,10 +324,23 @@ class DiscordChannel(BaseChannel):
                     ),
                 )
                 await self._session_mirror.start()
-        except Exception as exc:
-            self._startup_error = exc
-        finally:
-            self._ready.set()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._session_mirror = None
+                logger.exception(
+                    "Discord session mirror failed to start; "
+                    "continuing without the audit mirror"
+                )
+
+        try:
+            await self._sync_backlog(guild)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Discord backlog catch-up failed; live messages remain available"
+            )
 
     async def _on_message(self, message: discord.Message) -> None:
         try:
@@ -304,20 +352,35 @@ class DiscordChannel(BaseChannel):
             )
 
     async def _ingest(self, message: discord.Message) -> None:
-        if self._accepts(message):
-            target = message.channel
-            if int(message.channel.id) in self._text_channels:
-                target = await self._ensure_conversation_thread(message)
-            await self._dispatch(message, target=target)
-            if int(target.id) != int(message.channel.id):
-                await self._advance_cursor(
-                    int(target.id),
-                    int(message.id),
-                )
-        await self._advance_cursor(
-            int(message.channel.id),
-            int(message.id),
-        )
+        message_id = int(message.id)
+        async with self._ingest_guard:
+            if message_id in self._recent_message_ids:
+                return
+            self._recent_message_ids[message_id] = None
+            if len(self._recent_message_ids) > _RECENT_MESSAGE_IDS:
+                self._recent_message_ids.popitem(last=False)
+
+        try:
+            if self._accepts(message):
+                target = message.channel
+                if int(message.channel.id) in self._text_channels:
+                    target = await self._ensure_conversation_thread(message)
+                await self._dispatch(message, target=target)
+                if int(target.id) != int(message.channel.id):
+                    await self._advance_cursor(
+                        int(target.id),
+                        message_id,
+                    )
+            await self._advance_cursor(
+                int(message.channel.id),
+                message_id,
+            )
+        except BaseException:
+            # A failed dispatch must remain retryable on reconnect. Concurrent
+            # gateway/backlog delivery is still collapsed while it is running.
+            async with self._ingest_guard:
+                self._recent_message_ids.pop(message_id, None)
+            raise
 
     async def _sync_backlog(self, guild: discord.Guild) -> None:
         """Prime new targets and replay messages missed after a restart."""

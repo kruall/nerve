@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -226,6 +227,31 @@ async def test_conversation_thread_follow_up_dispatches_without_mention():
 
 
 @pytest.mark.asyncio
+async def test_concurrent_gateway_and_backlog_delivery_is_dispatched_once():
+    channel = _channel()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_dispatch(_inbound):
+        entered.set()
+        await release.wait()
+
+    channel.router.handle_message = AsyncMock(side_effect=slow_dispatch)
+    message = _message(
+        channel_id=YDB_THREAD,
+        parent_id=YDB_FORUM,
+    )
+
+    first = asyncio.create_task(channel._ingest(message))
+    await entered.wait()
+    await channel._ingest(message)
+    release.set()
+    await first
+
+    channel.router.handle_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_dispatch_maps_forum_thread_to_project():
     channel = _channel()
     channel.router.handle_message = AsyncMock()
@@ -419,7 +445,39 @@ async def test_ready_validates_bot_guild_and_configured_channels():
     assert channel._ready.is_set()
     assert channel._startup_error is None
     assert channel._bot_user_id == DOGGY
+    assert channel._post_ready_task is not None
+    await channel._post_ready_task
     channel._sync_backlog.assert_awaited_once_with(guild)
+
+
+@pytest.mark.asyncio
+async def test_slow_backlog_does_not_delay_discord_readiness():
+    channel = _channel()
+    backlog_release = asyncio.Event()
+
+    async def slow_backlog(_guild):
+        await backlog_release.wait()
+
+    channel._sync_backlog = AsyncMock(side_effect=slow_backlog)
+    guild = MagicMock()
+    guild.get_channel.side_effect = lambda channel_id: (
+        SimpleNamespace(id=channel_id)
+        if channel_id in {TEXT_CHANNEL, YDB_FORUM}
+        else None
+    )
+    channel._client = MagicMock()
+    channel._client.user = SimpleNamespace(id=DOGGY)
+    channel._client.get_guild.return_value = guild
+
+    await channel._on_ready()
+
+    assert channel._ready.is_set()
+    assert channel._startup_error is None
+    assert channel._post_ready_task is not None
+    assert not channel._post_ready_task.done()
+
+    backlog_release.set()
+    await channel._post_ready_task
 
 
 @pytest.mark.asyncio
@@ -464,6 +522,8 @@ async def test_ready_starts_audit_mirror_only_once_across_reconnects():
         mirror_cls.return_value.start = AsyncMock()
         await channel._on_ready()
         await channel._on_ready()
+        assert channel._post_ready_task is not None
+        await channel._post_ready_task
 
     mirror_cls.assert_called_once()
     assert mirror_cls.call_args.kwargs["batch_window_seconds"] == 45
