@@ -162,6 +162,8 @@ class TestDefaultRegistry:
             # notifications
             "notify", "ask_user", "react", "send_sticker", "discord_send",
             "send_file",
+            # discord project forums
+            "discord_forum_tags", "discord_forum_tag_action",
             # mcp admin
             "nerve_api", "mcp_reload",
             # hoa

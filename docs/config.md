@@ -214,8 +214,9 @@ conversation or project-forum thread that drove the active Discord turn.
 Enable the **Message Content Intent** for the bot in Discord's Developer
 Portal. Grant only the channel permissions required by the deployment:
 View Channels, Read Message History, Send Messages, Create Public Threads,
-Send Messages in Threads, and (for later task-tag management) Manage Threads.
-Administrator is not required.
+and Send Messages in Threads. Forum-tag assignment additionally requires
+Manage Threads; creating, updating, or deleting the forum's available tags
+requires Manage Channels. Administrator is not required.
 
 ```yaml
 discord:
@@ -228,6 +229,30 @@ discord:
   allowed_author_ids: [123456789012345681]
   require_mention: true
 ```
+
+### Discord forum-tag tools
+
+Two agent tools expose tag management only for forums listed in
+`discord.task_forums`:
+
+- `discord_forum_tags` reads a project's available tags and, when a thread ID
+  is supplied or inferred from the active Discord turn, its applied tags.
+- `discord_forum_tag_action` prepares create/update/delete and
+  add/remove/replace operations. It never mutates Discord during the tool
+  call. Instead it creates a high-priority approval notification with
+  **Approve** and **Decline** options.
+
+On approval, a server-side dispatcher re-fetches the forum and thread,
+verifies the guild and current `discord.task_forums` mapping, validates the
+20-tag forum limit and 5-tag thread limit, and only then calls Discord's
+Modify Channel endpoint. Decline and expired approvals perform no Discord
+request. Approval cards use the configured notification channels (normally
+the web UI and/or Telegram); the agent may separately announce the pending
+approval in the originating Discord thread.
+
+Discord API reference:
+[Channel and Forum Tag objects](https://docs.discord.com/developers/resources/channel)
+and [forum/thread behavior](https://docs.discord.com/developers/topics/threads).
 
 ## Quiet Hours
 

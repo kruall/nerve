@@ -75,6 +75,18 @@ class ChannelRouter:
         """Get a registered channel by name."""
         return self._channels.get(name)
 
+    def get_message_context(self, session_id: str) -> dict[str, Any] | None:
+        """Return a copy of the latest inbound context for ``session_id``.
+
+        Channel-bound tools use this to infer their current target without
+        gaining mutable access to the router's internal context cache.
+        Callers must still verify the active channel before treating the
+        context as current; cached entries intentionally survive between
+        turns for reactions and explicit output routing.
+        """
+        context = self._message_context.get(session_id)
+        return dict(context) if context is not None else None
+
     @property
     def channels(self) -> dict[str, BaseChannel]:
         """All registered channels (read-only view)."""

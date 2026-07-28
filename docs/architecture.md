@@ -80,7 +80,12 @@ Abstract communication layer with three components:
 
 Implementations:
 - **Telegram** — python-telegram-bot v21+ with partial message streaming (edit-in-place, 1.5s rate limit), inline keyboard buttons for notification questions, `/reply` command for free-text answers
-- **Discord** — discord.py Gateway client with guild/channel/author allowlists, mention-triggered conversation-thread creation, mention-free follow-ups in ordinary-channel threads, mention-gated project-forum turns, durable restart catch-up, one session per thread, and deliberate output through the session-bound `discord_send` MCP tool
+- **Discord** — discord.py Gateway client with guild/channel/author allowlists,
+  mention-triggered conversation-thread creation, mention-free follow-ups in
+  ordinary-channel threads, mention-gated project-forum turns, durable restart
+  catch-up, one session per thread, deliberate output through the
+  session-bound `discord_send` MCP tool, and approval-gated project-forum tag
+  management
 - **Web** — Passive channel using gateway WebSocket
 
 Adding a new channel (WhatsApp, etc.) requires implementing ~5 methods and zero session/routing logic.

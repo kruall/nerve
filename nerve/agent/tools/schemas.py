@@ -831,6 +831,122 @@ DISCORD_SEND_SCHEMA = {
     "required": ["message"],
 }
 
+DISCORD_FORUM_TAGS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "project": {
+            "type": "string",
+            "description": (
+                "Configured discord.task_forums project name. Optional inside "
+                "a currently active Discord project-forum thread."
+            ),
+            "default": "",
+        },
+        "thread_id": {
+            "type": "string",
+            "description": (
+                "Discord forum-thread ID whose applied tags should be shown. "
+                "Defaults to the current Discord thread when available."
+            ),
+            "default": "",
+        },
+    },
+    "required": [],
+}
+
+DISCORD_FORUM_TAG_ACTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "operation": {
+            "type": "string",
+            "enum": [
+                "create_tag",
+                "update_tag",
+                "delete_tag",
+                "add_thread_tag",
+                "remove_thread_tag",
+                "replace_thread_tags",
+            ],
+            "description": (
+                "Requested mutation. The tool only creates an approval; "
+                "Discord is changed later by the server-side dispatcher after "
+                "the user selects Approve."
+            ),
+        },
+        "project": {
+            "type": "string",
+            "description": (
+                "Configured discord.task_forums project. Optional inside a "
+                "current project-forum thread."
+            ),
+            "default": "",
+        },
+        "thread_id": {
+            "type": "string",
+            "description": (
+                "Target Discord thread for add/remove/replace operations. "
+                "Defaults to the current Discord thread."
+            ),
+            "default": "",
+        },
+        "tag_id": {
+            "type": "string",
+            "description": (
+                "Existing forum tag ID for update/delete/add/remove. "
+                "Use tag_name instead when the exact ID is unknown."
+            ),
+            "default": "",
+        },
+        "tag_name": {
+            "type": "string",
+            "description": (
+                "Exact existing tag name for update/delete/add/remove when "
+                "tag_id is omitted."
+            ),
+            "default": "",
+        },
+        "tag_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Complete desired tag-ID set for replace_thread_tags "
+                "(maximum 5). An empty list removes all tags."
+            ),
+            "default": [],
+        },
+        "name": {
+            "type": "string",
+            "description": (
+                "New tag name for create_tag, or replacement name for "
+                "update_tag (1-20 characters)."
+            ),
+            "default": "",
+        },
+        "moderated": {
+            "type": "boolean",
+            "description": (
+                "For create/update: require Manage Threads to add/remove this "
+                "tag. Omit on update to preserve the current value."
+            ),
+        },
+        "emoji_id": {
+            "type": "string",
+            "description": (
+                "Optional custom guild emoji snowflake for create/update. "
+                "Mutually exclusive with emoji_name; empty clears on update."
+            ),
+        },
+        "emoji_name": {
+            "type": "string",
+            "description": (
+                "Optional Unicode emoji for create/update. Mutually exclusive "
+                "with emoji_id; empty clears on update."
+            ),
+        },
+    },
+    "required": ["operation"],
+}
+
 SEND_FILE_SCHEMA = {
     "type": "object",
     "properties": {

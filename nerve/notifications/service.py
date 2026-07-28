@@ -330,6 +330,7 @@ class NotificationService:
         priority: str = "high",
         expires_at: str | None = None,
         expiry_hours: int | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> dict:
         """File an actionable ``approval``-kind notification.
 
@@ -338,7 +339,9 @@ class NotificationService:
         answer-injection path. ``options`` accepts a list of
         ``{"label": ..., "value": ...}`` dicts; when omitted, the
         dispatcher's canonical option set is used (Approve / Decline /
-        Snooze 24h for the mechanical-action dispatcher).
+        Snooze 24h for the mechanical-action dispatcher). Dispatcher-specific
+        ``metadata`` is merged with the reserved routing and option-label
+        fields before the notification row is stored.
 
         Returns ``{"notification_id": <id>, "status": "sent"}``.
         """
@@ -372,6 +375,13 @@ class NotificationService:
                 datetime.now(timezone.utc) + timedelta(hours=hours)
             ).isoformat()
 
+        notification_metadata = dict(metadata or {})
+        notification_metadata.update({
+            "target_kind": target_kind,
+            "target_id": target_id,
+            "option_labels": option_labels,
+        })
+
         await self.db.create_notification(
             notification_id=notification_id,
             session_id=session_id,
@@ -381,11 +391,7 @@ class NotificationService:
             priority=priority,
             options=option_values,
             expires_at=expires_at,
-            metadata={
-                "target_kind": target_kind,
-                "target_id": target_id,
-                "option_labels": option_labels,
-            },
+            metadata=notification_metadata,
             target_kind=target_kind,
             target_id=target_id,
         )

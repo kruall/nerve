@@ -357,6 +357,36 @@ class TestProposeAction:
         }
 
 
+    async def test_propose_action_preserves_dispatcher_metadata(
+        self,
+        db: Database,
+        fake_config: NerveConfig,
+        fake_engine: MagicMock,
+        patch_broadcaster: list,
+    ):
+        await db.create_session("s1")
+        svc = NotificationService(fake_config, db, fake_engine)
+        result = await svc.propose_action(
+            session_id="s1",
+            target_kind="discord-forum-tag",
+            target_id="discord-tag-1",
+            title="tag action",
+            metadata={
+                "discord_forum_tag_action": {
+                    "operation": "create_tag",
+                },
+            },
+        )
+
+        notif = await db.get_notification(result["notification_id"])
+        meta = json.loads(notif["metadata"])
+        assert meta["discord_forum_tag_action"] == {
+            "operation": "create_tag",
+        }
+        assert meta["target_kind"] == "discord-forum-tag"
+        assert meta["target_id"] == "discord-tag-1"
+
+
 # ----------------------------------------------------------------------
 #  handle_answer dispatch path
 # ----------------------------------------------------------------------
