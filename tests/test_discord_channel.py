@@ -84,6 +84,8 @@ def _message(
     content: str = f"<@{DOGGY}> ping",
     mentions: list[int] | None = None,
     reply_author_id: int | None = None,
+    reply_author_name: str = "",
+    reply_content: str = "",
     unresolved_reply: bool = False,
     reference_type: discord.MessageReferenceType = (
         discord.MessageReferenceType.reply
@@ -94,7 +96,14 @@ def _message(
         resolved = (
             None
             if unresolved_reply
-            else SimpleNamespace(author=SimpleNamespace(id=reply_author_id))
+            else SimpleNamespace(
+                author=SimpleNamespace(
+                    id=reply_author_id,
+                    display_name=reply_author_name,
+                    name=reply_author_name,
+                ),
+                content=reply_content,
+            )
         )
         reference = SimpleNamespace(
             type=reference_type,
@@ -328,6 +337,63 @@ async def test_dispatch_maps_forum_thread_to_project():
     assert inbound.metadata["discord_parent_channel_id"] == YDB_FORUM
     assert inbound.metadata["discord_project"] == "YDB"
     assert "проекта YDB" in inbound.text
+
+
+@pytest.mark.asyncio
+async def test_dispatch_includes_replied_bot_message_context():
+    channel = _channel()
+    channel.router.handle_message = AsyncMock()
+
+    await channel._dispatch(_message(
+        channel_id=YDB_THREAD,
+        parent_id=YDB_FORUM,
+        content="do that",
+        mentions=[],
+        reply_author_id=DOGGY,
+        reply_content="The earlier assistant answer",
+    ))
+
+    inbound = channel.router.handle_message.await_args.args[0]
+    assert (
+        '[Reply to assistant: "The earlier assistant answer"]\n\ndo that'
+        in inbound.text
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_includes_replied_participant_name_and_truncates_quote():
+    channel = _channel()
+    channel.router.handle_message = AsyncMock()
+
+    await channel._dispatch(_message(
+        channel_id=YDB_THREAD,
+        parent_id=YDB_FORUM,
+        content=f"<@{DOGGY}> thoughts?",
+        reply_author_id=USER,
+        reply_author_name="kruall",
+        reply_content="x" * 501,
+    ))
+
+    inbound = channel.router.handle_message.await_args.args[0]
+    assert f'[Reply to kruall: "{"x" * 500}…"]' in inbound.text
+    assert inbound.text.endswith("thoughts?")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_omits_context_for_unresolved_reply():
+    channel = _channel()
+    channel.router.handle_message = AsyncMock()
+
+    await channel._dispatch(_message(
+        channel_id=YDB_THREAD,
+        parent_id=YDB_FORUM,
+        content=f"<@{DOGGY}> still there?",
+        unresolved_reply=True,
+    ))
+
+    inbound = channel.router.handle_message.await_args.args[0]
+    assert "[Reply to" not in inbound.text
+    assert inbound.text.endswith("still there?")
 
 
 def test_conversation_thread_name_fits_discord_limit():

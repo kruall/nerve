@@ -203,7 +203,9 @@ the initial agent turn is routed there. Further messages by allowed authors in
 ordinary-channel threads do not need another mention; they start agent turns,
 but the agent may deliberately choose not to publish a reply. Project-forum
 threads require either a direct mention or a reply to one of the bot's messages
-for each agent turn. Replies are always sent to the individual thread.
+for each agent turn. When a Discord reply is resolved, the agent input includes
+its author and up to 500 characters of the referenced text. Replies are always
+sent to the individual thread.
 
 On first connection Nerve primes each configured target without replaying old
 history. Later reconnects use durable cursors to process messages missed while

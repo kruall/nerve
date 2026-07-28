@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 _CONNECT_TIMEOUT_SECONDS = 30.0
 _MAX_MESSAGE_LENGTH = 2000
 _MAX_THREAD_NAME_LENGTH = 100
+_MAX_REPLY_CONTEXT_LENGTH = 500
 _RECENT_MESSAGE_IDS = 4096
 _THREAD_NAME_PREFIX = "Nerve · "
 
@@ -509,22 +510,54 @@ class DiscordChannel(BaseChannel):
         }
         return self._bot_user_id in raw_mentions
 
-    def _is_reply_to_bot(self, message: discord.Message) -> bool:
+    @staticmethod
+    def _referenced_reply(message: discord.Message) -> Any | None:
         reference = getattr(message, "reference", None)
         if reference is None:
-            return False
+            return None
         if (
             getattr(reference, "type", discord.MessageReferenceType.reply)
             is not discord.MessageReferenceType.reply
         ):
-            return False
+            return None
 
         referenced_message = getattr(reference, "resolved", None)
         if referenced_message is None:
             referenced_message = getattr(reference, "cached_message", None)
+        return referenced_message
+
+    def _is_reply_to_bot(self, message: discord.Message) -> bool:
+        referenced_message = self._referenced_reply(message)
         author = getattr(referenced_message, "author", None)
         author_id = int(getattr(author, "id", 0) or 0)
         return bool(self._bot_user_id and author_id == self._bot_user_id)
+
+    def _reply_context(self, message: discord.Message) -> str:
+        referenced_message = self._referenced_reply(message)
+        if referenced_message is None:
+            return ""
+
+        referenced_author = getattr(referenced_message, "author", None)
+        referenced_author_id = int(
+            getattr(referenced_author, "id", 0) or 0,
+        )
+        if self._bot_user_id and referenced_author_id == self._bot_user_id:
+            sender = "assistant"
+        else:
+            sender = self._safe_label(
+                getattr(referenced_author, "display_name", "")
+                or getattr(referenced_author, "name", "")
+            )
+            if not sender:
+                sender = str(referenced_author_id or "user")
+
+        original = str(getattr(referenced_message, "content", "") or "")
+        if not original:
+            return f"[Reply to {sender}'s message]"
+        display = original
+        if len(display) > _MAX_REPLY_CONTEXT_LENGTH:
+            display = display[:_MAX_REPLY_CONTEXT_LENGTH] + "…"
+        return f'[Reply to {sender}: "{display}"]'
 
     def _accepts(self, message: discord.Message) -> bool:
         guild = message.guild
@@ -632,6 +665,10 @@ class DiscordChannel(BaseChannel):
             f"[Это сообщение Discord из {location}; ответ увидят участники "
             f"канала.{response_hint} Автор: {author}.]\n\n"
         )
+        text = self._message_text(message)
+        reply_context = self._reply_context(message)
+        if reply_context:
+            text = f"{reply_context}\n\n{text}"
         title = (
             f"Discord · {project} · {channel_name or channel_id}"
             if project
@@ -645,7 +682,7 @@ class DiscordChannel(BaseChannel):
             channel_name=self.name,
             channel_key=f"discord:{guild_id}:{channel_id}",
             sender_id=str(channel_id),
-            text=context + self._message_text(message),
+            text=context + text,
             session_title=title,
             metadata={
                 "message_id": str(message.id),
