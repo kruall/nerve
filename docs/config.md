@@ -189,6 +189,7 @@ WebSocket. It does not require an inbound listener or a public Nerve endpoint.
 | `discord.channel_ids` | list[int] | `[]` | Ordinary text channels where a mention starts a conversation thread |
 | `discord.task_forums` | map[string, int] | `{}` | Project name to Discord forum-channel ID |
 | `discord.audit_forum_id` | int | `0` | Outbound-only forum where Nerve mirrors one thread per session |
+| `discord.audit_batch_window_seconds` | float | `60` | Window used to combine adjacent audit activity before updating Discord; terminal events flush immediately |
 | `discord.allowed_author_ids` | list[int] | `[]` | Human and peer-bot IDs allowed to invoke Nerve |
 | `discord.require_mention` | bool | `true` | Require a direct mention in ordinary channels and project-forum threads |
 
@@ -219,8 +220,12 @@ forum thread for every session created while the mirror is enabled, regardless
 of whether the session came from Discord, web, Telegram, cron, a planner, or
 another internal source. The thread contains the persisted user/assistant
 messages, tool calls and results, lifecycle events, and errors. Active turns
-are edited in place and replaced with their persisted form when complete.
-Hidden model reasoning is never mirrored.
+are edited in place after the configured batching window and replaced with
+their persisted form when complete. Adjacent persisted items within the same
+window are packed into one Discord message when they fit; oversized content is
+split only at Discord's message-size boundary. Completion, stop, and error
+events flush without waiting for the window. Hidden model reasoning is never
+mirrored.
 
 The session-to-thread mapping and per-item Discord message IDs are stored in
 the Nerve database. On restart, mapped threads are reconciled and incomplete
@@ -249,6 +254,7 @@ discord:
   task_forums:
     YDB: 123456789012345680
   audit_forum_id: 123456789012345682
+  audit_batch_window_seconds: 60
   allowed_author_ids: [123456789012345681]
   require_mention: true
 ```

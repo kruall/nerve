@@ -94,6 +94,9 @@ discord:
   # Historical sessions are not backfilled until they become active; existing
   # mirror threads are reconciled after every restart.
   # audit_forum_id: 123456789012345682
+  # Collect session activity before updating Discord. Terminal events flush
+  # immediately. Set to 0 only when immediate audit updates are required.
+  audit_batch_window_seconds: 60
   # allowed_author_ids: [123456789012345681]
   # Applies to ordinary-channel entry messages and project-forum threads.
   # Conversation threads created below ordinary channels are always mention-free.

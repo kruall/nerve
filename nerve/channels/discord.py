@@ -140,6 +140,10 @@ class DiscordChannel(BaseChannel):
             raise ValueError(
                 "discord.audit_forum_id must be an outbound-only forum"
             )
+        if self.config.audit_batch_window_seconds < 0:
+            raise ValueError(
+                "discord.audit_batch_window_seconds must be non-negative"
+            )
 
     def _load_token(self) -> str:
         if self.config.bot_token:
@@ -280,6 +284,9 @@ class DiscordChannel(BaseChannel):
                     db=self.db,
                     guild_id=self.config.guild_id,
                     forum_id=self.config.audit_forum_id,
+                    batch_window_seconds=(
+                        self.config.audit_batch_window_seconds
+                    ),
                 )
                 await self._session_mirror.start()
         except Exception as exc:

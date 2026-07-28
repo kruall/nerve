@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -112,6 +114,10 @@ async def test_mirror_creates_one_thread_and_incrementally_appends(db):
     assert any("Nerve session mirror" in value for value in contents)
     assert any("event · created" in value for value in contents)
     assert any("check the system" in value for value in contents)
+    assert any(
+        "event · created" in value and "check the system" in value
+        for value in contents
+    )
 
     await db.add_message(
         "session-1",
@@ -141,6 +147,35 @@ async def test_mirror_creates_one_thread_and_incrementally_appends(db):
     message_count = len(contents)
     await mirror._sync_session("session-1")
     assert len(_contents(thread)) == message_count
+
+
+@pytest.mark.asyncio
+async def test_batch_window_coalesces_updates_and_terminal_flushes(db):
+    mirror = DiscordSessionMirror(
+        client=_Client(),
+        db=db,
+        guild_id=100,
+        forum_id=200,
+        batch_window_seconds=0.03,
+        stream=StreamBroadcaster(),
+    )
+    mirror._sync_session = AsyncMock()
+    mirror._worker_task = asyncio.create_task(mirror._worker_loop())
+
+    mirror._mark_dirty("batched")
+    mirror._mark_dirty("batched")
+    await asyncio.sleep(0.01)
+    mirror._sync_session.assert_not_awaited()
+    await asyncio.sleep(0.04)
+    mirror._sync_session.assert_awaited_once_with("batched")
+
+    mirror._sync_session.reset_mock()
+    mirror._mark_dirty("terminal")
+    await mirror._on_stream_event("terminal", {"type": "done"})
+    await asyncio.sleep(0.01)
+    mirror._sync_session.assert_awaited_once_with("terminal")
+
+    await mirror.stop()
 
 
 @pytest.mark.asyncio
@@ -183,6 +218,46 @@ async def test_mirror_edits_live_turn_then_replaces_it_with_persisted_message(db
     contents = _contents(thread)
     assert any("finished" in value for value in contents)
     assert all("live turn" not in value for value in contents)
+
+
+@pytest.mark.asyncio
+async def test_mirror_replaces_legacy_per_item_checkpoints_with_batches(db):
+    await db.create_session("session-legacy", title="Legacy")
+    await db.log_session_event("session-legacy", "started", {"source": "web"})
+    await db.add_message("session-legacy", "user", "one batched update")
+
+    client = _Client()
+    forum = _Forum(client)
+    client.channels[forum.id] = forum
+    mirror = DiscordSessionMirror(
+        client=client,
+        db=db,
+        guild_id=100,
+        forum_id=forum.id,
+        stream=StreamBroadcaster(),
+    )
+    mirror._forum = forum
+
+    await mirror._sync_session("session-legacy")
+    thread = forum.created[0][2].thread
+    checkpoints = await db.get_discord_mirror_items("session-legacy")
+    old_message_id = int(checkpoints[("batch", 1)]["discord_message_ids"][0])
+    await db._write(
+        """UPDATE discord_session_mirror_items
+           SET item_kind = 'event', item_id = 999
+           WHERE session_id = ? AND item_kind = 'batch' AND item_id = 1""",
+        ("session-legacy",),
+    )
+
+    await mirror._sync_session("session-legacy")
+
+    assert thread.messages[old_message_id].deleted is True
+    checkpoints = await db.get_discord_mirror_items("session-legacy")
+    assert set(checkpoints) == {("batch", 1)}
+    assert any(
+        "event · started" in value and "one batched update" in value
+        for value in _contents(thread)
+    )
 
 
 @pytest.mark.asyncio

@@ -146,6 +146,25 @@ class DiscordMirrorStore:
             ),
         )
 
+    async def delete_discord_mirror_item(
+        self,
+        session_id: str,
+        *,
+        item_kind: str,
+        item_id: int,
+    ) -> None:
+        await self._write(
+            """DELETE FROM discord_session_mirror_items
+               WHERE session_id = ? AND item_kind = ? AND item_id = ?""",
+            (session_id, item_kind, item_id),
+        )
+
+    async def clear_discord_mirror_items(self, session_id: str) -> None:
+        await self._write(
+            "DELETE FROM discord_session_mirror_items WHERE session_id = ?",
+            (session_id,),
+        )
+
     async def list_discord_mirror_sessions(
         self,
         *,

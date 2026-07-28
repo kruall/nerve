@@ -446,6 +446,7 @@ async def test_ready_fails_when_bot_cannot_access_configured_forum():
 async def test_ready_starts_audit_mirror_only_once_across_reconnects():
     channel = _channel()
     channel.config.audit_forum_id = AUDIT_FORUM
+    channel.config.audit_batch_window_seconds = 45
     channel._sync_backlog = AsyncMock()
     guild = MagicMock()
     guild.get_channel.side_effect = lambda channel_id: (
@@ -465,6 +466,7 @@ async def test_ready_starts_audit_mirror_only_once_across_reconnects():
         await channel._on_ready()
 
     mirror_cls.assert_called_once()
+    assert mirror_cls.call_args.kwargs["batch_window_seconds"] == 45
     mirror_cls.return_value.start.assert_awaited_once()
 
 
@@ -483,6 +485,18 @@ def test_validation_allows_outbound_only_audit_forum():
         "audit_forum_id": 350,
     }})
     DiscordChannel(cfg, MagicMock(), MagicMock())._validate_config()
+
+
+def test_validation_rejects_negative_audit_batch_window():
+    cfg = NerveConfig.from_dict({"discord": {
+        "enabled": True,
+        "bot_token": "synthetic-token",
+        "guild_id": GUILD,
+        "audit_forum_id": 350,
+        "audit_batch_window_seconds": -1,
+    }})
+    with pytest.raises(ValueError, match="audit_batch_window_seconds"):
+        DiscordChannel(cfg, MagicMock(), MagicMock())._validate_config()
 
 
 def test_validation_rejects_one_forum_used_by_two_projects():

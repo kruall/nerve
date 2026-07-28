@@ -286,6 +286,7 @@ class DiscordConfig:
     channel_ids: list[int] = field(default_factory=list)
     task_forums: dict[str, int] = field(default_factory=dict)
     audit_forum_id: int = 0
+    audit_batch_window_seconds: float = 60.0
     allowed_author_ids: list[int] = field(default_factory=list)
     require_mention: bool = True
 
@@ -306,6 +307,9 @@ class DiscordConfig:
                 if str(project).strip()
             },
             audit_forum_id=int(d.get("audit_forum_id", 0) or 0),
+            audit_batch_window_seconds=float(
+                d.get("audit_batch_window_seconds", 60.0)
+            ),
             allowed_author_ids=[
                 int(value) for value in d.get("allowed_author_ids", []) or []
             ],

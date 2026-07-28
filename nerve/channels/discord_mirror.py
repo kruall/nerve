@@ -26,10 +26,11 @@ logger = logging.getLogger(__name__)
 _MAX_DISCORD_MESSAGE = 2000
 _MAX_THREAD_NAME = 100
 _RECONCILE_INTERVAL_SECONDS = 5.0
-_EDIT_DEBOUNCE_SECONDS = 0.75
+_DEFAULT_BATCH_WINDOW_SECONDS = 60.0
 _RECONCILE_PAGE_SIZE = 100
 _MAX_LIVE_BLOCK_CHARS = 20_000
 _MAX_LIVE_RENDER_CHARS = 12_000
+_BATCH_SEPARATOR = "\n\n———\n\n"
 
 
 def _split_message(text: str, limit: int = _MAX_DISCORD_MESSAGE) -> list[str]:
@@ -79,20 +80,26 @@ class DiscordSessionMirror:
         db: Database,
         guild_id: int,
         forum_id: int,
+        batch_window_seconds: float = _DEFAULT_BATCH_WINDOW_SECONDS,
         stream: StreamBroadcaster = broadcaster,
     ):
         self.client = client
         self.db = db
         self.guild_id = guild_id
         self.forum_id = forum_id
+        self.batch_window_seconds = max(0.0, batch_window_seconds)
         self.stream = stream
         self._forum: Any | None = None
         self._worker_task: asyncio.Task[None] | None = None
         self._reconcile_task: asyncio.Task[None] | None = None
         self._started_at = ""
         self._dirty_queue: asyncio.Queue[str] = asyncio.Queue()
-        self._dirty: set[str] = set()
+        self._scheduled: dict[str, asyncio.Task[None]] = {}
+        self._queued: set[str] = set()
+        self._syncing: set[str] = set()
+        self._pending_after_sync: dict[str, bool] = {}
         self._live_blocks: dict[str, list[dict[str, Any]]] = {}
+        self._live_hashes: dict[str, str] = {}
         self._terminal_sessions: set[str] = set()
         self._listener_id = f"discord-session-mirror:{forum_id}"
 
@@ -127,6 +134,8 @@ class DiscordSessionMirror:
             for task in (self._worker_task, self._reconcile_task)
             if task is not None
         ]
+        tasks.extend(self._scheduled.values())
+        self._scheduled.clear()
         self._worker_task = None
         self._reconcile_task = None
         for task in tasks:
@@ -156,12 +165,13 @@ class DiscordSessionMirror:
     async def _on_stream_event(
         self, session_id: str, event: dict[str, Any],
     ) -> None:
-        """Capture one live event and enqueue a debounced projection update."""
+        """Capture one live event and enqueue a batched projection update."""
         event_type = str(event.get("type") or "")
         if event_type == "thinking":
             # Nerve may store model reasoning for its own UI, but the audit
             # mirror intentionally exposes only user-visible output.
             return
+        terminal = event_type in {"done", "stopped", "error"}
         if event_type == "done":
             self._terminal_sessions.add(session_id)
         elif event_type == "stopped":
@@ -170,6 +180,18 @@ class DiscordSessionMirror:
                 session_id,
                 {"kind": "system", "label": "stopped", "content": ""},
             )
+        elif event_type == "error":
+            self._terminal_sessions.add(session_id)
+            payload = {
+                key: value
+                for key, value in event.items()
+                if key not in {"type", "session_id"}
+            }
+            self._append_live_block(session_id, {
+                "kind": "system",
+                "label": "error",
+                "content": _json(payload) if payload else "",
+            })
         elif event_type == "token":
             blocks = self._live_blocks.setdefault(session_id, [])
             content = str(event.get("content") or "")
@@ -201,7 +223,7 @@ class DiscordSessionMirror:
                 "label": event_type,
                 "content": _json(payload) if payload else "",
             })
-        self._mark_dirty(session_id)
+        self._mark_dirty(session_id, immediate=terminal)
 
     def _append_live_block(
         self, session_id: str, block: dict[str, Any],
@@ -244,22 +266,60 @@ class DiscordSessionMirror:
             block["result"] = event.get("result")
             block["is_error"] = bool(event.get("is_error"))
 
-    def _mark_dirty(self, session_id: str) -> None:
-        if session_id in self._dirty:
+    def _mark_dirty(
+        self,
+        session_id: str,
+        *,
+        immediate: bool = False,
+    ) -> None:
+        """Schedule one sync, coalescing activity within the batch window."""
+        if session_id in self._syncing:
+            self._pending_after_sync[session_id] = (
+                self._pending_after_sync.get(session_id, False) or immediate
+            )
             return
-        self._dirty.add(session_id)
+
+        scheduled = self._scheduled.pop(session_id, None) if immediate else None
+        if scheduled is not None:
+            scheduled.cancel()
+        if session_id in self._queued:
+            return
+        if immediate:
+            self._enqueue_now(session_id)
+            return
+        if session_id in self._scheduled:
+            return
+        if self.batch_window_seconds == 0:
+            self._enqueue_now(session_id)
+            return
+        self._scheduled[session_id] = asyncio.create_task(
+            self._enqueue_after_window(session_id),
+            name=f"discord-session-mirror-batch:{session_id[:16]}",
+        )
+
+    def _enqueue_now(self, session_id: str) -> None:
+        if session_id in self._queued:
+            return
+        self._queued.add(session_id)
         self._dirty_queue.put_nowait(session_id)
+
+    async def _enqueue_after_window(self, session_id: str) -> None:
+        task = asyncio.current_task()
+        try:
+            await asyncio.sleep(self.batch_window_seconds)
+        except asyncio.CancelledError:
+            return
+        finally:
+            if self._scheduled.get(session_id) is task:
+                self._scheduled.pop(session_id, None)
+        self._enqueue_now(session_id)
 
     async def _worker_loop(self) -> None:
         while True:
             session_id = await self._dirty_queue.get()
+            self._queued.discard(session_id)
+            self._syncing.add(session_id)
             try:
-                if (
-                    session_id in self._live_blocks
-                    and session_id not in self._terminal_sessions
-                ):
-                    await asyncio.sleep(_EDIT_DEBOUNCE_SECONDS)
-                self._dirty.discard(session_id)
                 await self._sync_session(session_id)
             except asyncio.CancelledError:
                 raise
@@ -270,6 +330,10 @@ class DiscordSessionMirror:
                     exc_info=True,
                 )
             finally:
+                self._syncing.discard(session_id)
+                pending = self._pending_after_sync.pop(session_id, None)
+                if pending is not None and self._worker_task is not None:
+                    self._mark_dirty(session_id, immediate=pending)
                 self._dirty_queue.task_done()
 
     async def _reconcile_loop(self) -> None:
@@ -302,6 +366,7 @@ class DiscordSessionMirror:
         session = await self.db.get_session(session_id)
         if session is None:
             self._live_blocks.pop(session_id, None)
+            self._live_hashes.pop(session_id, None)
             self._terminal_sessions.discard(session_id)
             return
 
@@ -310,31 +375,42 @@ class DiscordSessionMirror:
 
         persisted = await self.db.get_discord_mirror_content_items(session_id)
         checkpoints = await self.db.get_discord_mirror_items(session_id)
-        changed_items = [
-            item
-            for item in persisted
+
+        # v041 initially projected each persisted item separately. Collapse
+        # those legacy checkpoints once, then use deterministic batch ordinals.
+        if any(key[0] != "batch" for key in checkpoints):
+            legacy_ids = {
+                int(message_id)
+                for checkpoint in checkpoints.values()
+                for message_id in checkpoint.get("discord_message_ids", [])
+            }
+            await self._delete_messages(thread, sorted(legacy_ids))
+            await self.db.clear_discord_mirror_items(session_id)
+            checkpoints = {}
+
+        batches = self._render_persisted_batches(persisted)
+        changed_batches = [
+            (index, text)
+            for index, text in enumerate(batches, start=1)
             if (
-                (checkpoint := checkpoints.get(
-                    (str(item["item_kind"]), int(item["item_id"]))
-                )) is None
-                or checkpoint.get("content_hash")
-                != _digest(self._render_item(item))
+                (checkpoint := checkpoints.get(("batch", index))) is None
+                or checkpoint.get("content_hash") != _digest(text)
             )
         ]
 
         live_ids = [int(value) for value in mirror.get("live_message_ids", [])]
         if live_ids and (
-            changed_items
+            changed_batches
             or session_id in self._terminal_sessions
             or session_id not in self._live_blocks
         ):
             await self._delete_messages(thread, live_ids)
             live_ids = []
+            self._live_hashes.pop(session_id, None)
             await self.db.set_discord_mirror_live_messages(session_id, [])
 
-        for item in persisted:
-            key = (str(item["item_kind"]), int(item["item_id"]))
-            text = self._render_item(item)
+        for index, text in enumerate(batches, start=1):
+            key = ("batch", index)
             content_hash = _digest(text)
             checkpoint = checkpoints.get(key)
             if checkpoint and checkpoint.get("content_hash") == content_hash:
@@ -350,10 +426,26 @@ class DiscordSessionMirror:
             )
             await self.db.upsert_discord_mirror_item(
                 session_id,
-                item_kind=key[0],
-                item_id=key[1],
+                item_kind="batch",
+                item_id=index,
                 discord_message_ids=message_ids,
                 content_hash=content_hash,
+            )
+
+        for key, checkpoint in checkpoints.items():
+            if key[0] == "batch" and key[1] <= len(batches):
+                continue
+            await self._delete_messages(
+                thread,
+                [
+                    int(value)
+                    for value in checkpoint.get("discord_message_ids", [])
+                ],
+            )
+            await self.db.delete_discord_mirror_item(
+                session_id,
+                item_kind=key[0],
+                item_id=key[1],
             )
 
         if session_id in self._terminal_sessions:
@@ -361,21 +453,25 @@ class DiscordSessionMirror:
                 await self._delete_messages(thread, live_ids)
                 await self.db.set_discord_mirror_live_messages(session_id, [])
             self._live_blocks.pop(session_id, None)
+            self._live_hashes.pop(session_id, None)
             self._terminal_sessions.discard(session_id)
             return
 
         blocks = self._live_blocks.get(session_id)
         if blocks:
             live_text = self._render_live(blocks)
-            new_live_ids = await self._upsert_chunks(
-                thread,
-                _split_message(live_text),
-                live_ids,
-            )
-            await self.db.set_discord_mirror_live_messages(
-                session_id,
-                new_live_ids,
-            )
+            live_hash = _digest(live_text)
+            if self._live_hashes.get(session_id) != live_hash or not live_ids:
+                new_live_ids = await self._upsert_chunks(
+                    thread,
+                    _split_message(live_text),
+                    live_ids,
+                )
+                await self.db.set_discord_mirror_live_messages(
+                    session_id,
+                    new_live_ids,
+                )
+                self._live_hashes[session_id] = live_hash
 
     async def _ensure_thread(
         self, session: dict[str, Any],
@@ -495,6 +591,59 @@ class DiscordSessionMirror:
             f"- Status: `{session.get('status') or 'unknown'}`",
             f"- Created: {_timestamp(session.get('created_at'))}",
         ])
+
+    def _render_persisted_batches(
+        self,
+        items: list[dict[str, Any]],
+    ) -> list[str]:
+        """Pack adjacent timeline items into deterministic Discord messages."""
+        batches: list[str] = []
+        current = ""
+        batch_started_at: float | None = None
+
+        for item in items:
+            item_started_at = self._item_timestamp(item)
+            for piece in _split_message(self._render_item(item)):
+                candidate = (
+                    current + _BATCH_SEPARATOR + piece
+                    if current
+                    else piece
+                )
+                within_window = (
+                    not current
+                    or batch_started_at is None
+                    or item_started_at is None
+                    or item_started_at - batch_started_at
+                    <= self.batch_window_seconds
+                )
+                if current and (
+                    not within_window
+                    or len(candidate) > _MAX_DISCORD_MESSAGE
+                ):
+                    batches.append(current)
+                    current = piece
+                    batch_started_at = item_started_at
+                else:
+                    current = candidate
+                    if batch_started_at is None:
+                        batch_started_at = item_started_at
+
+        if current:
+            batches.append(current)
+        return batches
+
+    @staticmethod
+    def _item_timestamp(item: dict[str, Any]) -> float | None:
+        value = str(item.get("created_at") or "")
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
+        except ValueError:
+            return None
 
     def _render_item(self, item: dict[str, Any]) -> str:
         created = _timestamp(item.get("created_at"))
