@@ -88,6 +88,32 @@ class TestBroadcaster:
         # good handler should still have received
         assert len(received) == 1
 
+    async def test_global_listener_receives_every_session(self):
+        bc = StreamBroadcaster()
+        received = []
+
+        async def handler(sid, msg):
+            received.append((sid, msg["type"]))
+
+        await bc.register_global("audit", handler)
+        await bc.broadcast("s1", {"type": "token"})
+        await bc.broadcast("s2", {"type": "done"})
+
+        assert received == [("s1", "token"), ("s2", "done")]
+
+    async def test_global_listener_can_be_unregistered(self):
+        bc = StreamBroadcaster()
+        received = []
+
+        async def handler(sid, msg):
+            received.append((sid, msg))
+
+        await bc.register_global("audit", handler)
+        await bc.unregister_global("audit")
+        await bc.broadcast("s1", {"type": "token"})
+
+        assert received == []
+
 
 @pytest.mark.asyncio
 class TestBuffering:

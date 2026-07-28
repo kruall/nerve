@@ -244,6 +244,7 @@ class TestDiscordConfig:
         assert cfg.guild_id == 0
         assert cfg.channel_ids == []
         assert cfg.task_forums == {}
+        assert cfg.audit_forum_id == 0
         assert cfg.allowed_author_ids == []
         assert cfg.require_mention is True
 
@@ -252,11 +253,13 @@ class TestDiscordConfig:
             "guild_id": "100",
             "channel_ids": ["200"],
             "task_forums": {"YDB": "300"},
+            "audit_forum_id": "350",
             "allowed_author_ids": ["400", 500],
         })
         assert cfg.guild_id == 100
         assert cfg.channel_ids == [200]
         assert cfg.task_forums == {"YDB": 300}
+        assert cfg.audit_forum_id == 350
         assert cfg.allowed_author_ids == [400, 500]
 
     def test_known_keys_pass_validation(self):
@@ -267,6 +270,7 @@ class TestDiscordConfig:
                 "guild_id": 100,
                 "channel_ids": [200],
                 "task_forums": {"YDB": 300},
+                "audit_forum_id": 350,
                 "allowed_author_ids": [400],
                 "require_mention": True,
             },

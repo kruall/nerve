@@ -272,10 +272,11 @@ class TelegramConfig:
 class DiscordConfig:
     """Configuration for the native Discord channel.
 
-    Access is fail-closed: an enabled adapter needs one guild, at least one
-    allowed text channel or project forum, and an explicit author allowlist.
-    Bot credentials may be supplied through the local override file, but a
-    mode-0600 token file is preferred.
+    Access is fail-closed: an enabled adapter needs one guild and at least one
+    inbound text channel/project forum or an outbound audit forum. Inbound
+    targets additionally require an explicit author allowlist. Bot credentials
+    may be supplied through the local override file, but a mode-0600 token file
+    is preferred.
     """
 
     enabled: bool = False
@@ -284,6 +285,7 @@ class DiscordConfig:
     guild_id: int = 0
     channel_ids: list[int] = field(default_factory=list)
     task_forums: dict[str, int] = field(default_factory=dict)
+    audit_forum_id: int = 0
     allowed_author_ids: list[int] = field(default_factory=list)
     require_mention: bool = True
 
@@ -303,6 +305,7 @@ class DiscordConfig:
                 for project, channel_id in raw_forums.items()
                 if str(project).strip()
             },
+            audit_forum_id=int(d.get("audit_forum_id", 0) or 0),
             allowed_author_ids=[
                 int(value) for value in d.get("allowed_author_ids", []) or []
             ],

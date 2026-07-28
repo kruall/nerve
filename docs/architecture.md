@@ -85,7 +85,8 @@ Implementations:
   ordinary-channel threads, mention-gated project-forum turns, durable restart
   catch-up, one session per thread, deliberate output through the
   session-bound `discord_send` MCP tool, and approval-gated project-forum tag
-  management
+  management. An optional outbound-only audit forum mirrors every active Nerve
+  session into a durable, incrementally updated Discord thread.
 - **Web** — Passive channel using gateway WebSocket
 
 Adding a new channel (WhatsApp, etc.) requires implementing ~5 methods and zero session/routing logic.
@@ -239,6 +240,8 @@ SQLite with WAL mode (schema version 16):
 - `messages` — Conversation messages with tool call data and ordered `blocks` JSON column (preserves interleaving of text/thinking/tool_call blocks across page reloads)
 - `session_events` — Append-only lifecycle audit log (created, started, idle, stopped, archived, error)
 - `channel_sessions` — Persistent channel-to-session mapping (survives restarts)
+- `discord_session_mirrors` — Durable Nerve-session to Discord audit-thread mapping, including live-message checkpoints
+- `discord_session_mirror_items` — Per-message/event Discord message IDs and content hashes for idempotent reconciliation
 - `session_file_snapshots` — Pre-modification file content captured via `PreToolUse` hook for session-scoped diff computation. Keyed by `(session_id, file_path)`, first-touch only. Cleaned up on session delete.
 - `tasks` — Task index (mirrors markdown files)
 - `tasks_fts` — FTS5 full-text search index for tasks

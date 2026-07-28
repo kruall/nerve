@@ -50,6 +50,24 @@ class TestSchemaMigration:
         assert "event_type" in columns
         assert "details" in columns
 
+    async def test_discord_session_mirror_tables_exist(self, db: Database):
+        async with db.db.execute(
+            "PRAGMA table_info(discord_session_mirrors)"
+        ) as cur:
+            mirror_columns = {row[1] async for row in cur}
+        async with db.db.execute(
+            "PRAGMA table_info(discord_session_mirror_items)"
+        ) as cur:
+            item_columns = {row[1] async for row in cur}
+        assert {
+            "session_id", "forum_id", "thread_id", "starter_message_id",
+            "live_message_ids",
+        }.issubset(mirror_columns)
+        assert {
+            "session_id", "item_kind", "item_id",
+            "discord_message_ids", "content_hash",
+        }.issubset(item_columns)
+
 
 @pytest.mark.asyncio
 class TestSessionCRUD:

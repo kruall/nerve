@@ -46,6 +46,10 @@ class StreamBroadcaster:
     def __init__(self, max_buffer_size: int = MAX_BUFFER_SIZE):
         # session_id -> list of (callback_id, callback)
         self._listeners: dict[str, list[tuple[str, BroadcastCallback]]] = {}
+        # Cross-session listeners are used by durable projections such as the
+        # Discord audit-forum mirror. Their callbacks must enqueue work and
+        # return quickly so one external sink cannot stall agent streaming.
+        self._global_listeners: list[tuple[str, BroadcastCallback]] = []
         self._lock = asyncio.Lock()
         # Per-session event buffer for reconnect replay
         self._session_buffers: dict[str, list[dict[str, Any]]] = {}
@@ -82,6 +86,25 @@ class StreamBroadcaster:
                 if not self._listeners[session_id]:
                     del self._listeners[session_id]
 
+    async def register_global(
+        self, callback_id: str, callback: BroadcastCallback,
+    ) -> None:
+        """Register one listener that receives events for every session."""
+        async with self._lock:
+            self._global_listeners = [
+                (cid, cb) for cid, cb in self._global_listeners
+                if cid != callback_id
+            ]
+            self._global_listeners.append((callback_id, callback))
+
+    async def unregister_global(self, callback_id: str) -> None:
+        """Remove a cross-session listener."""
+        async with self._lock:
+            self._global_listeners = [
+                (cid, cb) for cid, cb in self._global_listeners
+                if cid != callback_id
+            ]
+
     async def broadcast(self, session_id: str, message: dict[str, Any], exclude: str | None = None) -> None:
         """Send a message to all listeners of a session. Also buffers if active.
 
@@ -104,8 +127,9 @@ class StreamBroadcaster:
 
         async with self._lock:
             listeners = list(self._listeners.get(session_id, []))
+            global_listeners = list(self._global_listeners)
 
-        for callback_id, callback in listeners:
+        for callback_id, callback in (*listeners, *global_listeners):
             if callback_id == exclude:
                 continue
             try:

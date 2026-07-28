@@ -188,13 +188,16 @@ WebSocket. It does not require an inbound listener or a public Nerve endpoint.
 | `discord.guild_id` | int | `0` | The only server the Nerve instance accepts |
 | `discord.channel_ids` | list[int] | `[]` | Ordinary text channels where a mention starts a conversation thread |
 | `discord.task_forums` | map[string, int] | `{}` | Project name to Discord forum-channel ID |
+| `discord.audit_forum_id` | int | `0` | Outbound-only forum where Nerve mirrors one thread per session |
 | `discord.allowed_author_ids` | list[int] | `[]` | Human and peer-bot IDs allowed to invoke Nerve |
 | `discord.require_mention` | bool | `true` | Require a direct mention in ordinary channels and project-forum threads |
 
-The adapter is fail-closed: enabling it without a guild, at least one channel
-or project forum, an author allowlist, and a token fails startup. A forum post
-is a thread, so the forum's parent ID belongs in `task_forums`. In an ordinary
-text channel, a direct mention starts a Discord thread from that message and
+The adapter is fail-closed: enabling it without a guild, at least one inbound
+channel/project forum or an outbound audit forum, and a token fails startup.
+An author allowlist is additionally required whenever inbound targets are
+configured. A forum post is a thread, so the forum's parent ID belongs in
+`task_forums`. In an ordinary text channel, a direct mention starts a Discord
+thread from that message and
 the initial agent turn is routed there. Further messages by allowed authors in
 ordinary-channel threads do not need another mention; they start agent turns,
 but the agent may deliberately choose not to publish a reply. Project-forum
@@ -211,6 +214,25 @@ deliberate Discord-visible reply only through the session-bound `discord_send`
 MCP tool. The tool cannot select a destination: it sends only to the
 conversation or project-forum thread that drove the active Discord turn.
 
+When `discord.audit_forum_id` is configured, Nerve creates one outbound-only
+forum thread for every session created while the mirror is enabled, regardless
+of whether the session came from Discord, web, Telegram, cron, a planner, or
+another internal source. The thread contains the persisted user/assistant
+messages, tool calls and results, lifecycle events, and errors. Active turns
+are edited in place and replaced with their persisted form when complete.
+Hidden model reasoning is never mirrored.
+
+The session-to-thread mapping and per-item Discord message IDs are stored in
+the Nerve database. On restart, mapped threads are reconciled and incomplete
+live placeholders are repaired without duplicating persisted content. Existing
+historical sessions are not bulk-backfilled when the option is first enabled;
+they acquire a mirror when they next become active. The audit forum must belong
+to `discord.guild_id` and must not also appear in `discord.channel_ids` or
+`discord.task_forums`, so messages in mirror threads cannot recursively invoke
+the agent. Mirror threads can contain the same sensitive tool inputs and
+outputs as the Nerve session UI, so restrict the audit forum's Discord
+permissions to the intended reviewers.
+
 Enable the **Message Content Intent** for the bot in Discord's Developer
 Portal. Grant only the channel permissions required by the deployment:
 View Channels, Read Message History, Send Messages, Create Public Threads,
@@ -226,6 +248,7 @@ discord:
   channel_ids: [123456789012345679]
   task_forums:
     YDB: 123456789012345680
+  audit_forum_id: 123456789012345682
   allowed_author_ids: [123456789012345681]
   require_mention: true
 ```

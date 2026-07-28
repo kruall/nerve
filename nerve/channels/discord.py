@@ -2,9 +2,10 @@
 
 The adapter is intentionally fail-closed. It accepts messages only from one
 configured guild, explicitly allowed text channels or project forums, and an
-explicit author allowlist. A direct bot mention in a text channel starts a
-conversation thread. Messages inside conversation threads do not require
-further mentions, while project-forum threads keep the mention requirement.
+explicit author allowlist. Its optional audit forum is outbound-only. A direct
+bot mention in a text channel starts a conversation thread. Messages inside
+conversation threads do not require further mentions, while project-forum
+threads keep the mention requirement.
 """
 
 from __future__ import annotations
@@ -74,6 +75,7 @@ class DiscordChannel(BaseChannel):
         self.db = db
         self._client: discord.Client | None = None
         self._client_task: asyncio.Task[None] | None = None
+        self._session_mirror: Any | None = None
         self._ready = asyncio.Event()
         self._startup_error: Exception | None = None
         self._bot_user_id = 0
@@ -109,9 +111,10 @@ class DiscordChannel(BaseChannel):
         missing: list[str] = []
         if not self.config.guild_id:
             missing.append("guild_id")
-        if not self._text_channels and not self._project_forums:
-            missing.append("channel_ids or task_forums")
-        if not self._allowed_authors:
+        has_inbound_targets = bool(self._text_channels or self._project_forums)
+        if not has_inbound_targets and not self.config.audit_forum_id:
+            missing.append("channel_ids, task_forums, or audit_forum_id")
+        if has_inbound_targets and not self._allowed_authors:
             missing.append("allowed_author_ids")
         if not (self.config.bot_token or self.config.bot_token_file):
             missing.append("bot_token or bot_token_file")
@@ -128,6 +131,14 @@ class DiscordChannel(BaseChannel):
         if overlap:
             raise ValueError(
                 "Discord channel IDs cannot be both text channels and project forums"
+            )
+        if (
+            self.config.audit_forum_id
+            and self.config.audit_forum_id
+            in (self._text_channels | set(self._project_forums))
+        ):
+            raise ValueError(
+                "discord.audit_forum_id must be an outbound-only forum"
             )
 
     def _load_token(self) -> str:
@@ -219,9 +230,13 @@ class DiscordChannel(BaseChannel):
     async def stop(self) -> None:
         client = self._client
         task = self._client_task
+        mirror = self._session_mirror
         self._client = None
         self._client_task = None
+        self._session_mirror = None
 
+        if mirror is not None:
+            await mirror.stop()
         if client is not None and not client.is_closed():
             await client.close()
         if task is not None:
@@ -244,6 +259,8 @@ class DiscordChannel(BaseChannel):
                 )
 
             configured = self._text_channels | set(self._project_forums)
+            if self.config.audit_forum_id:
+                configured.add(self.config.audit_forum_id)
             missing = [
                 channel_id
                 for channel_id in configured
@@ -255,6 +272,16 @@ class DiscordChannel(BaseChannel):
                     + ", ".join(str(value) for value in sorted(missing))
                 )
             await self._sync_backlog(guild)
+            if self.config.audit_forum_id and self._session_mirror is None:
+                from nerve.channels.discord_mirror import DiscordSessionMirror
+
+                self._session_mirror = DiscordSessionMirror(
+                    client=self._client,
+                    db=self.db,
+                    guild_id=self.config.guild_id,
+                    forum_id=self.config.audit_forum_id,
+                )
+                await self._session_mirror.start()
         except Exception as exc:
             self._startup_error = exc
         finally:

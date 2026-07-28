@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -15,6 +15,7 @@ TEXT_CHANNEL = 200
 CONVERSATION_THREAD = 201
 YDB_FORUM = 300
 YDB_THREAD = 301
+AUDIT_FORUM = 350
 USER = 400
 PEER_BOT = 401
 DOGGY = 900
@@ -441,11 +442,47 @@ async def test_ready_fails_when_bot_cannot_access_configured_forum():
     assert str(YDB_FORUM) in str(channel._startup_error)
 
 
+@pytest.mark.asyncio
+async def test_ready_starts_audit_mirror_only_once_across_reconnects():
+    channel = _channel()
+    channel.config.audit_forum_id = AUDIT_FORUM
+    channel._sync_backlog = AsyncMock()
+    guild = MagicMock()
+    guild.get_channel.side_effect = lambda channel_id: (
+        SimpleNamespace(id=channel_id)
+        if channel_id in {TEXT_CHANNEL, YDB_FORUM, AUDIT_FORUM}
+        else None
+    )
+    channel._client = MagicMock()
+    channel._client.user = SimpleNamespace(id=DOGGY)
+    channel._client.get_guild.return_value = guild
+
+    with patch(
+        "nerve.channels.discord_mirror.DiscordSessionMirror"
+    ) as mirror_cls:
+        mirror_cls.return_value.start = AsyncMock()
+        await channel._on_ready()
+        await channel._on_ready()
+
+    mirror_cls.assert_called_once()
+    mirror_cls.return_value.start.assert_awaited_once()
+
+
 def test_validation_is_fail_closed():
     cfg = NerveConfig.from_dict({"discord": {"enabled": True}})
     channel = DiscordChannel(cfg, MagicMock(), MagicMock())
     with pytest.raises(ValueError, match="guild_id"):
         channel._validate_config()
+
+
+def test_validation_allows_outbound_only_audit_forum():
+    cfg = NerveConfig.from_dict({"discord": {
+        "enabled": True,
+        "bot_token": "synthetic-token",
+        "guild_id": GUILD,
+        "audit_forum_id": 350,
+    }})
+    DiscordChannel(cfg, MagicMock(), MagicMock())._validate_config()
 
 
 def test_validation_rejects_one_forum_used_by_two_projects():
@@ -458,4 +495,18 @@ def test_validation_rejects_one_forum_used_by_two_projects():
     }})
     channel = DiscordChannel(cfg, MagicMock(), MagicMock())
     with pytest.raises(ValueError, match="different channel"):
+        channel._validate_config()
+
+
+def test_validation_rejects_audit_forum_as_inbound_project_forum():
+    cfg = NerveConfig.from_dict({"discord": {
+        "enabled": True,
+        "bot_token": "synthetic-token",
+        "guild_id": GUILD,
+        "task_forums": {"YDB": YDB_FORUM},
+        "audit_forum_id": YDB_FORUM,
+        "allowed_author_ids": [USER],
+    }})
+    channel = DiscordChannel(cfg, MagicMock(), MagicMock())
+    with pytest.raises(ValueError, match="outbound-only"):
         channel._validate_config()
