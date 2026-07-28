@@ -100,6 +100,11 @@ async def test_mirror_creates_one_thread_and_incrementally_appends(db):
     await db.log_session_event("session-1", "created", {"source": "cron"})
     await db.log_session_event(
         "session-1",
+        "started",
+        {"sdk_session_id": "private"},
+    )
+    await db.log_session_event(
+        "session-1",
         "codex_rate_limits",
         {"rateLimits": {"primary": {"usedPercent": 25}}},
     )
@@ -134,6 +139,8 @@ async def test_mirror_creates_one_thread_and_incrementally_appends(db):
     contents = _contents(thread)
     assert any("Nerve session mirror" in value for value in contents)
     assert any("event · created" in value for value in contents)
+    assert any("`[started]`" in value for value in contents)
+    assert all("sdk_session_id" not in value for value in contents)
     assert any("check the system" in value for value in contents)
     assert all("codex_rate_limits" not in value for value in contents)
     assert all("usedPercent" not in value for value in contents)
@@ -284,7 +291,7 @@ async def test_mirror_replaces_legacy_per_item_checkpoints_with_batches(db):
     checkpoints = await db.get_discord_mirror_items("session-legacy")
     assert set(checkpoints) == {("batch", 1)}
     assert any(
-        "event · started" in value and "one batched update" in value
+        "`[started]`" in value and "one batched update" in value
         for value in _contents(thread)
     )
 
@@ -444,3 +451,30 @@ def test_tool_calls_are_compact_and_grouped_like_telegram():
     assert body == "`[Read] x2`\n\nDone"
     assert "secret.txt" not in body
     assert "sensitive output" not in body
+
+
+def test_live_started_and_idle_events_are_compact():
+    mirror = DiscordSessionMirror(
+        client=_Client(),
+        db=AsyncMock(),
+        guild_id=100,
+        forum_id=200,
+        stream=StreamBroadcaster(),
+    )
+
+    rendered = mirror._render_live([
+        {
+            "kind": "system",
+            "label": "started",
+            "content": '{"sdk_session_id":"private"}',
+        },
+        {
+            "kind": "system",
+            "label": "idle",
+            "content": '{"duration_ms":1234}',
+        },
+    ])
+
+    assert rendered == "**live turn** · updating\n\n`[started]`\n\n`[idle]`"
+    assert "sdk_session_id" not in rendered
+    assert "duration_ms" not in rendered

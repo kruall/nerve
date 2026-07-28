@@ -31,6 +31,7 @@ _RECONCILE_PAGE_SIZE = 100
 _MAX_LIVE_BLOCK_CHARS = 20_000
 _MAX_LIVE_RENDER_CHARS = 12_000
 _BATCH_SEPARATOR = "\n\n———\n\n"
+_COMPACT_EVENT_TYPES = {"idle", "started"}
 
 
 def _split_message(text: str, limit: int = _MAX_DISCORD_MESSAGE) -> list[str]:
@@ -683,6 +684,11 @@ class DiscordSessionMirror:
         if item["item_kind"] == "event":
             item_type = str(item.get("item_type") or "event")
             details = item.get("details")
+            if item_type in _COMPACT_EVENT_TYPES:
+                text = f"`[{item_type}]`"
+                if created:
+                    text += f" · `{created}`"
+                return text
             if item_type == "external_tool_call" and isinstance(details, dict):
                 text = _compact_tool_label(details.get("tool"))
                 if created:
@@ -779,10 +785,13 @@ class DiscordSessionMirror:
                 tool_name = None
                 label = str(block.get("label") or "system")
                 content = str(block.get("content") or "")
-                rendered.append(
-                    f"**system · `{label}`**"
-                    + (f"\n```\n{content}\n```" if content else "")
-                )
+                if label in _COMPACT_EVENT_TYPES:
+                    rendered.append(f"`[{label}]`")
+                else:
+                    rendered.append(
+                        f"**system · `{label}`**"
+                        + (f"\n```\n{content}\n```" if content else "")
+                    )
         text = "\n\n".join(part for part in rendered if part)
         if len(text) <= _MAX_LIVE_RENDER_CHARS:
             return text
