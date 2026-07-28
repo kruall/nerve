@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from nerve.agent.tools.handlers.discord import (
@@ -15,6 +19,7 @@ from nerve.config import DiscordConfig, NerveConfig
 from nerve.discord_tags import (
     DISCORD_FORUM_TAG_METADATA_KEY,
     DiscordForumTagManager,
+    _DiscordRequestThrottle,
     dispatch_discord_forum_tag_action,
 )
 
@@ -299,3 +304,137 @@ def test_target_id_mismatch_fails_without_discord_call(monkeypatch):
     assert result.ok is False
     assert result.audit_event["error"] == "Discord action target_id mismatch"
     assert calls == []
+
+
+def test_request_throttle_spaces_serial_requests():
+    now = [0.0]
+    request_times: list[float] = []
+    sleep_delays: list[float] = []
+
+    def sleep(delay: float) -> None:
+        sleep_delays.append(delay)
+        now[0] += delay
+
+    throttle = _DiscordRequestThrottle(
+        min_interval=0.5,
+        clock=lambda: now[0],
+        sleep=sleep,
+    )
+
+    def request() -> httpx.Response:
+        request_times.append(now[0])
+        return httpx.Response(200, json={"ok": True})
+
+    throttle.request(request)
+    throttle.request(request)
+
+    assert request_times == [0.0, 0.5]
+    assert sleep_delays == [0.5]
+
+
+def test_request_throttle_retries_429_after_retry_after():
+    now = [0.0]
+    request_times: list[float] = []
+    responses = [
+        httpx.Response(429, json={"retry_after": 1.25}),
+        httpx.Response(200, json={"ok": True}),
+    ]
+
+    def sleep(delay: float) -> None:
+        now[0] += delay
+
+    throttle = _DiscordRequestThrottle(
+        min_interval=0.5,
+        max_rate_limit_retries=1,
+        clock=lambda: now[0],
+        sleep=sleep,
+    )
+
+    def request() -> httpx.Response:
+        request_times.append(now[0])
+        return responses.pop(0)
+
+    response = throttle.request(request)
+
+    assert response.status_code == 200
+    assert request_times == [0.0, 1.25]
+
+
+def test_request_throttle_honors_exhausted_bucket_header():
+    now = [0.0]
+    request_times: list[float] = []
+
+    def sleep(delay: float) -> None:
+        now[0] += delay
+
+    throttle = _DiscordRequestThrottle(
+        min_interval=0.5,
+        clock=lambda: now[0],
+        sleep=sleep,
+    )
+    responses = [
+        httpx.Response(
+            200,
+            headers={
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset-After": "2.0",
+            },
+            json={"ok": True},
+        ),
+        httpx.Response(200, json={"ok": True}),
+    ]
+
+    def request() -> httpx.Response:
+        request_times.append(now[0])
+        return responses.pop(0)
+
+    throttle.request(request)
+    throttle.request(request)
+
+    assert request_times == [0.0, 2.0]
+
+
+def test_approved_mutations_are_serialized(monkeypatch):
+    active = 0
+    max_active = 0
+    counter_lock = threading.Lock()
+
+    def execute(self, action, *, audit_reason=""):
+        nonlocal active, max_active
+        with counter_lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.02)
+        with counter_lock:
+            active -= 1
+        return {"status": "executed"}
+
+    monkeypatch.setattr(DiscordForumTagManager, "execute", execute)
+    action = {
+        "version": 1,
+        "operation": "create_tag",
+        "project": "NERVE",
+        "forum_id": str(FORUM_ID),
+        "tag": {
+            "name": "In review",
+            "moderated": False,
+            "emoji_id": None,
+            "emoji_name": None,
+        },
+    }
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(
+                dispatch_discord_forum_tag_action,
+                _notification(action, decision_target=f"action-{index}"),
+                f"action-{index}",
+                "approve",
+                _config(),
+            )
+            for index in range(2)
+        ]
+        results = [future.result() for future in futures]
+
+    assert all(result.ok for result in results)
+    assert max_active == 1

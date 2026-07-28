@@ -12,8 +12,10 @@ from __future__ import annotations
 import json
 import logging
 import stat
+import threading
+import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote
 
 import httpx
@@ -29,6 +31,9 @@ DISCORD_FORUM_TAG_METADATA_KEY = "discord_forum_tag_action"
 _API_BASE = "https://discord.com/api/v10"
 _FORUM_CHANNEL_TYPES = frozenset({15, 16})
 _THREAD_CHANNEL_TYPES = frozenset({10, 11, 12})
+_DISCORD_MIN_REQUEST_INTERVAL_SECONDS = 0.5
+_DISCORD_MAX_RATE_LIMIT_RETRIES = 2
+_DISCORD_MAX_THROTTLE_DELAY_SECONDS = 30.0
 _MUTATION_OPERATIONS = frozenset(
     {
         "create_tag",
@@ -44,6 +49,105 @@ _TAG_FIELDS = ("id", "name", "moderated", "emoji_id", "emoji_name")
 
 class DiscordForumTagError(ValueError):
     """A safe, user-facing failure from Discord forum-tag management."""
+
+
+class _DiscordRequestThrottle:
+    """Serialize REST calls and honor Discord rate-limit reset hints."""
+
+    def __init__(
+        self,
+        *,
+        min_interval: float = _DISCORD_MIN_REQUEST_INTERVAL_SECONDS,
+        max_rate_limit_retries: int = _DISCORD_MAX_RATE_LIMIT_RETRIES,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._min_interval = max(0.0, min_interval)
+        self._max_rate_limit_retries = max(0, max_rate_limit_retries)
+        self._clock = clock
+        self._sleep = sleep
+        self._lock = threading.Lock()
+        self._last_request_at: float | None = None
+        self._not_before = 0.0
+
+    def request(self, fn: Callable[[], httpx.Response]) -> httpx.Response:
+        """Run one request at a time, retrying bounded HTTP 429 responses."""
+        with self._lock:
+            retries = 0
+            while True:
+                self._wait_for_slot()
+                try:
+                    response = fn()
+                finally:
+                    self._last_request_at = self._clock()
+
+                retry_after = self._rate_limit_delay(response)
+                if retry_after is not None:
+                    self._not_before = max(
+                        self._not_before,
+                        self._last_request_at + retry_after,
+                    )
+
+                if (
+                    response.status_code != 429
+                    or retries >= self._max_rate_limit_retries
+                ):
+                    return response
+
+                retries += 1
+                logger.warning(
+                    "Discord API rate limited; retrying after %.3fs "
+                    "(attempt %d/%d)",
+                    retry_after or self._min_interval,
+                    retries,
+                    self._max_rate_limit_retries,
+                )
+
+    def _wait_for_slot(self) -> None:
+        now = self._clock()
+        earliest = self._not_before
+        if self._last_request_at is not None:
+            earliest = max(
+                earliest,
+                self._last_request_at + self._min_interval,
+            )
+        delay = earliest - now
+        if delay > 0:
+            self._sleep(delay)
+
+    def _rate_limit_delay(self, response: httpx.Response) -> float | None:
+        delay: float | None = None
+        if response.status_code == 429:
+            try:
+                error = response.json()
+            except ValueError:
+                error = {}
+            if isinstance(error, dict):
+                delay = _positive_float(error.get("retry_after"))
+            if delay is None:
+                delay = _positive_float(response.headers.get("Retry-After"))
+            if delay is None:
+                delay = self._min_interval
+        elif response.headers.get("X-RateLimit-Remaining") == "0":
+            delay = _positive_float(
+                response.headers.get("X-RateLimit-Reset-After")
+            )
+
+        if delay is None:
+            return None
+        return min(delay, _DISCORD_MAX_THROTTLE_DELAY_SECONDS)
+
+
+def _positive_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+_DISCORD_REQUEST_THROTTLE = _DiscordRequestThrottle()
+_DISCORD_MUTATION_LOCK = threading.Lock()
 
 
 def _load_token(config: DiscordConfig) -> str:
@@ -86,12 +190,14 @@ def _discord_request(
     if audit_reason:
         headers["X-Audit-Log-Reason"] = quote(audit_reason[:512], safe="")
     try:
-        response = httpx.request(
-            method,
-            f"{_API_BASE}/channels/{channel_id}",
-            headers=headers,
-            json=payload,
-            timeout=15.0,
+        response = _DISCORD_REQUEST_THROTTLE.request(
+            lambda: httpx.request(
+                method,
+                f"{_API_BASE}/channels/{channel_id}",
+                headers=headers,
+                json=payload,
+                timeout=15.0,
+            )
         )
     except httpx.HTTPError as exc:
         raise DiscordForumTagError(
@@ -743,10 +849,11 @@ def dispatch_discord_forum_tag_action(
         )
 
     try:
-        result = DiscordForumTagManager(config).execute(
-            action,
-            audit_reason=f"Nerve approval {notification.get('id', '')}",
-        )
+        with _DISCORD_MUTATION_LOCK:
+            result = DiscordForumTagManager(config).execute(
+                action,
+                audit_reason=f"Nerve approval {notification.get('id', '')}",
+            )
     except DiscordForumTagError as exc:
         logger.warning("Approved Discord forum-tag action failed: %s", exc)
         return notification_handlers.DispatchResult(
