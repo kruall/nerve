@@ -632,7 +632,7 @@ def test_live_lifecycle_events_are_compact():
 
 
 @pytest.mark.asyncio
-async def test_live_rate_limit_backend_status_is_ignored():
+async def test_ui_only_live_events_are_ignored():
     mirror = DiscordSessionMirror(
         client=_Client(),
         db=AsyncMock(),
@@ -642,11 +642,20 @@ async def test_live_rate_limit_backend_status_is_ignored():
     )
     mirror._mark_dirty = MagicMock()
 
-    await mirror._on_stream_event("session-1", {
-        "type": "backend_status",
-        "subtype": "codex_rate_limits",
-        "data": {"rateLimits": {"primary": {"usedPercent": 25}}},
-    })
+    for event in [
+        {
+            "type": "backend_status",
+            "subtype": "codex_rate_limits",
+            "data": {"rateLimits": {"primary": {"usedPercent": 25}}},
+        },
+        {
+            "type": "file_changed",
+            "path": "/private/project/secret.py",
+            "operation": "edit",
+            "tool_use_id": "tool-1",
+        },
+    ]:
+        await mirror._on_stream_event("session-1", event)
 
     assert "session-1" not in mirror._live_blocks
     mirror._mark_dirty.assert_not_called()

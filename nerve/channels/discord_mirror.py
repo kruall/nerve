@@ -183,6 +183,11 @@ class DiscordSessionMirror:
             # Nerve may store model reasoning for its own UI, but the audit
             # mirror intentionally exposes only user-visible output.
             return
+        if event_type == "file_changed":
+            # This is web-UI metadata emitted after a successful Edit/Write.
+            # The corresponding tool call is already mirrored, while paths
+            # and tool-use IDs are implementation details.
+            return
         if (
             event_type == "backend_status"
             and event.get("subtype") == "codex_rate_limits"
