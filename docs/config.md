@@ -191,7 +191,7 @@ WebSocket. It does not require an inbound listener or a public Nerve endpoint.
 | `discord.audit_forum_id` | int | `0` | Outbound-only forum where Nerve mirrors one thread per session |
 | `discord.audit_batch_window_seconds` | float | `60` | Window used to combine adjacent audit activity before updating Discord; terminal events flush immediately |
 | `discord.allowed_author_ids` | list[int] | `[]` | Human and peer-bot IDs allowed to invoke Nerve |
-| `discord.require_mention` | bool | `true` | Require a direct mention in ordinary channels and project-forum threads |
+| `discord.require_mention` | bool | `true` | Require a direct mention or a reply to the bot in ordinary channels and project-forum threads |
 
 The adapter is fail-closed: enabling it without a guild, at least one inbound
 channel/project forum or an outbound audit forum, and a token fails startup.
@@ -202,8 +202,8 @@ thread from that message and
 the initial agent turn is routed there. Further messages by allowed authors in
 ordinary-channel threads do not need another mention; they start agent turns,
 but the agent may deliberately choose not to publish a reply. Project-forum
-threads continue to require a direct mention for each agent turn. Replies are
-always sent to the individual thread.
+threads require either a direct mention or a reply to one of the bot's messages
+for each agent turn. Replies are always sent to the individual thread.
 
 On first connection Nerve primes each configured target without replaying old
 history. Later reconnects use durable cursors to process messages missed while

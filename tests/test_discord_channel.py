@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import discord
 import pytest
 
 from nerve.channels.base import OutboundMessage
@@ -82,7 +83,24 @@ def _message(
     guild_id: int = GUILD,
     content: str = f"<@{DOGGY}> ping",
     mentions: list[int] | None = None,
+    reply_author_id: int | None = None,
+    unresolved_reply: bool = False,
+    reference_type: discord.MessageReferenceType = (
+        discord.MessageReferenceType.reply
+    ),
 ):
+    reference = None
+    if reply_author_id is not None or unresolved_reply:
+        resolved = (
+            None
+            if unresolved_reply
+            else SimpleNamespace(author=SimpleNamespace(id=reply_author_id))
+        )
+        reference = SimpleNamespace(
+            type=reference_type,
+            resolved=resolved,
+            cached_message=None,
+        )
     message = SimpleNamespace(
         id=700,
         guild=SimpleNamespace(id=guild_id),
@@ -97,6 +115,7 @@ def _message(
         ),
         content=content,
         raw_mentions=[DOGGY] if mentions is None else mentions,
+        reference=reference,
         thread=None,
     )
     message.create_thread = AsyncMock()
@@ -134,6 +153,47 @@ def test_project_forum_thread_still_requires_mention():
         parent_id=YDB_FORUM,
         content="unmentioned forum update",
         mentions=[],
+    )) is False
+
+
+def test_project_forum_thread_accepts_reply_to_bot_without_mention():
+    assert _channel()._accepts(_message(
+        channel_id=YDB_THREAD,
+        parent_id=YDB_FORUM,
+        content="reply without mention",
+        mentions=[],
+        reply_author_id=DOGGY,
+    )) is True
+
+
+def test_project_forum_thread_rejects_reply_to_other_author_without_mention():
+    assert _channel()._accepts(_message(
+        channel_id=YDB_THREAD,
+        parent_id=YDB_FORUM,
+        content="reply to another participant",
+        mentions=[],
+        reply_author_id=USER,
+    )) is False
+
+
+def test_project_forum_thread_rejects_unresolved_reply_without_mention():
+    assert _channel()._accepts(_message(
+        channel_id=YDB_THREAD,
+        parent_id=YDB_FORUM,
+        content="reply whose target is unavailable",
+        mentions=[],
+        unresolved_reply=True,
+    )) is False
+
+
+def test_project_forum_thread_rejects_forwarded_bot_message_without_mention():
+    assert _channel()._accepts(_message(
+        channel_id=YDB_THREAD,
+        parent_id=YDB_FORUM,
+        content="forwarded bot message",
+        mentions=[],
+        reply_author_id=DOGGY,
+        reference_type=discord.MessageReferenceType.forward,
     )) is False
 
 

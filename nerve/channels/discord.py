@@ -5,7 +5,7 @@ configured guild, explicitly allowed text channels or project forums, and an
 explicit author allowlist. Its optional audit forum is outbound-only. A direct
 bot mention in a text channel starts a conversation thread. Messages inside
 conversation threads do not require further mentions, while project-forum
-threads keep the mention requirement.
+threads accept either a direct mention or a reply to the bot.
 """
 
 from __future__ import annotations
@@ -509,6 +509,23 @@ class DiscordChannel(BaseChannel):
         }
         return self._bot_user_id in raw_mentions
 
+    def _is_reply_to_bot(self, message: discord.Message) -> bool:
+        reference = getattr(message, "reference", None)
+        if reference is None:
+            return False
+        if (
+            getattr(reference, "type", discord.MessageReferenceType.reply)
+            is not discord.MessageReferenceType.reply
+        ):
+            return False
+
+        referenced_message = getattr(reference, "resolved", None)
+        if referenced_message is None:
+            referenced_message = getattr(reference, "cached_message", None)
+        author = getattr(referenced_message, "author", None)
+        author_id = int(getattr(author, "id", 0) or 0)
+        return bool(self._bot_user_id and author_id == self._bot_user_id)
+
     def _accepts(self, message: discord.Message) -> bool:
         guild = message.guild
         author = message.author
@@ -527,6 +544,7 @@ class DiscordChannel(BaseChannel):
             self.config.require_mention
             and scope != "conversation_thread"
             and not self._has_direct_mention(message)
+            and not self._is_reply_to_bot(message)
         ):
             return False
 
