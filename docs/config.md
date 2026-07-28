@@ -186,29 +186,36 @@ WebSocket. It does not require an inbound listener or a public Nerve endpoint.
 | `discord.bot_token` | string | - | Bot token; keep only in `config.local.yaml` |
 | `discord.bot_token_file` | path | - | Preferred mode-0600 file containing one bot token |
 | `discord.guild_id` | int | `0` | The only server the Nerve instance accepts |
-| `discord.channel_ids` | list[int] | `[]` | Allowed ordinary text channels |
+| `discord.channel_ids` | list[int] | `[]` | Ordinary text channels where a mention starts a conversation thread |
 | `discord.task_forums` | map[string, int] | `{}` | Project name to Discord forum-channel ID |
 | `discord.allowed_author_ids` | list[int] | `[]` | Human and peer-bot IDs allowed to invoke Nerve |
-| `discord.require_mention` | bool | `true` | Require a direct mention of this bot |
+| `discord.require_mention` | bool | `true` | Require a direct mention in ordinary channels and project-forum threads |
 
 The adapter is fail-closed: enabling it without a guild, at least one channel
 or project forum, an author allowlist, and a token fails startup. A forum post
-is a thread, so the forum's parent ID belongs in `task_forums`; replies are
-sent to the individual thread. On first connection Nerve primes each configured
-target without replaying old history. Later reconnects use durable cursors to
-process messages missed while Nerve was offline, including active and recently
+is a thread, so the forum's parent ID belongs in `task_forums`. In an ordinary
+text channel, a direct mention starts a Discord thread from that message and
+the initial agent turn is routed there. Further messages by allowed authors in
+ordinary-channel threads do not need another mention; they start agent turns,
+but the agent may deliberately choose not to publish a reply. Project-forum
+threads continue to require a direct mention for each agent turn. Replies are
+always sent to the individual thread.
+
+On first connection Nerve primes each configured target without replaying old
+history. Later reconnects use durable cursors to process messages missed while
+Nerve was offline, including active conversation threads and active or recently
 archived project-forum threads.
 
 The session stream and final answer remain internal. An agent publishes a
 deliberate Discord-visible reply only through the session-bound `discord_send`
-MCP tool. The tool cannot select a destination: it sends only to the text
-channel or forum thread that drove the active Discord turn.
+MCP tool. The tool cannot select a destination: it sends only to the
+conversation or project-forum thread that drove the active Discord turn.
 
 Enable the **Message Content Intent** for the bot in Discord's Developer
 Portal. Grant only the channel permissions required by the deployment:
-View Channels, Read Message History, Send Messages, Send Messages in Threads,
-and (for later task-tag management) Manage Threads. Administrator is not
-required.
+View Channels, Read Message History, Send Messages, Create Public Threads,
+Send Messages in Threads, and (for later task-tag management) Manage Threads.
+Administrator is not required.
 
 ```yaml
 discord:

@@ -12,6 +12,7 @@ from nerve.config import NerveConfig
 
 GUILD = 100
 TEXT_CHANNEL = 200
+CONVERSATION_THREAD = 201
 YDB_FORUM = 300
 YDB_THREAD = 301
 USER = 400
@@ -80,7 +81,7 @@ def _message(
     content: str = f"<@{DOGGY}> ping",
     mentions: list[int] | None = None,
 ):
-    return SimpleNamespace(
+    message = SimpleNamespace(
         id=700,
         guild=SimpleNamespace(id=guild_id),
         author=SimpleNamespace(
@@ -94,11 +95,23 @@ def _message(
         ),
         content=content,
         raw_mentions=[DOGGY] if mentions is None else mentions,
+        thread=None,
     )
+    message.create_thread = AsyncMock()
+    return message
 
 
 def test_accepts_allowed_explicit_mention_in_text_channel():
     assert _channel()._accepts(_message()) is True
+
+
+def test_accepts_conversation_thread_message_without_mention():
+    assert _channel()._accepts(_message(
+        channel_id=CONVERSATION_THREAD,
+        parent_id=TEXT_CHANNEL,
+        content="follow-up without mention",
+        mentions=[],
+    )) is True
 
 
 def test_discord_responses_require_explicit_mcp_send():
@@ -111,6 +124,15 @@ def test_accepts_allowed_peer_bot_in_project_forum_thread():
         parent_id=YDB_FORUM,
         author_id=PEER_BOT,
     )) is True
+
+
+def test_project_forum_thread_still_requires_mention():
+    assert _channel()._accepts(_message(
+        channel_id=YDB_THREAD,
+        parent_id=YDB_FORUM,
+        content="unmentioned forum update",
+        mentions=[],
+    )) is False
 
 
 @pytest.mark.parametrize("message", [
@@ -132,21 +154,74 @@ def test_mention_is_removed_from_agent_prompt():
 
 
 @pytest.mark.asyncio
-async def test_dispatch_uses_one_session_per_text_channel():
+async def test_text_channel_mention_creates_thread_and_dispatches_there():
     channel = _channel()
     channel.router.handle_message = AsyncMock()
+    message = _message()
+    thread = SimpleNamespace(
+        id=CONVERSATION_THREAD,
+        parent_id=TEXT_CHANNEL,
+        name="Nerve · ping",
+    )
+    message.create_thread.return_value = thread
 
-    await channel._dispatch(_message())
+    await channel._ingest(message)
 
+    message.create_thread.assert_awaited_once_with(
+        name="Nerve · ping",
+        reason="Nerve Discord conversation",
+    )
     inbound = channel.router.handle_message.await_args.args[0]
     assert inbound.channel_name == "discord"
-    assert inbound.channel_key == f"discord:{GUILD}:{TEXT_CHANNEL}"
-    assert inbound.sender_id == str(TEXT_CHANNEL)
-    assert inbound.session_title == "Discord · general"
+    assert inbound.channel_key == f"discord:{GUILD}:{CONVERSATION_THREAD}"
+    assert inbound.sender_id == str(CONVERSATION_THREAD)
+    assert inbound.session_title == "Discord · thread · Nerve · ping"
     assert inbound.steer_if_busy is True
+    assert inbound.metadata["discord_channel_id"] == CONVERSATION_THREAD
+    assert inbound.metadata["discord_parent_channel_id"] == TEXT_CHANNEL
+    assert inbound.metadata["discord_origin_channel_id"] == TEXT_CHANNEL
     assert inbound.metadata["discord_project"] == ""
     assert inbound.metadata["discord_author_id"] == USER
     assert inbound.text.endswith("ping")
+    assert channel.db.set_sync_cursor.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_existing_message_thread_is_reused():
+    channel = _channel()
+    channel.router.handle_message = AsyncMock()
+    message = _message()
+    message.thread = SimpleNamespace(
+        id=CONVERSATION_THREAD,
+        parent_id=TEXT_CHANNEL,
+        name="existing",
+    )
+
+    await channel._ingest(message)
+
+    message.create_thread.assert_not_awaited()
+    inbound = channel.router.handle_message.await_args.args[0]
+    assert inbound.channel_key == f"discord:{GUILD}:{CONVERSATION_THREAD}"
+
+
+@pytest.mark.asyncio
+async def test_conversation_thread_follow_up_dispatches_without_mention():
+    channel = _channel()
+    channel.router.handle_message = AsyncMock()
+    message = _message(
+        channel_id=CONVERSATION_THREAD,
+        parent_id=TEXT_CHANNEL,
+        content="I have more context",
+        mentions=[],
+    )
+
+    await channel._ingest(message)
+
+    message.create_thread.assert_not_awaited()
+    inbound = channel.router.handle_message.await_args.args[0]
+    assert inbound.channel_key == f"discord:{GUILD}:{CONVERSATION_THREAD}"
+    assert inbound.text.endswith("I have more context")
+    assert "публичный ответ нужен только когда он полезен" in inbound.text
 
 
 @pytest.mark.asyncio
@@ -166,6 +241,15 @@ async def test_dispatch_maps_forum_thread_to_project():
     assert inbound.metadata["discord_parent_channel_id"] == YDB_FORUM
     assert inbound.metadata["discord_project"] == "YDB"
     assert "проекта YDB" in inbound.text
+
+
+def test_conversation_thread_name_fits_discord_limit():
+    channel = _channel()
+    name = channel._conversation_thread_name(_message(
+        content=f"<@{DOGGY}> " + "long subject " * 20,
+    ))
+    assert name.startswith("Nerve · ")
+    assert len(name) == 100
 
 
 @pytest.mark.asyncio
@@ -206,8 +290,13 @@ async def test_restart_replays_messages_after_durable_cursor():
     channel = _channel()
     missed = _message(content=f"<@{DOGGY}> missed")
     missed.id = 778
+    missed.create_thread.return_value = SimpleNamespace(
+        id=778,
+        parent_id=TEXT_CHANNEL,
+        name="Nerve · missed",
+    )
     target = _HistoryChannel(TEXT_CHANNEL, [missed], last_message_id=778)
-    channel.db.get_sync_cursor = AsyncMock(side_effect=["777", "777"])
+    channel.db.get_sync_cursor = AsyncMock(side_effect=["777", None, "777"])
     channel.router.handle_message = AsyncMock()
 
     await channel._sync_target(target, process_existing=False)
@@ -215,9 +304,41 @@ async def test_restart_replays_messages_after_durable_cursor():
     channel.router.handle_message.assert_awaited_once()
     after = target.history_calls[0]["after"]
     assert after.id == 777
-    channel.db.set_sync_cursor.assert_awaited_once_with(
+    assert channel.db.set_sync_cursor.await_count == 2
+    assert channel.db.set_sync_cursor.await_args_list[-1].args == (
         f"discord:{GUILD}:{TEXT_CHANNEL}",
         "778",
+    )
+
+
+@pytest.mark.asyncio
+async def test_ready_primes_active_conversation_threads():
+    channel = _channel()
+    thread = _HistoryChannel(
+        CONVERSATION_THREAD,
+        [],
+        last_message_id=778,
+        parent_id=TEXT_CHANNEL,
+        name="conversation",
+    )
+    forum = _ForumChannel([], last_message_id=0)
+    guild = MagicMock()
+    guild.active_threads = AsyncMock(return_value=[thread])
+    guild.get_channel.side_effect = lambda channel_id: (
+        _HistoryChannel(TEXT_CHANNEL, [], last_message_id=777)
+        if channel_id == TEXT_CHANNEL
+        else forum
+    )
+
+    await channel._sync_backlog(guild)
+
+    assert thread.history_calls == []
+    assert any(
+        call.args == (
+            f"discord:{GUILD}:{CONVERSATION_THREAD}",
+            "778",
+        )
+        for call in channel.db.set_sync_cursor.await_args_list
     )
 
 

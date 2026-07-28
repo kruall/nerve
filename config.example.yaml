@@ -79,6 +79,9 @@ telegram:
 discord:
   # Agent session output is never forwarded automatically. Discord-visible
   # replies are sent deliberately through the session-bound discord_send MCP tool.
+  # A mention in an ordinary text channel starts a conversation thread. Further
+  # messages in that thread do not need mentions. Project-forum threads continue
+  # to require a mention for each agent turn.
   enabled: false
   # bot_token_file: ~/.config/nerve/discord-bot-token
   # guild_id: 123456789012345678
@@ -87,6 +90,8 @@ discord:
   # task_forums:
   #   YDB: 123456789012345680
   # allowed_author_ids: [123456789012345681]
+  # Applies to ordinary-channel entry messages and project-forum threads.
+  # Conversation threads created below ordinary channels are always mention-free.
   require_mention: true
 
 # Quiet hours (local timezone)

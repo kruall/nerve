@@ -2,8 +2,9 @@
 
 The adapter is intentionally fail-closed. It accepts messages only from one
 configured guild, explicitly allowed text channels or project forums, and an
-explicit author allowlist. Group messages require a direct bot mention by
-default, which also prevents bot-to-bot reply loops.
+explicit author allowlist. A direct bot mention in a text channel starts a
+conversation thread. Messages inside conversation threads do not require
+further mentions, while project-forum threads keep the mention requirement.
 """
 
 from __future__ import annotations
@@ -33,6 +34,8 @@ logger = logging.getLogger(__name__)
 
 _CONNECT_TIMEOUT_SECONDS = 30.0
 _MAX_MESSAGE_LENGTH = 2000
+_MAX_THREAD_NAME_LENGTH = 100
+_THREAD_NAME_PREFIX = "Nerve · "
 
 
 def split_discord_message(text: str, limit: int = _MAX_MESSAGE_LENGTH) -> list[str]:
@@ -268,7 +271,15 @@ class DiscordChannel(BaseChannel):
 
     async def _ingest(self, message: discord.Message) -> None:
         if self._accepts(message):
-            await self._dispatch(message)
+            target = message.channel
+            if int(message.channel.id) in self._text_channels:
+                target = await self._ensure_conversation_thread(message)
+            await self._dispatch(message, target=target)
+            if int(target.id) != int(message.channel.id):
+                await self._advance_cursor(
+                    int(target.id),
+                    int(message.id),
+                )
         await self._advance_cursor(
             int(message.channel.id),
             int(message.id),
@@ -285,8 +296,15 @@ class DiscordChannel(BaseChannel):
         active_threads = {
             int(thread.id): thread
             for thread in guild_threads
-            if getattr(thread, "parent_id", None) in self._project_forums
+            if (
+                getattr(thread, "parent_id", None) in self._text_channels
+                or getattr(thread, "parent_id", None) in self._project_forums
+            )
         }
+        for thread in active_threads.values():
+            if getattr(thread, "parent_id", None) in self._text_channels:
+                await self._sync_target(thread, process_existing=False)
+
         for forum_id in sorted(self._project_forums):
             forum = guild.get_channel(forum_id)
             if forum is None:
@@ -377,10 +395,26 @@ class DiscordChannel(BaseChannel):
     def _forum_source_name(self, forum_id: int) -> str:
         return f"discord-forum:{self.config.guild_id}:{forum_id}"
 
+    def _message_scope(self, message: discord.Message) -> str:
+        channel_id = int(message.channel.id)
+        parent_id = getattr(message.channel, "parent_id", None)
+        if channel_id in self._text_channels:
+            return "text_channel"
+        if parent_id in self._text_channels:
+            return "conversation_thread"
+        if parent_id in self._project_forums:
+            return "project_forum_thread"
+        return ""
+
+    def _has_direct_mention(self, message: discord.Message) -> bool:
+        raw_mentions = {
+            int(value) for value in getattr(message, "raw_mentions", [])
+        }
+        return self._bot_user_id in raw_mentions
+
     def _accepts(self, message: discord.Message) -> bool:
         guild = message.guild
         author = message.author
-        channel = message.channel
 
         if guild is None or int(guild.id) != self.config.guild_id:
             return False
@@ -388,20 +422,16 @@ class DiscordChannel(BaseChannel):
         if author_id == self._bot_user_id or author_id not in self._allowed_authors:
             return False
 
-        channel_id = int(channel.id)
-        parent_id = getattr(channel, "parent_id", None)
-        if (
-            channel_id not in self._text_channels
-            and parent_id not in self._project_forums
-        ):
+        scope = self._message_scope(message)
+        if not scope:
             return False
 
-        if self.config.require_mention:
-            raw_mentions = {
-                int(value) for value in getattr(message, "raw_mentions", [])
-            }
-            if self._bot_user_id not in raw_mentions:
-                return False
+        if (
+            self.config.require_mention
+            and scope != "conversation_thread"
+            and not self._has_direct_mention(message)
+        ):
+            return False
 
         return bool(self._message_text(message))
 
@@ -412,31 +442,89 @@ class DiscordChannel(BaseChannel):
             text = mention.sub("", text)
         return text.strip()
 
-    async def _dispatch(self, message: discord.Message) -> None:
+    def _conversation_thread_name(self, message: discord.Message) -> str:
+        subject = " ".join(self._message_text(message).split())
+        if not subject:
+            subject = "conversation"
+        available = _MAX_THREAD_NAME_LENGTH - len(_THREAD_NAME_PREFIX)
+        return _THREAD_NAME_PREFIX + subject[:available].rstrip()
+
+    async def _ensure_conversation_thread(
+        self,
+        message: discord.Message,
+    ) -> Any:
+        existing = getattr(message, "thread", None)
+        if existing is not None:
+            return existing
+
+        if self._client is not None:
+            existing = self._client.get_channel(int(message.id))
+            if (
+                existing is not None
+                and getattr(existing, "parent_id", None)
+                == int(message.channel.id)
+            ):
+                return existing
+
+        try:
+            return await message.create_thread(
+                name=self._conversation_thread_name(message),
+                reason="Nerve Discord conversation",
+            )
+        except discord.HTTPException as exc:
+            # Discord returns 160004 when another event handler or process
+            # created the message thread between the cache check and this call.
+            if exc.code == 160004 and self._client is not None:
+                existing = await self._client.fetch_channel(int(message.id))
+                if (
+                    getattr(existing, "parent_id", None)
+                    == int(message.channel.id)
+                ):
+                    return existing
+            raise
+
+    async def _dispatch(
+        self,
+        message: discord.Message,
+        *,
+        target: Any | None = None,
+    ) -> None:
         guild_id = int(message.guild.id)
-        channel_id = int(message.channel.id)
-        parent_id = getattr(message.channel, "parent_id", None)
+        target = target or message.channel
+        channel_id = int(target.id)
+        parent_id = getattr(target, "parent_id", None)
         project = self._project_forums.get(parent_id, "")
         author_name = self._safe_label(
             getattr(message.author, "display_name", "")
         )
         channel_name = self._safe_label(
-            getattr(message.channel, "name", "")
+            getattr(target, "name", "")
         )
         author = author_name or str(message.author.id)
-        location = (
-            f"форумной темы проекта {project}"
-            if project
-            else "общего текстового канала"
+        if project:
+            location = f"форумной темы проекта {project}"
+        elif parent_id in self._text_channels:
+            location = "диалогового треда обычного канала"
+        else:
+            location = "общего текстового канала"
+        response_hint = (
+            " Бот получает все сообщения треда; публичный ответ нужен только "
+            "когда он полезен."
+            if parent_id in self._text_channels
+            else ""
         )
         context = (
             f"[Это сообщение Discord из {location}; ответ увидят участники "
-            f"канала. Автор: {author}.]\n\n"
+            f"канала.{response_hint} Автор: {author}.]\n\n"
         )
         title = (
             f"Discord · {project} · {channel_name or channel_id}"
             if project
-            else f"Discord · {channel_name or channel_id}"
+            else (
+                f"Discord · thread · {channel_name or channel_id}"
+                if parent_id in self._text_channels
+                else f"Discord · {channel_name or channel_id}"
+            )
         )
         await self.router.handle_message(InboundMessage(
             channel_name=self.name,
@@ -449,6 +537,7 @@ class DiscordChannel(BaseChannel):
                 "discord_guild_id": guild_id,
                 "discord_channel_id": channel_id,
                 "discord_parent_channel_id": parent_id,
+                "discord_origin_channel_id": int(message.channel.id),
                 "discord_project": project,
                 "discord_author_id": int(message.author.id),
                 "discord_author_name": author_name,

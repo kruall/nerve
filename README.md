@@ -128,8 +128,10 @@ Powered by `python-telegram-bot` v21+.
 Powered by `discord.py` with a fail-closed guild, channel/forum, and author
 allowlist.
 
-- Direct-mention activation to prevent bot loops
-- One persistent Nerve session per text channel or forum thread
+- A direct mention in a text channel starts a conversation thread
+- Conversation threads react to allowed messages without further mentions
+- Project-forum threads require a direct mention for every agent turn
+- One persistent Nerve session per conversation or project-forum thread
 - Separate forum channels can represent separate task projects
 - Durable cursors replay messages missed during a Nerve restart
 - Outbound-only Gateway connection; no public Nerve endpoint required
