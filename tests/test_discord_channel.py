@@ -881,6 +881,68 @@ async def test_ready_starts_audit_mirror_only_once_across_reconnects():
     mirror_cls.return_value.start.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_ready_starts_presence_only_once_across_reconnects():
+    channel = _channel()
+    channel.config.presence_enabled = True
+    channel.config.presence_refresh_interval_seconds = 600
+    channel._sync_backlog = AsyncMock()
+    guild = MagicMock()
+    guild.get_channel.side_effect = lambda channel_id: (
+        SimpleNamespace(id=channel_id)
+        if channel_id in {TEXT_CHANNEL, YDB_FORUM}
+        else None
+    )
+    channel._client = MagicMock()
+    channel._client.user = SimpleNamespace(id=DOGGY)
+    channel._client.get_guild.return_value = guild
+
+    with patch(
+        "nerve.channels.discord_presence.DiscordPresence"
+    ) as presence_cls:
+        presence_cls.return_value.start = AsyncMock()
+        await channel._on_ready()
+        await channel._on_ready()
+        assert channel._post_ready_task is not None
+        await channel._post_ready_task
+
+    presence_cls.assert_called_once()
+    assert presence_cls.call_args.kwargs["refresh_interval_seconds"] == 600
+    presence_cls.return_value.start.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_presence_reads_current_codex_primary_rate_limits():
+    channel = _channel()
+    backend = SimpleNamespace(preflight=AsyncMock(return_value={
+        "available": True,
+        "rate_limits": {
+            "primary": {"usedPercent": 35},
+        },
+    }))
+    channel.router.engine._backends = {"codex": backend}
+
+    assert await channel._read_codex_rate_limits() == {
+        "primary": {"usedPercent": 35},
+    }
+    backend.preflight.assert_awaited_once_with(
+        force=True,
+        validate_default_model=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_stop_stops_presence_before_discarding_it():
+    channel = _channel()
+    presence = SimpleNamespace(stop=AsyncMock())
+    channel._presence = presence
+
+    await channel.stop()
+
+    presence.stop.assert_awaited_once_with()
+    assert channel._presence is None
+
+
 def test_validation_is_fail_closed():
     cfg = NerveConfig.from_dict({"discord": {"enabled": True}})
     channel = DiscordChannel(cfg, MagicMock(), MagicMock())
@@ -907,6 +969,18 @@ def test_validation_rejects_negative_audit_batch_window():
         "audit_batch_window_seconds": -1,
     }})
     with pytest.raises(ValueError, match="audit_batch_window_seconds"):
+        DiscordChannel(cfg, MagicMock(), MagicMock())._validate_config()
+
+
+def test_validation_rejects_presence_refresh_below_one_minute():
+    cfg = NerveConfig.from_dict({"discord": {
+        "enabled": True,
+        "bot_token": "synthetic-token",
+        "guild_id": GUILD,
+        "audit_forum_id": 350,
+        "presence_refresh_interval_seconds": 59,
+    }})
+    with pytest.raises(ValueError, match="presence_refresh_interval_seconds"):
         DiscordChannel(cfg, MagicMock(), MagicMock())._validate_config()
 
 

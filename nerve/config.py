@@ -287,6 +287,8 @@ class DiscordConfig:
     task_forums: dict[str, int] = field(default_factory=dict)
     audit_forum_id: int = 0
     audit_batch_window_seconds: float = 60.0
+    presence_enabled: bool = False
+    presence_refresh_interval_seconds: float = 300.0
     allowed_author_ids: list[int] = field(default_factory=list)
     require_mention: bool = True
 
@@ -309,6 +311,10 @@ class DiscordConfig:
             audit_forum_id=int(d.get("audit_forum_id", 0) or 0),
             audit_batch_window_seconds=float(
                 d.get("audit_batch_window_seconds", 60.0)
+            ),
+            presence_enabled=bool(d.get("presence_enabled", False)),
+            presence_refresh_interval_seconds=float(
+                d.get("presence_refresh_interval_seconds", 300.0)
             ),
             allowed_author_ids=[
                 int(value) for value in d.get("allowed_author_ids", []) or []

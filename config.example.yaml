@@ -102,6 +102,13 @@ discord:
   # Collect session activity before updating Discord. Terminal events flush
   # immediately. Set to 0 only when immediate audit updates are required.
   audit_batch_window_seconds: 60
+  # Optional compact bot activity, for example:
+  # "Nerve · 2 active · Codex 73% left". This exposes operational data to
+  # every member who can see the bot, so it is disabled by default.
+  presence_enabled: false
+  # Refresh Codex quota in the presence periodically. Live session and quota
+  # events update the activity sooner, with Discord-safe rate limiting.
+  presence_refresh_interval_seconds: 300
   # allowed_author_ids: [123456789012345681]
   # Applies to ordinary-channel entry messages and project-forum threads.
   # Conversation threads created below ordinary channels are always mention-free.

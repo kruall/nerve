@@ -84,6 +84,7 @@ class DiscordChannel(BaseChannel):
         self._client_task: asyncio.Task[None] | None = None
         self._post_ready_task: asyncio.Task[None] | None = None
         self._session_mirror: Any | None = None
+        self._presence: Any | None = None
         self._approval_inbox: Any | None = None
         self._notification_inbox: Any | None = None
         self._notification_service: Any | None = None
@@ -170,6 +171,10 @@ class DiscordChannel(BaseChannel):
         if self.config.audit_batch_window_seconds < 0:
             raise ValueError(
                 "discord.audit_batch_window_seconds must be non-negative"
+            )
+        if self.config.presence_refresh_interval_seconds < 60:
+            raise ValueError(
+                "discord.presence_refresh_interval_seconds must be at least 60"
             )
 
     def _load_token(self) -> str:
@@ -280,11 +285,15 @@ class DiscordChannel(BaseChannel):
 
         mirror = self._session_mirror
         self._session_mirror = None
+        presence = self._presence
+        self._presence = None
         self._approval_inbox = None
         self._notification_inbox = None
 
         if mirror is not None:
             await mirror.stop()
+        if presence is not None:
+            await presence.stop()
         if client is not None and not client.is_closed():
             await client.close()
         if task is not None:
@@ -334,6 +343,28 @@ class DiscordChannel(BaseChannel):
 
     async def _run_post_ready(self, guild: discord.Guild) -> None:
         """Start optional integrations and catch up without blocking startup."""
+        if self.config.presence_enabled and self._presence is None:
+            try:
+                from nerve.channels.discord_presence import DiscordPresence
+
+                self._presence = DiscordPresence(
+                    client=self._client,
+                    running_session_count=self._running_session_count,
+                    rate_limit_reader=self._read_codex_rate_limits,
+                    refresh_interval_seconds=(
+                        self.config.presence_refresh_interval_seconds
+                    ),
+                )
+                await self._presence.start()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._presence = None
+                logger.exception(
+                    "Discord presence failed to start; "
+                    "continuing without operational status"
+                )
+
         if self.config.audit_forum_id and self._session_mirror is None:
             try:
                 from nerve.channels.discord_mirror import DiscordSessionMirror
@@ -421,6 +452,20 @@ class DiscordChannel(BaseChannel):
             logger.exception(
                 "Discord backlog catch-up failed; live messages remain available"
             )
+
+    def _running_session_count(self) -> int:
+        return len(self.router.engine.sessions.get_running_ids())
+
+    async def _read_codex_rate_limits(self) -> dict[str, Any] | None:
+        backend = self.router.engine._backends.get("codex")
+        if backend is None:
+            return None
+        status = await backend.preflight(
+            force=True,
+            validate_default_model=False,
+        )
+        rate_limits = status.get("rate_limits")
+        return rate_limits if isinstance(rate_limits, dict) else None
 
     async def _on_message(self, message: discord.Message) -> None:
         try:

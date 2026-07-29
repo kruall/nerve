@@ -190,6 +190,8 @@ WebSocket. It does not require an inbound listener or a public Nerve endpoint.
 | `discord.task_forums` | map[string, int] | `{}` | Project name to Discord forum-channel ID |
 | `discord.audit_forum_id` | int | `0` | Outbound-only forum where Nerve mirrors one thread per session |
 | `discord.audit_batch_window_seconds` | float | `60` | Window used to combine adjacent audit activity before updating Discord; terminal events flush immediately |
+| `discord.presence_enabled` | bool | `false` | Show a compact operational summary in the Discord bot activity |
+| `discord.presence_refresh_interval_seconds` | float | `300` | Refresh interval for Codex quota shown in the bot activity; minimum 60 seconds |
 | `discord.allowed_author_ids` | list[int] | `[]` | Human and peer-bot IDs allowed to invoke Nerve |
 | `discord.require_mention` | bool | `true` | Require a direct mention or a reply to the bot in ordinary channels and project-forum threads |
 
@@ -206,6 +208,14 @@ threads require either a direct mention or a reply to one of the bot's messages
 for each agent turn. When a Discord reply is resolved, the agent input includes
 its author and up to 500 characters of the referenced text. Replies are always
 sent to the individual thread.
+
+When `presence_enabled` is true, the bot activity shows a compact summary such
+as `Nerve · 2 active · Codex 73% left`. "Active" counts sessions currently
+running an agent turn, not all stored conversations. The Codex value is the
+remaining percentage of the primary account rate-limit window. Nerve refreshes
+it periodically and also reacts to live Codex rate-limit updates. The activity
+is visible to every server member who can see the bot, so the feature is
+opt-in.
 
 Allowed participant messages in project-forum threads are also kept as a
 durable, bounded thread context even when they do not invoke the agent. On the
