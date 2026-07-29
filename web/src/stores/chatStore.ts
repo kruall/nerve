@@ -45,6 +45,12 @@ export interface QuoteEntry {
   instruction: string;
 }
 
+export interface ModelTier {
+  id: string;
+  model: string;
+  effort: string;
+}
+
 const QUOTE_DEFAULTS: Record<QuoteAction, string> = {
   add: '',
   remove: 'Remove this',
@@ -146,6 +152,7 @@ interface ChatState {
   // current pick (null = use the server default).
   availableModels: { id: string; provider: string; backend: string }[];
   modelDefaults: Record<string, string>;
+  modelTiers: ModelTier[];
   // Agent backends for the new-chat selector (claude / codex).
   backendOptions: { id: string; label: string; model: string; models?: string[]; available?: boolean; reason?: string }[];
   backendDefault: string | null;
@@ -179,6 +186,8 @@ interface ChatState {
   setNewChatBackend: (backend: string | null) => void;
   /** Set the model for the next message (null → server default). */
   setSelectedModel: (backend: string, model: string | null) => void;
+  /** Pin a Codex session to a tier, or return it to automatic routing. */
+  setSessionModelTier: (sessionId: string, tierId: string | null) => Promise<void>;
   stopSession: () => void;
   handleWSMessage: (msg: WSMessage) => void;
   addQuote: (text: string, action: QuoteAction) => void;
@@ -237,6 +246,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   searchFocusNonce: 0,
   availableModels: [],
   modelDefaults: {},
+  modelTiers: [],
   backendOptions: [],
   backendDefault: null,
   newChatBackend: null,
@@ -678,6 +688,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return {
           availableModels: res.models,
           modelDefaults: res.defaults ?? { claude: res.default },
+          modelTiers: res.model_tiers?.options ?? [],
           backendOptions: res.backends?.options ?? [],
           backendDefault: res.backends?.default ?? null,
           selectedModels,
@@ -697,6 +708,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((state) => ({
       selectedModels: { ...state.selectedModels, [backend]: model },
     }));
+  },
+
+  setSessionModelTier: async (sessionId: string, tierId: string | null) => {
+    const session = get().sessions.find(s => s.id === sessionId);
+    if (!session || session.backend !== 'codex') return;
+    try {
+      const updated = await api.updateSession(
+        sessionId,
+        tierId ? { model_tier: tierId } : { model_pinned: false },
+      );
+      set(state => ({
+        sessions: state.sessions.map(item =>
+          item.id === sessionId ? { ...item, ...updated } : item,
+        ),
+        searchResults: state.searchResults?.map(item =>
+          item.id === sessionId ? { ...item, ...updated } : item,
+        ) ?? null,
+      }));
+    } catch (e) {
+      console.error('Failed to update session model tier:', e);
+    }
   },
 
   sendMessage: async (content: string, fileIds?: string[], imageBlocks?: Array<{ url: string; filename: string; media_type: string }>) => {

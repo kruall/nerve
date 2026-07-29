@@ -43,7 +43,7 @@ export function ChatPage() {
     agentStatus, contextUsage, backendStatus, currentTodos, currentCCTasks,
     sidebarCollapsed, panels,
     modifiedFiles, modifiedFilesCount,
-    backendDefault, newChatBackend,
+    backendDefault, newChatBackend, modelTiers, setSessionModelTier,
     loadSessions, switchSession, createSession, deleteSession,
     sendMessage, stopSession, toggleSidebar, openFilesPanel,
   } = useChatStore();
@@ -235,6 +235,44 @@ export function ChatPage() {
                     {session?.model_tier ?? formatModelLabel(model)}
                   </span>
                 ) : null;
+              })()}
+              {(() => {
+                const session = sessions.find(s => s.id === activeSession);
+                if (session?.backend !== 'codex' || modelTiers.length === 0) {
+                  return null;
+                }
+                const customPinned = Boolean(session.model_pinned && !session.model_tier);
+                const value = session.model_pinned
+                  ? (session.model_tier ?? '__custom__')
+                  : '__auto__';
+                return (
+                  <select
+                    value={value}
+                    onChange={(event) => {
+                      const next = event.target.value;
+                      if (next === '__custom__') return;
+                      void setSessionModelTier(
+                        session.id,
+                        next === '__auto__' ? null : next,
+                      );
+                    }}
+                    disabled={session.is_running}
+                    title={session.is_running
+                      ? 'Model selection is unavailable while the session is running'
+                      : 'Choose automatic routing or pin a model tier for this session'}
+                    className="h-6 max-w-[150px] px-1.5 bg-surface-raised border border-border rounded text-[11px] text-text-faint outline-none focus:border-accent/50 cursor-pointer disabled:opacity-50"
+                  >
+                    <option value="__auto__">Auto</option>
+                    {customPinned && (
+                      <option value="__custom__">Manual · {session.model}</option>
+                    )}
+                    {modelTiers.map(tier => (
+                      <option key={tier.id} value={tier.id}>
+                        {tier.id}
+                      </option>
+                    ))}
+                  </select>
+                );
               })()}
               {statusLabel && (
                 <div className="flex items-center gap-1.5 text-[12px] text-text-muted">
