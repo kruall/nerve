@@ -504,6 +504,16 @@ async def lifespan(app: FastAPI):
 
     logger.info("Nerve started on %s:%d", config.gateway.host, config.gateway.port)
 
+    if discord_channel is not None:
+        try:
+            await discord_channel.emit_system_event(
+                "Nerve started",
+                details=f"Process ID: `{os.getpid()}`",
+                level="success",
+            )
+        except Exception as e:
+            logger.error("Failed to record Discord startup audit event: %s", e)
+
     # Send startup notification to the user (Telegram only, silent)
     try:
         await notification_service.send_notification(
@@ -522,6 +532,16 @@ async def lifespan(app: FastAPI):
     # this point cancellation or transport failure means daemon shutdown,
     # never an explicit user stop, so their durable checkpoints must survive.
     _engine.begin_shutdown()
+
+    if discord_channel is not None:
+        try:
+            await discord_channel.emit_system_event(
+                "Nerve stopping",
+                details=f"Process ID: `{os.getpid()}`",
+                level="warning",
+            )
+        except Exception as e:
+            logger.warning("Failed to record Discord shutdown audit event: %s", e)
 
     # Stop the loopback listener before the manager so no new requests
     # arrive while the MCP task group is shutting down.

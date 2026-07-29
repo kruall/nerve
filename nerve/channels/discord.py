@@ -87,6 +87,8 @@ class DiscordChannel(BaseChannel):
         self._presence: Any | None = None
         self._approval_inbox: Any | None = None
         self._notification_inbox: Any | None = None
+        self._system_audit: Any | None = None
+        self._system_audit_lock = asyncio.Lock()
         self._notification_service: Any | None = None
         self._ready = asyncio.Event()
         self._startup_error: Exception | None = None
@@ -289,6 +291,7 @@ class DiscordChannel(BaseChannel):
         self._presence = None
         self._approval_inbox = None
         self._notification_inbox = None
+        self._system_audit = None
 
         if mirror is not None:
             await mirror.stop()
@@ -343,6 +346,17 @@ class DiscordChannel(BaseChannel):
 
     async def _run_post_ready(self, guild: discord.Guild) -> None:
         """Start optional integrations and catch up without blocking startup."""
+        if self.config.audit_forum_id:
+            try:
+                await self._ensure_system_audit(guild)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Discord system audit failed to start; "
+                    "continuing without system events"
+                )
+
         if self.config.presence_enabled and self._presence is None:
             try:
                 from nerve.channels.discord_presence import DiscordPresence
@@ -452,6 +466,45 @@ class DiscordChannel(BaseChannel):
             logger.exception(
                 "Discord backlog catch-up failed; live messages remain available"
             )
+
+    async def _ensure_system_audit(
+        self,
+        guild: discord.Guild | None = None,
+    ) -> Any:
+        audit = self._system_audit
+        if audit is not None:
+            return audit
+        if not self.config.audit_forum_id:
+            raise RuntimeError("Discord audit forum is not configured")
+
+        async with self._system_audit_lock:
+            audit = self._system_audit
+            if audit is not None:
+                return audit
+            if self._client is None:
+                raise RuntimeError("Discord client is not running")
+
+            from nerve.channels.discord_system_audit import DiscordSystemAudit
+
+            audit = DiscordSystemAudit(
+                client=self._client,
+                guild_id=self.config.guild_id,
+                forum_id=self.config.audit_forum_id,
+            )
+            await audit.start(guild)
+            self._system_audit = audit
+            return audit
+
+    async def emit_system_event(
+        self,
+        title: str,
+        *,
+        details: str = "",
+        level: str = "info",
+    ) -> None:
+        """Append an important process event to the AUDIT System thread."""
+        audit = await self._ensure_system_audit()
+        await audit.emit(title, details=details, level=level)
 
     def _running_session_count(self) -> int:
         return len(self.router.engine.sessions.get_running_ids())

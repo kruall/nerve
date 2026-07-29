@@ -882,6 +882,59 @@ async def test_ready_starts_audit_mirror_only_once_across_reconnects():
 
 
 @pytest.mark.asyncio
+async def test_ready_starts_system_audit_only_once_across_reconnects():
+    channel = _channel()
+    channel.config.audit_forum_id = AUDIT_FORUM
+    channel._sync_backlog = AsyncMock()
+    guild = MagicMock()
+    guild.get_channel.side_effect = lambda channel_id: (
+        SimpleNamespace(id=channel_id)
+        if channel_id in {TEXT_CHANNEL, YDB_FORUM, AUDIT_FORUM}
+        else None
+    )
+    channel._client = MagicMock()
+    channel._client.user = SimpleNamespace(id=DOGGY)
+    channel._client.get_guild.return_value = guild
+
+    with (
+        patch(
+            "nerve.channels.discord_system_audit.DiscordSystemAudit"
+        ) as audit_cls,
+        patch(
+            "nerve.channels.discord_mirror.DiscordSessionMirror"
+        ) as mirror_cls,
+    ):
+        audit_cls.return_value.start = AsyncMock()
+        mirror_cls.return_value.start = AsyncMock()
+        await channel._on_ready()
+        await channel._on_ready()
+        assert channel._post_ready_task is not None
+        await channel._post_ready_task
+
+    audit_cls.assert_called_once()
+    audit_cls.return_value.start.assert_awaited_once_with(guild)
+
+
+@pytest.mark.asyncio
+async def test_emit_system_event_delegates_to_audit_thread():
+    channel = _channel()
+    audit = SimpleNamespace(emit=AsyncMock())
+    channel._ensure_system_audit = AsyncMock(return_value=audit)
+
+    await channel.emit_system_event(
+        "Nerve started",
+        details="Process ID: `123`",
+        level="success",
+    )
+
+    audit.emit.assert_awaited_once_with(
+        "Nerve started",
+        details="Process ID: `123`",
+        level="success",
+    )
+
+
+@pytest.mark.asyncio
 async def test_ready_starts_presence_only_once_across_reconnects():
     channel = _channel()
     channel.config.presence_enabled = True

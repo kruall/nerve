@@ -278,13 +278,18 @@ the agent. Mirror threads can contain the same sensitive tool inputs and
 outputs as the Nerve session UI, so restrict the audit forum's Discord
 permissions to the intended reviewers.
 
-The audit forum also contains three notification inbox threads:
-`Notifications`, `Questions`, and `Approvals`. Discord permits only one pinned
-thread per forum, so `Approvals` remains pinned while `Notifications` and
-`Questions` are persistent but unpinned. All three notification kinds are
-delivered to their Discord inbox whenever `discord.audit_forum_id` is
-configured, even when `discord` is not listed under
-`notifications.channels`.
+The audit forum also contains an unpinned `System` thread. Nerve appends
+timestamped process lifecycle events when the daemon starts and begins a
+graceful shutdown. The thread is reused across restarts and receives the
+existing `system` tag when that tag is uniquely available; missing or duplicate
+tags do not block startup.
+
+Three notification inbox threads sit alongside it: `Notifications`,
+`Questions`, and `Approvals`. Discord permits only one pinned thread per forum,
+so `Approvals` remains pinned while `Notifications` and `Questions` are
+persistent but unpinned. All three notification kinds are delivered to their
+Discord inbox whenever `discord.audit_forum_id` is configured, even when
+`discord` is not listed under `notifications.channels`.
 
 Informational notifications have a persistent **Dismiss** control. Questions
 render suggested-answer buttons plus **Write answer**, which opens a Discord
