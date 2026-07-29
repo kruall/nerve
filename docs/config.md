@@ -257,8 +257,8 @@ one unique tag with each of these exact names:
 
 - type: `system` for cron, hook, and system sessions; otherwise `session`;
 - state: `waiting` while a question or approval owned by the session is pending,
-  `stopped` for stopped, errored, or archived sessions, and `active`
-  otherwise.
+  `stopped` for stopped, errored, or archived sessions, `idle` while a live
+  session has no running turn, and `active` otherwise.
 
 The mirror applies and replaces these existing tags directly as a bounded,
 restart-safe projection; these thread-only state changes do not create approval

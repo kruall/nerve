@@ -38,6 +38,7 @@ _AUDIT_TAG_NAMES = {
     "system": "system",
     "session": "session",
     "active": "active",
+    "idle": "idle",
     "stopped": "stopped",
 }
 _SYSTEM_SESSION_SOURCES = frozenset({"cron", "hook", "system"})
@@ -616,6 +617,8 @@ class DiscordSessionMirror:
             state_key = "stopped"
         elif await self.db.has_pending_session_interaction(str(session["id"])):
             state_key = "waiting"
+        elif status == "idle":
+            state_key = "idle"
         else:
             state_key = "active"
         return [tags[type_key], tags[state_key]]

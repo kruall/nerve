@@ -98,7 +98,7 @@ discord:
   # with persistent controls. Discord permits one pinned forum thread, so
   # only "Approvals" is pinned. When available, the exact "user-inbox" tag
   # is applied to all three inbox threads.
-  # When the forum contains the five managed session tags documented in
+  # When the forum contains the six managed session tags documented in
   # docs/config.md, each mirror thread automatically receives one type and
   # one state tag.
   # audit_forum_id: 123456789012345682

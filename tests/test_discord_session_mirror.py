@@ -22,7 +22,8 @@ def _audit_tags() -> list[_Tag]:
         _Tag(301, "system"),
         _Tag(302, "session"),
         _Tag(303, "active"),
-        _Tag(304, "stopped"),
+        _Tag(304, "idle"),
+        _Tag(305, "stopped"),
     ]
 
 
@@ -591,7 +592,7 @@ async def test_mirror_includes_and_tags_system_sessions(db, session_id, source):
 
 
 @pytest.mark.asyncio
-async def test_mirror_moves_session_between_waiting_active_and_stopped_tags(db):
+async def test_mirror_moves_session_between_lifecycle_tags(db):
     session_id = "session-tags"
     await db.create_session(
         session_id,
@@ -632,6 +633,20 @@ async def test_mirror_moves_session_between_waiting_active_and_stopped_tags(db):
     }
 
     await db.answer_notification("question-1", "continue", "web")
+    await mirror._sync_session(session_id)
+    assert {tag.name for tag in thread.applied_tags} == {
+        "session",
+        "active",
+    }
+
+    await db.update_session_fields(session_id, {"status": "idle"})
+    await mirror._sync_session(session_id)
+    assert {tag.name for tag in thread.applied_tags} == {
+        "session",
+        "idle",
+    }
+
+    await db.update_session_fields(session_id, {"status": "active"})
     await mirror._sync_session(session_id)
     assert {tag.name for tag in thread.applied_tags} == {
         "session",
