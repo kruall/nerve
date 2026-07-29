@@ -97,6 +97,7 @@ class DiscordChannel(BaseChannel):
         self._notification_inbox: Any | None = None
         self._system_audit: Any | None = None
         self._skill_forum: Any | None = None
+        self._project_prompts: Any | None = None
         self._skill_manager = skill_manager
         self._system_audit_lock = asyncio.Lock()
         self._notification_service: Any | None = None
@@ -295,6 +296,17 @@ class DiscordChannel(BaseChannel):
         async def on_message(message: discord.Message) -> None:
             await self._on_message(message)
 
+        @client.event
+        async def on_message_edit(
+            _before: discord.Message,
+            after: discord.Message,
+        ) -> None:
+            await self._on_message_edit(after)
+
+        @client.event
+        async def on_message_delete(message: discord.Message) -> None:
+            await self._on_message_delete(message)
+
         return client
 
     async def _sync_application_commands(self) -> None:
@@ -478,6 +490,7 @@ class DiscordChannel(BaseChannel):
         self._system_audit = None
         skill_forum = self._skill_forum
         self._skill_forum = None
+        self._project_prompts = None
 
         if mirror is not None:
             await mirror.stop()
@@ -656,6 +669,29 @@ class DiscordChannel(BaseChannel):
                     "continuing without Discord notify/question delivery"
                 )
 
+        if self._project_forums and self._project_prompts is None:
+            try:
+                from nerve.channels.discord_project_prompts import (
+                    DiscordProjectPrompts,
+                )
+
+                self._project_prompts = DiscordProjectPrompts(
+                    client=self._client,
+                    db=self.db,
+                    guild_id=self.config.guild_id,
+                    project_forums=self._project_forums,
+                    allowed_author_ids=self._allowed_authors,
+                )
+                await self._project_prompts.start(guild)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._project_prompts = None
+                logger.exception(
+                    "Discord project prompts failed to start; continuing "
+                    "without project-level instructions"
+                )
+
         # Skill reconciliation may scan long thread histories. Keep it after
         # the user-facing inboxes so enabling the skill forum cannot delay
         # notification and approval readiness during startup.
@@ -754,6 +790,24 @@ class DiscordChannel(BaseChannel):
                 getattr(message.channel, "id", "unknown"),
             )
 
+    async def _on_message_edit(self, message: discord.Message) -> None:
+        prompts = self._project_prompts
+        if prompts is None:
+            return
+        try:
+            await prompts.observe_edit(message)
+        except Exception:
+            logger.exception("Discord project prompt edit handling failed")
+
+    async def _on_message_delete(self, message: discord.Message) -> None:
+        prompts = self._project_prompts
+        if prompts is None:
+            return
+        try:
+            await prompts.observe_delete(message)
+        except Exception:
+            logger.exception("Discord project prompt deletion handling failed")
+
     async def _ingest(self, message: discord.Message) -> None:
         message_id = int(message.id)
         async with self._ingest_guard:
@@ -764,6 +818,13 @@ class DiscordChannel(BaseChannel):
                 self._recent_message_ids.popitem(last=False)
 
         try:
+            if self._project_prompts is not None:
+                if await self._project_prompts.observe_message(message):
+                    await self._advance_cursor(
+                        int(message.channel.id),
+                        message_id,
+                    )
+                    return
             if (
                 self._skill_forum is not None
                 and getattr(message.channel, "parent_id", None)
@@ -1147,10 +1208,22 @@ class DiscordChannel(BaseChannel):
                     "локальный скилл из последнего снимка.]"
                 )
             context += skill_context + "\n\n"
+        project_prompt = (
+            self._project_prompts.prompt_for_thread(parent_id, channel_id)
+            if self._project_prompts is not None
+            else ""
+        )
         text = self._message_text(message)
         reply_context = self._reply_context(message)
         text = "\n\n".join(
-            part for part in (context_block, reply_context, text) if part
+            part
+            for part in (
+                project_prompt,
+                context_block,
+                reply_context,
+                text,
+            )
+            if part
         )
         title = (
             f"Discord · {project} · {channel_name or channel_id}"

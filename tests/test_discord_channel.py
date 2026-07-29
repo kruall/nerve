@@ -742,6 +742,49 @@ async def test_dispatch_maps_forum_thread_to_project():
 
 
 @pytest.mark.asyncio
+async def test_dispatch_prepends_current_project_prompt():
+    channel = _channel()
+    channel.router.handle_message = AsyncMock()
+    channel._project_prompts = SimpleNamespace(
+        prompt_for_thread=lambda _forum_id, _thread_id: (
+            "[Project prompt for YDB.]\nUse a dedicated worktree."
+        ),
+    )
+    message = _message(
+        channel_id=YDB_THREAD,
+        parent_id=YDB_FORUM,
+        content=f"<@{DOGGY}> implement this",
+    )
+
+    await channel._dispatch(message)
+
+    inbound = channel.router.handle_message.await_args.args[0]
+    assert "Use a dedicated worktree." in inbound.text
+    assert inbound.text.index("Use a dedicated worktree.") < inbound.text.index(
+        "implement this",
+    )
+
+
+@pytest.mark.asyncio
+async def test_project_prompt_thread_is_not_dispatched_or_stored_as_context():
+    channel = _channel()
+    channel.router.handle_message = AsyncMock()
+    channel._project_prompts = SimpleNamespace(
+        observe_message=AsyncMock(return_value=True),
+    )
+    message = _message(
+        channel_id=YDB_THREAD,
+        parent_id=YDB_FORUM,
+        content=f"<@{DOGGY}> this belongs to the project prompt",
+    )
+
+    await channel._ingest(message)
+
+    channel._project_prompts.observe_message.assert_awaited_once_with(message)
+    channel.router.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_dispatch_binds_managed_skill_thread_and_local_source_of_truth():
     channel = _channel()
     channel.router.handle_message = AsyncMock()
@@ -1160,6 +1203,30 @@ async def test_post_ready_starts_configured_skill_forum_projection():
         forum_id=SKILLS_FORUM,
     )
     projection_cls.return_value.start.assert_awaited_once_with(guild)
+    channel._sync_backlog.assert_awaited_once_with(guild)
+
+
+@pytest.mark.asyncio
+async def test_post_ready_starts_project_prompt_manager_before_backlog():
+    channel = _channel()
+    channel._client = MagicMock()
+    channel._sync_backlog = AsyncMock()
+    guild = MagicMock()
+
+    with patch(
+        "nerve.channels.discord_project_prompts.DiscordProjectPrompts",
+    ) as prompts_cls:
+        prompts_cls.return_value.start = AsyncMock()
+        await channel._run_post_ready(guild)
+
+    prompts_cls.assert_called_once_with(
+        client=channel._client,
+        db=channel.db,
+        guild_id=GUILD,
+        project_forums={YDB_FORUM: "YDB"},
+        allowed_author_ids={USER, PEER_BOT},
+    )
+    prompts_cls.return_value.start.assert_awaited_once_with(guild)
     channel._sync_backlog.assert_awaited_once_with(guild)
 
 

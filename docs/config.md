@@ -249,6 +249,16 @@ continues with a bounded recent tail and the unsummarized messages remain
 stored for a later compaction attempt. Messages from authors outside
 `allowed_author_ids` are never added to this context.
 
+For every configured project forum, Nerve creates or restores one pinned
+`Project prompt` thread. The bot's starter post explains the format; the first
+message from an allowed author becomes that project's prompt. Edit that
+human-authored message to change the prompt, or delete it and send a new one to
+replace it. The managed prompt thread never creates a session or contributes to
+ordinary thread context. The current prompt is prepended to each turn started
+from the forum's other threads, so the updated text applies without a restart.
+If the forum already has another pinned thread, Nerve leaves it untouched and
+logs that it could not create the managed prompt.
+
 On first connection Nerve primes each configured target without replaying old
 history. Later reconnects use durable cursors to process messages missed while
 Nerve was offline, including active conversation threads and active or recently

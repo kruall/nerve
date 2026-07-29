@@ -190,6 +190,23 @@ class TestSessionCRUD:
         assert binding["guild_id"] == "100"
         assert binding["thread_id"] == "200"
 
+    async def test_discord_project_prompt_round_trip(self, db: Database):
+        await db.upsert_discord_project_prompt(
+            guild_id=100,
+            forum_id=200,
+            project="NERVE",
+            thread_id=300,
+            message_id=400,
+            content="Use a dedicated worktree.",
+        )
+        prompt = await db.get_discord_project_prompt(200)
+
+        assert prompt is not None
+        assert prompt["project"] == "NERVE"
+        assert prompt["thread_id"] == "300"
+        assert prompt["message_id"] == "400"
+        assert prompt["content"] == "Use a dedicated worktree."
+
     async def test_create_session_with_parent(self, db: Database):
         await db.create_session("parent-1")
         session = await db.create_session(
