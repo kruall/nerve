@@ -236,6 +236,7 @@ async def test_notification_delivery_has_dismiss_view_and_coordinates():
     assert sent.kwargs["view"].children[0].custom_id == (
         "nerve:notification:notif-1:dismiss"
     )
+    assert sent.kwargs["view"].children[0].emoji.name == "✅"
     encoded = inbox.db.update_notification.await_args.kwargs["metadata"]
     assert json.loads(encoded)["discord_notification"] == {
         "thread_id": str(NOTIFICATION_THREAD_ID),

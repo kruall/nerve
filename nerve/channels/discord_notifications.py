@@ -287,7 +287,7 @@ class NotificationDismissButton(discord.ui.Button["NotificationView"]):
         super().__init__(
             style=discord.ButtonStyle.secondary,
             label="Dismiss",
-            emoji="✓",
+            emoji="✅",
             custom_id=f"nerve:notification:{notification_id}:dismiss",
             disabled=disabled,
         )
