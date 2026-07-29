@@ -1,4 +1,4 @@
-"""Pinned Discord notification and question inboxes."""
+"""Discord notification and question inboxes."""
 
 from __future__ import annotations
 
@@ -26,6 +26,12 @@ MESSAGE_ID = 300
 USER_ID = 400
 
 
+class _Tag:
+    def __init__(self, tag_id: int, name: str):
+        self.id = tag_id
+        self.name = name
+
+
 class _AsyncRows:
     def __init__(self, rows):
         self.rows = iter(rows)
@@ -40,12 +46,19 @@ class _AsyncRows:
             raise StopAsyncIteration from exc
 
 
-def _thread(name: str, thread_id: int, *, archived: bool = False):
+def _thread(
+    name: str,
+    thread_id: int,
+    *,
+    archived: bool = False,
+    applied_tags=None,
+):
     thread = MagicMock(spec=discord.Thread)
     thread.id = thread_id
     thread.parent_id = FORUM_ID
     thread.name = name
     thread.archived = archived
+    thread.applied_tags = list(applied_tags or [])
     thread.edit = AsyncMock(return_value=thread)
     thread.send = AsyncMock()
     return thread
@@ -89,14 +102,16 @@ def _interaction(message=None, *, user_id: int = USER_ID):
 
 
 @pytest.mark.asyncio
-async def test_start_creates_and_pins_notification_and_question_threads():
+async def test_start_creates_unpinned_tagged_notification_and_question_threads():
     notification_thread = _thread(
         "Notifications", NOTIFICATION_THREAD_ID,
     )
     question_thread = _thread("Questions", QUESTION_THREAD_ID)
+    inbox_tag = _Tag(250, "user-inbox")
     inbox = _inbox()
     guild = MagicMock(spec=discord.Guild)
     forum = MagicMock(spec=discord.ForumChannel)
+    forum.available_tags = [inbox_tag]
     guild.get_channel.return_value = forum
     guild.active_threads = AsyncMock(return_value=[])
     forum.archived_threads.return_value = _AsyncRows([])
@@ -111,9 +126,88 @@ async def test_start_creates_and_pins_notification_and_question_threads():
         call.kwargs["name"]
         for call in forum.create_thread.await_args_list
     ] == ["Notifications", "Questions"]
+    assert all(
+        call.kwargs["applied_tags"] == [inbox_tag]
+        for call in forum.create_thread.await_args_list
+    )
     notification_thread.edit.assert_awaited_once()
     question_thread.edit.assert_awaited_once()
+    assert notification_thread.edit.await_args.kwargs == {
+        "archived": False,
+        "pinned": False,
+        "reason": "Prepare Nerve notify inbox",
+        "applied_tags": [inbox_tag],
+    }
+    assert question_thread.edit.await_args.kwargs == {
+        "archived": False,
+        "pinned": False,
+        "reason": "Prepare Nerve question inbox",
+        "applied_tags": [inbox_tag],
+    }
     assert set(inbox._threads) == {"notify", "question"}
+
+
+@pytest.mark.asyncio
+async def test_missing_inbox_tag_does_not_block_thread_creation():
+    notification_thread = _thread(
+        "Notifications", NOTIFICATION_THREAD_ID,
+    )
+    question_thread = _thread("Questions", QUESTION_THREAD_ID)
+    inbox = _inbox()
+    guild = MagicMock(spec=discord.Guild)
+    forum = MagicMock(spec=discord.ForumChannel)
+    forum.available_tags = []
+    guild.get_channel.return_value = forum
+    guild.active_threads = AsyncMock(return_value=[])
+    forum.archived_threads.return_value = _AsyncRows([])
+    forum.create_thread = AsyncMock(side_effect=[
+        SimpleNamespace(thread=notification_thread),
+        SimpleNamespace(thread=question_thread),
+    ])
+
+    await inbox.start(guild)
+
+    assert forum.create_thread.await_count == 2
+    assert all(
+        "applied_tags" not in call.kwargs
+        for call in forum.create_thread.await_args_list
+    )
+    assert notification_thread.edit.await_args.kwargs["pinned"] is False
+    assert question_thread.edit.await_args.kwargs["pinned"] is False
+
+
+@pytest.mark.asyncio
+async def test_one_inbox_failure_does_not_block_the_other():
+    inbox = _inbox()
+    question_thread = _thread("Questions", QUESTION_THREAD_ID)
+    inbox._ensure_thread = AsyncMock(side_effect=[
+        RuntimeError("notification thread failed"),
+        question_thread,
+    ])
+    inbox._restore_pending_views = AsyncMock()
+    guild = MagicMock(spec=discord.Guild)
+
+    await inbox.start(guild)
+
+    assert [
+        call.args[0] for call in inbox._ensure_thread.await_args_list
+    ] == ["notify", "question"]
+    inbox._restore_pending_views.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_start_fails_only_when_no_inbox_can_start():
+    inbox = _inbox()
+    inbox._ensure_thread = AsyncMock(
+        side_effect=RuntimeError("thread failed"),
+    )
+    inbox._restore_pending_views = AsyncMock()
+    guild = MagicMock(spec=discord.Guild)
+
+    with pytest.raises(RuntimeError, match="No Discord notification inbox"):
+        await inbox.start(guild)
+
+    inbox._restore_pending_views.assert_not_awaited()
 
 
 @pytest.mark.asyncio

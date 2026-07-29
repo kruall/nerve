@@ -278,9 +278,11 @@ the agent. Mirror threads can contain the same sensitive tool inputs and
 outputs as the Nerve session UI, so restrict the audit forum's Discord
 permissions to the intended reviewers.
 
-The audit forum also contains three pinned notification inbox threads:
-`Notifications`, `Questions`, and `Approvals`. All three notification kinds
-are delivered to their Discord inbox whenever `discord.audit_forum_id` is
+The audit forum also contains three notification inbox threads:
+`Notifications`, `Questions`, and `Approvals`. Discord permits only one pinned
+thread per forum, so `Approvals` remains pinned while `Notifications` and
+`Questions` are persistent but unpinned. All three notification kinds are
+delivered to their Discord inbox whenever `discord.audit_forum_id` is
 configured, even when `discord` is not listed under
 `notifications.channels`.
 
@@ -291,10 +293,15 @@ controls: Approve executes directly, while Decline and Request changes open a
 modal for written feedback. Pending controls are restored after a Nerve
 restart. Only users listed in `discord.allowed_author_ids` can use them.
 
+When the audit forum contains one unique tag named `user-inbox`, Nerve applies
+it to all three inbox threads and preserves any unrelated tags. A missing or
+duplicate tag never blocks inbox startup. Create or repair the available tag
+definition through the approval-gated forum-tag tools with `project: AUDIT`.
+
 Enable the **Message Content Intent** for the bot in Discord's Developer
 Portal. Grant only the channel permissions required by the deployment:
 View Channels, Read Message History, Send Messages, Create Public Threads,
-and Send Messages in Threads. Pinning the notification inboxes and assigning
+and Send Messages in Threads. Pinning the approval inbox and assigning
 forum tags additionally require Manage Threads; creating, updating, or
 deleting the forum's available tags requires Manage Channels. Administrator
 is not required.

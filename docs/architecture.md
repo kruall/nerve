@@ -91,12 +91,13 @@ Implementations:
   mention-triggered conversation-thread creation, mention-free follow-ups in
   ordinary-channel threads, mention-gated project-forum turns, durable restart
   catch-up, one session per thread, deliberate output through the
-  session-bound `discord_send` MCP tool, pinned audit-forum inboxes for
-  notifications, questions, and approvals with persistent buttons and
-  feedback modals, and approval-gated project-forum tag management. An
-  optional outbound-only audit forum mirrors every active Nerve session into
-  a durable, incrementally updated Discord thread, batching adjacent activity
-  to reduce Discord API calls.
+  session-bound `discord_send` MCP tool, audit-forum inboxes for notifications,
+  questions, and approvals with persistent buttons and feedback modals, and
+  approval-gated project-forum tag management. Approvals is the forum's single
+  pinned inbox; all three inboxes use the `user-inbox` tag when configured. An
+  optional outbound-only audit forum mirrors every active Nerve session into a
+  durable, incrementally updated Discord thread, batching adjacent activity to
+  reduce Discord API calls.
 - **Web** — Passive channel using gateway WebSocket
 
 Adding a new channel (WhatsApp, etc.) requires implementing ~5 methods and zero session/routing logic.
@@ -105,8 +106,8 @@ Adding a new channel (WhatsApp, etc.) requires implementing ~5 methods and zero 
 Async notification system for agent→user communication:
 - **`notify` tool** — fire-and-forget notifications (status updates, alerts, reminders)
 - **`ask_user` tool** — questions with predefined options (rendered as buttons) + free-text input. Supports blocking mode (`wait=true`) and async mode (answer injected as session message)
-- **NotificationService** — centralized fanout to configurable channels (web + Telegram by default, plus pinned Discord inboxes when an audit forum is configured), answer routing, periodic expiry
-- **Multi-channel delivery** — web UI via `__global__` WebSocket broadcast channel, Telegram via direct bot API, and pinned Discord inbox threads with persistent controls
+- **NotificationService** — centralized fanout to configurable channels (web + Telegram by default, plus Discord inboxes when an audit forum is configured), answer routing, periodic expiry
+- **Multi-channel delivery** — web UI via `__global__` WebSocket broadcast channel, Telegram via direct bot API, and Discord inbox threads with persistent controls
 - **Answer routing** — answers from any channel (web UI, Telegram inline button or `/reply`, Discord button or modal) are persisted and either unblock a waiting tool or injected as a user message into the originating session
 - **Web UI** — `/notifications` page with status/type filters, inline answer buttons, dismiss, dismiss-all; real-time toast overlay for new notifications; NavRail badge for pending count
 

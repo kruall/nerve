@@ -1,4 +1,4 @@
-"""Pinned Discord inboxes for notifications and questions.
+"""Discord inboxes for notifications and questions.
 
 The configured Discord audit forum contains one thread per notification kind.
 This module owns the ``Notifications`` and ``Questions`` threads; approvals
@@ -16,6 +16,11 @@ import logging
 from typing import Any
 
 import discord
+
+from nerve.channels.discord_inbox import (
+    resolve_inbox_tag,
+    tags_with_inbox_tag,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -338,7 +343,7 @@ class NotificationView(discord.ui.View):
 
 
 class DiscordNotificationInbox:
-    """Own the pinned notify/question threads and their persistent views."""
+    """Own the notify/question threads and their persistent views."""
 
     def __init__(
         self,
@@ -363,8 +368,21 @@ class DiscordNotificationInbox:
         self._answer_locks: dict[str, asyncio.Lock] = {}
 
     async def start(self, guild: discord.Guild) -> None:
+        started = 0
         for kind in _THREADS:
-            await self._ensure_thread(kind, guild)
+            try:
+                await self._ensure_thread(kind, guild)
+                started += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Discord %s inbox failed to start; continuing with "
+                    "other notification kinds",
+                    kind,
+                )
+        if not started:
+            raise RuntimeError("No Discord notification inbox could start")
         await self._restore_pending_views()
 
     def interaction_allowed(self, interaction: discord.Interaction) -> bool:
@@ -387,7 +405,7 @@ class DiscordNotificationInbox:
             if thread.archived:
                 thread = await thread.edit(
                     archived=False,
-                    pinned=True,
+                    pinned=False,
                     reason=f"Restore Nerve {kind} inbox",
                 )
                 self._threads[kind] = thread
@@ -408,21 +426,32 @@ class DiscordNotificationInbox:
                 )
 
             name, intro = _THREADS[kind]
+            inbox_tag = resolve_inbox_tag(forum)
             thread = await self._find_thread(guild, forum, name)
             if thread is None:
+                create_kwargs: dict[str, Any] = {}
+                if inbox_tag is not None:
+                    create_kwargs["applied_tags"] = [inbox_tag]
                 created = await forum.create_thread(
                     name=name,
                     content=intro,
                     auto_archive_duration=10080,
                     allowed_mentions=discord.AllowedMentions.none(),
                     reason=f"Create Nerve {kind} inbox",
+                    **create_kwargs,
                 )
                 thread = created.thread
 
+            edit_kwargs: dict[str, Any] = {
+                "archived": False,
+                "pinned": False,
+                "reason": f"Prepare Nerve {kind} inbox",
+            }
+            applied_tags = tags_with_inbox_tag(thread, inbox_tag)
+            if applied_tags is not None:
+                edit_kwargs["applied_tags"] = applied_tags
             thread = await thread.edit(
-                archived=False,
-                pinned=True,
-                reason=f"Pin Nerve {kind} inbox",
+                **edit_kwargs,
             )
             self._threads[kind] = thread
             return thread

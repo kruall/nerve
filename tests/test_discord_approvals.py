@@ -25,6 +25,12 @@ MESSAGE_ID = 300
 USER_ID = 400
 
 
+class _Tag:
+    def __init__(self, tag_id: int, name: str):
+        self.id = tag_id
+        self.name = name
+
+
 class _AsyncRows:
     def __init__(self, rows):
         self.rows = iter(rows)
@@ -39,12 +45,13 @@ class _AsyncRows:
             raise StopAsyncIteration from exc
 
 
-def _thread(*, archived: bool = False):
+def _thread(*, archived: bool = False, applied_tags=None):
     thread = MagicMock(spec=discord.Thread)
     thread.id = THREAD_ID
     thread.parent_id = FORUM_ID
     thread.name = "Approvals"
     thread.archived = archived
+    thread.applied_tags = list(applied_tags or [])
     thread.edit = AsyncMock(return_value=thread)
     thread.send = AsyncMock()
     return thread
@@ -124,6 +131,30 @@ async def test_start_creates_and_pins_missing_approval_thread():
     assert forum.create_thread.await_args.kwargs["name"] == "Approvals"
     thread.edit.assert_awaited_once()
     assert thread.edit.await_args.kwargs["pinned"] is True
+
+
+@pytest.mark.asyncio
+async def test_start_tags_existing_approval_thread_as_user_inbox():
+    inbox_tag = _Tag(250, "user-inbox")
+    thread = _thread()
+    inbox = _inbox()
+    guild = MagicMock(spec=discord.Guild)
+    forum = MagicMock(spec=discord.ForumChannel)
+    forum.available_tags = [inbox_tag]
+    guild.get_channel.return_value = forum
+    guild.active_threads = AsyncMock(return_value=[thread])
+    forum.archived_threads.return_value = _AsyncRows([])
+    forum.create_thread = AsyncMock()
+
+    await inbox.start(guild)
+
+    forum.create_thread.assert_not_awaited()
+    assert thread.edit.await_args.kwargs == {
+        "archived": False,
+        "pinned": True,
+        "reason": "Pin Nerve approval inbox",
+        "applied_tags": [inbox_tag],
+    }
 
 
 @pytest.mark.asyncio

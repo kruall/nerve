@@ -15,6 +15,11 @@ from typing import Any
 
 import discord
 
+from nerve.channels.discord_inbox import (
+    resolve_inbox_tag,
+    tags_with_inbox_tag,
+)
+
 logger = logging.getLogger(__name__)
 
 _THREAD_NAME = "Approvals"
@@ -384,22 +389,31 @@ class DiscordApprovalInbox:
                     "to identify a forum channel"
                 )
 
+            inbox_tag = resolve_inbox_tag(forum)
             thread = await self._find_thread(guild, forum)
             if thread is None:
+                create_kwargs: dict[str, Any] = {}
+                if inbox_tag is not None:
+                    create_kwargs["applied_tags"] = [inbox_tag]
                 created = await forum.create_thread(
                     name=_THREAD_NAME,
                     content=_THREAD_INTRO,
                     auto_archive_duration=10080,
                     allowed_mentions=discord.AllowedMentions.none(),
                     reason="Create Nerve approval inbox",
+                    **create_kwargs,
                 )
                 thread = created.thread
 
-            self._thread = await thread.edit(
-                archived=False,
-                pinned=True,
-                reason="Pin Nerve approval inbox",
-            )
+            edit_kwargs: dict[str, Any] = {
+                "archived": False,
+                "pinned": True,
+                "reason": "Pin Nerve approval inbox",
+            }
+            applied_tags = tags_with_inbox_tag(thread, inbox_tag)
+            if applied_tags is not None:
+                edit_kwargs["applied_tags"] = applied_tags
+            self._thread = await thread.edit(**edit_kwargs)
             return self._thread
 
     async def _find_thread(
