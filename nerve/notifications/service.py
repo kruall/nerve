@@ -2,7 +2,8 @@
 
 Coordinates between MCP tools (agent-side), channels (delivery), and the
 answer routing mechanism (user-side). Supports fire-and-forget notifications,
-async questions with multi-channel delivery (web UI + Telegram), and
+async questions with multi-channel delivery (web UI + Telegram), a pinned
+Discord approval inbox, and
 ``approval``-kind notifications that route to a server-side dispatcher when
 the user picks an inline option (see ``nerve.notifications.handlers``).
 """
@@ -105,6 +106,7 @@ class NotificationService:
         # full reload on change is cheap.
         self._silence_cache: list[dict] | None = None
         self._silence_cache_lock = asyncio.Lock()
+        self._answer_locks: dict[str, asyncio.Lock] = {}
 
     def hide_session_label_for(self, session_prefix: str) -> None:
         """Register a session ID (or prefix) that should not show the session label."""
@@ -331,6 +333,7 @@ class NotificationService:
         expires_at: str | None = None,
         expiry_hours: int | None = None,
         metadata: dict[str, Any] | None = None,
+        channels: list[str] | None = None,
     ) -> dict:
         """File an actionable ``approval``-kind notification.
 
@@ -398,7 +401,10 @@ class NotificationService:
 
         await self._fanout(
             notification_id, session_id, "approval", title, body,
-            priority, options=option_values, option_labels=option_labels,
+            priority,
+            options=option_values,
+            option_labels=option_labels,
+            channels=channels,
         )
 
         return {"notification_id": notification_id, "status": "sent"}
@@ -412,6 +418,26 @@ class NotificationService:
         notification_id: str,
         answer: str,
         answered_by: str,
+        feedback: str = "",
+    ) -> bool:
+        """Serialize answers so two channels cannot execute one action twice."""
+        lock = self._answer_locks.setdefault(
+            notification_id, asyncio.Lock(),
+        )
+        async with lock:
+            return await self._handle_answer_unlocked(
+                notification_id,
+                answer,
+                answered_by,
+                feedback,
+            )
+
+    async def _handle_answer_unlocked(
+        self,
+        notification_id: str,
+        answer: str,
+        answered_by: str,
+        feedback: str = "",
     ) -> bool:
         """Process a user's answer to a question or approval.
 
@@ -430,6 +456,23 @@ class NotificationService:
             return False
 
         if notif.get("type") == "approval":
+            feedback = feedback.strip()
+            if feedback:
+                raw_meta = notif.get("metadata")
+                try:
+                    metadata = (
+                        json.loads(raw_meta)
+                        if isinstance(raw_meta, str)
+                        else dict(raw_meta or {})
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    metadata = {}
+                metadata["decision_feedback"] = feedback
+                encoded = json.dumps(metadata)
+                await self.db.update_notification(
+                    notification_id, metadata=encoded,
+                )
+                notif["metadata"] = encoded
             return await self._handle_approval_answer(
                 notif, answer, answered_by,
             )
@@ -520,7 +563,11 @@ class NotificationService:
         target_id = notif.get("target_id") or ""
 
         dispatcher = _handlers.get(target_kind) if target_kind else None
-        if dispatcher is None:
+        if target_kind == "plan":
+            result = await self._dispatch_plan_approval(
+                notif, target_id, answer,
+            )
+        elif dispatcher is None:
             logger.warning(
                 "approval %s has no dispatcher for target_kind=%r; "
                 "marking answered without action",
@@ -616,6 +663,99 @@ class NotificationService:
         await broadcaster.broadcast("__global__", payload)
 
         return True
+
+    async def _dispatch_plan_approval(
+        self,
+        notif: dict[str, Any],
+        plan_id: str,
+        decision: str,
+    ) -> _handlers.DispatchResult:
+        """Run a plan decision through the same handlers used by MCP."""
+        from nerve.agent.tools.handlers.plans import (
+            plan_approve_handler,
+            plan_decline_handler,
+            plan_revise_handler,
+        )
+        from nerve.agent.tools.registry import ToolContext
+
+        raw_meta = notif.get("metadata")
+        try:
+            metadata = (
+                json.loads(raw_meta)
+                if isinstance(raw_meta, str)
+                else dict(raw_meta or {})
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            metadata = {}
+        feedback = str(metadata.get("decision_feedback") or "").strip()
+        base_event: dict[str, Any] = {
+            "event": "approval-acted",
+            "notification_id": notif.get("id", ""),
+            "target_kind": "plan",
+            "target_id": plan_id,
+            "decision": decision,
+        }
+        if feedback:
+            base_event["feedback"] = feedback
+
+        ctx = ToolContext(
+            session_id=notif.get("session_id") or "system",
+            workspace=getattr(self.config, "workspace", None),
+            db=self.db,
+            config=self.config,
+            engine=self.engine,
+            notification_service=self,
+        )
+        if decision == "approve":
+            await plan_approve_handler(ctx, {"plan_id": plan_id})
+            expected_status = "implementing"
+        elif decision == "decline":
+            await plan_decline_handler(ctx, {
+                "plan_id": plan_id,
+                "feedback": feedback,
+            })
+            expected_status = "declined"
+        elif decision in {"revise", "request_changes"}:
+            if not feedback:
+                return _handlers.DispatchResult(
+                    ok=False,
+                    audit_event={
+                        **base_event,
+                        "ok": False,
+                        "error": "revision feedback is required",
+                    },
+                )
+            await plan_revise_handler(ctx, {
+                "plan_id": plan_id,
+                "feedback": feedback,
+            })
+            expected_status = "pending"
+        else:
+            return _handlers.DispatchResult(
+                ok=False,
+                audit_event={
+                    **base_event,
+                    "ok": False,
+                    "error": f"unsupported decision: {decision}",
+                },
+            )
+
+        plan = await self.db.get_plan(plan_id)
+        actual_status = plan.get("status") if plan else None
+        ok = actual_status == expected_status
+        return _handlers.DispatchResult(
+            ok=ok,
+            audit_event={
+                **base_event,
+                "ok": ok,
+                "plan_status": actual_status,
+                **(
+                    {}
+                    if ok
+                    else {"error": "plan decision did not reach expected status"}
+                ),
+            },
+        )
 
     async def _append_approval_audit(self, event: dict[str, Any]) -> None:
         """Append an approval-lifecycle record to the mechanical-actions log.
@@ -743,7 +883,16 @@ class NotificationService:
         payload only — the re-delivery tick uses it to flag
         ``redelivered: true`` so the UI can badge a resurfaced card.
         """
-        target_channels = channels or self.config.notifications.channels
+        target_channels = list(
+            channels or self.config.notifications.channels
+        )
+        if (
+            notif_type == "approval"
+            and self.config.discord.enabled
+            and self.config.discord.audit_forum_id
+            and "discord" not in target_channels
+        ):
+            target_channels.append("discord")
 
         async def _deliver(channel_name: str) -> str | None:
             """Deliver to a single channel, return name on success."""
@@ -768,6 +917,9 @@ class NotificationService:
                             telegram_message_id=str(msg_id),
                         )
                     return "telegram"
+                elif channel_name == "discord":
+                    await self._deliver_discord(notification_id)
+                    return "discord"
             except Exception as e:
                 logger.error(
                     "Failed to deliver %s to %s: %s",
@@ -785,6 +937,18 @@ class NotificationService:
             notification_id,
             channels_delivered=json.dumps(channels_delivered),
         )
+
+    async def _deliver_discord(self, notification_id: str) -> None:
+        """Send an approval to Discord's pinned audit-forum inbox."""
+        channel = self.engine.router.get_channel("discord")
+        if channel is None or not hasattr(channel, "deliver_approval"):
+            raise RuntimeError("Discord channel is unavailable")
+        row = await self.db.get_notification(notification_id)
+        if row is None:
+            raise RuntimeError(
+                f"Notification disappeared before delivery: {notification_id}"
+            )
+        await channel.deliver_approval(row)
 
     async def _deliver_web(
         self,

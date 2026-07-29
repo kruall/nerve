@@ -35,6 +35,53 @@ from nerve.agent.tools.handlers.tasks import (
 
 logger = logging.getLogger(__name__)
 
+_PLAN_APPROVAL_OPTIONS = [
+    {"label": "Approve & implement", "value": "approve"},
+    {"label": "Request changes", "value": "revise"},
+    {"label": "Decline", "value": "decline"},
+]
+
+
+async def _request_plan_approval(
+    ctx: ToolContext,
+    *,
+    plan_id: str,
+    task_id: str,
+    task_title: str,
+    content: str,
+    version: int,
+) -> str | None:
+    """Create the actionable notification rendered in Discord's inbox."""
+    discord_config = getattr(ctx.config, "discord", None)
+    if (
+        ctx.notification_service is None
+        or discord_config is None
+        or not discord_config.enabled
+        or not discord_config.audit_forum_id
+    ):
+        return None
+    try:
+        result = await ctx.notification_service.propose_action(
+            session_id=ctx.session_id,
+            target_kind="plan",
+            target_id=plan_id,
+            title=f"Review plan v{version}: {task_title}",
+            body=content,
+            options=_PLAN_APPROVAL_OPTIONS,
+            priority="high",
+            metadata={"task_id": task_id, "plan_version": version},
+            channels=["discord"],
+        )
+    except Exception:
+        # The plan is durable and remains reviewable through the web UI.
+        # A transient delivery failure must not roll back plan creation.
+        logger.exception(
+            "Failed to create approval notification for plan %s",
+            plan_id,
+        )
+        return None
+    return str(result["notification_id"])
+
 
 async def plan_propose_handler(ctx: ToolContext, args: dict) -> ToolResult:
     task_id = args["task_id"]
@@ -89,11 +136,22 @@ async def plan_propose_handler(ctx: ToolContext, args: dict) -> ToolResult:
         "task_id": task_id,
         "note": f"Plan proposed: {plan_id} (v{version})",
     })
+    approval_id = await _request_plan_approval(
+        ctx,
+        plan_id=plan_id,
+        task_id=task_id,
+        task_title=task["title"],
+        content=content,
+        version=version,
+    )
 
-    return ToolResult.text(
+    message = (
         f"Plan proposed: {plan_id} (v{version}) for task '{task['title']}'. "
         "Awaiting human review."
     )
+    if approval_id:
+        message += f" Approval requested: {approval_id}."
+    return ToolResult.text(message)
 
 
 async def plan_update_handler(ctx: ToolContext, args: dict) -> ToolResult:
@@ -145,11 +203,22 @@ async def plan_update_handler(ctx: ToolContext, args: dict) -> ToolResult:
         "task_id": old_plan["task_id"],
         "note": note,
     })
+    approval_id = await _request_plan_approval(
+        ctx,
+        plan_id=new_plan_id,
+        task_id=old_plan["task_id"],
+        task_title=old_plan.get("task_title") or old_plan["task_id"],
+        content=content,
+        version=new_version,
+    )
 
-    return ToolResult.text(
+    message = (
         f"Plan {plan_id} superseded by {new_plan_id} (v{new_version}). "
         "The new version is pending review."
     )
+    if approval_id:
+        message += f" Approval requested: {approval_id}."
+    return ToolResult.text(message)
 
 
 async def plan_list_handler(ctx: ToolContext, args: dict) -> ToolResult:

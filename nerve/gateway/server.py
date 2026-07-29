@@ -229,6 +229,7 @@ async def lifespan(app: FastAPI):
                 db,
                 context_summarizer=_engine.summarize_text,
             )
+            candidate.set_notification_service(notification_service)
             _engine.register_channel(candidate)
             await candidate.start()
         except Exception:

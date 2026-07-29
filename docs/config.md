@@ -253,12 +253,20 @@ the agent. Mirror threads can contain the same sensitive tool inputs and
 outputs as the Nerve session UI, so restrict the audit forum's Discord
 permissions to the intended reviewers.
 
+The audit forum also contains one pinned `Approvals` thread. Plan proposals
+and protected mechanical actions are delivered there even when `discord` is
+not listed under `notifications.channels`. Approval cards use persistent
+buttons that are restored after a Nerve restart. Approve executes directly;
+Decline and Request changes open a Discord modal for written feedback. Only
+users listed in `discord.allowed_author_ids` can act on these controls.
+
 Enable the **Message Content Intent** for the bot in Discord's Developer
 Portal. Grant only the channel permissions required by the deployment:
 View Channels, Read Message History, Send Messages, Create Public Threads,
-and Send Messages in Threads. Forum-tag assignment additionally requires
-Manage Threads; creating, updating, or deleting the forum's available tags
-requires Manage Channels. Administrator is not required.
+and Send Messages in Threads. Pinning the approval inbox and assigning
+forum tags additionally require Manage Threads; creating, updating, or
+deleting the forum's available tags requires Manage Channels. Administrator
+is not required.
 
 ```yaml
 discord:
@@ -291,8 +299,8 @@ verifies the guild and current `discord.task_forums` mapping, validates the
 20-tag forum limit and 5-tag thread limit, and only then calls Discord's
 Modify Channel endpoint. Decline and expired approvals perform no Discord
 request. Approval cards use the configured notification channels (normally
-the web UI and/or Telegram); the agent may separately announce the pending
-approval in the originating Discord thread.
+the web UI and/or Telegram) and are additionally delivered to the pinned
+`Approvals` thread whenever `discord.audit_forum_id` is configured.
 
 Discord API reference:
 [Channel and Forum Tag objects](https://docs.discord.com/developers/resources/channel)

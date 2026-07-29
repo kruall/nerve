@@ -11,9 +11,10 @@ Cron (every 4h) → persistent "task-planner" job
   → agent browses tasks, checks memory, picks one worth planning
   → explores codebase with Read, Glob, Grep, Bash, etc.
   → calls plan_propose(task_id, content) to store the proposal
-  → plan appears in /plans UI for review
+  → plan appears in /plans UI and, when configured, the pinned Discord
+    Approvals thread
 
-User reviews (via /plans UI or chat tools)
+User reviews (via /plans UI, Discord buttons, or chat tools)
   → approve → spawns implementation session (visible in Chat)
   → decline → marks plan declined
   → request revision → sends feedback to same persistent planner session

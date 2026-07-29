@@ -84,6 +84,8 @@ class DiscordChannel(BaseChannel):
         self._client_task: asyncio.Task[None] | None = None
         self._post_ready_task: asyncio.Task[None] | None = None
         self._session_mirror: Any | None = None
+        self._approval_inbox: Any | None = None
+        self._notification_service: Any | None = None
         self._ready = asyncio.Event()
         self._startup_error: Exception | None = None
         self._ingest_guard = asyncio.Lock()
@@ -122,6 +124,10 @@ class DiscordChannel(BaseChannel):
     def automatic_responses(self) -> bool:
         """Discord messages are published only through the explicit MCP tool."""
         return False
+
+    def set_notification_service(self, service: Any) -> None:
+        """Wire notification answer routing before the gateway starts."""
+        self._notification_service = service
 
     @property
     def constraints(self) -> ChannelConstraints:
@@ -273,6 +279,7 @@ class DiscordChannel(BaseChannel):
 
         mirror = self._session_mirror
         self._session_mirror = None
+        self._approval_inbox = None
 
         if mirror is not None:
             await mirror.stop()
@@ -346,6 +353,34 @@ class DiscordChannel(BaseChannel):
                 logger.exception(
                     "Discord session mirror failed to start; "
                     "continuing without the audit mirror"
+                )
+
+        if (
+            self.config.audit_forum_id
+            and self._notification_service is not None
+            and self._approval_inbox is None
+        ):
+            try:
+                from nerve.channels.discord_approvals import (
+                    DiscordApprovalInbox,
+                )
+
+                self._approval_inbox = DiscordApprovalInbox(
+                    client=self._client,
+                    db=self.db,
+                    notification_service=self._notification_service,
+                    guild_id=self.config.guild_id,
+                    forum_id=self.config.audit_forum_id,
+                    allowed_author_ids=self._allowed_authors,
+                )
+                await self._approval_inbox.start(guild)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._approval_inbox = None
+                logger.exception(
+                    "Discord approval inbox failed to start; "
+                    "continuing without Discord approval delivery"
                 )
 
         try:
@@ -746,6 +781,13 @@ class DiscordChannel(BaseChannel):
                 chunk,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+
+    async def deliver_approval(self, row: dict[str, Any]) -> str:
+        """Deliver an actionable notification to the pinned audit thread."""
+        inbox = self._approval_inbox
+        if inbox is None:
+            raise RuntimeError("Discord approval inbox is not available")
+        return await inbox.deliver(row)
 
     async def send_typing(self, target: str) -> None:
         channel = await self._resolve_messageable(target)

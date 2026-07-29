@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import os
+import json
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -42,6 +43,16 @@ if TYPE_CHECKING:
     from nerve.config import NerveConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _decision_feedback(notification: dict[str, Any]) -> str:
+    """Read optional Discord/web decision feedback from row metadata."""
+    raw = notification.get("metadata")
+    try:
+        metadata = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return ""
+    return str(metadata.get("decision_feedback") or "").strip()
 
 
 # ----------------------------------------------------------------------
@@ -228,7 +239,7 @@ def _dispatch_mechanical_action(
         cmd = ["bash", str(script_path), "approve", target_id]
         snooze_until = None
     elif decision == "decline":
-        reason = (
+        reason = _decision_feedback(notification) or (
             f"user declined via notification {notif_id}"
             if notif_id else "user declined via notification"
         )

@@ -93,7 +93,8 @@ discord:
   # Optional outbound-only forum. Nerve creates one thread per session and
   # mirrors visible messages, tool activity, lifecycle events, and errors.
   # Historical sessions are not backfilled until they become active; existing
-  # mirror threads are reconciled after every restart.
+  # mirror threads are reconciled after every restart. The same forum also
+  # contains one pinned "Approvals" thread with persistent action buttons.
   # audit_forum_id: 123456789012345682
   # Collect session activity before updating Discord. Terminal events flush
   # immediately. Set to 0 only when immediate audit updates are required.

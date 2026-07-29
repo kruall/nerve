@@ -697,7 +697,7 @@ PROPOSE_ACTION_SCHEMA = {
             "type": "string",
             "description": (
                 "Dispatcher key the user's answer routes through. "
-                "Currently supported: 'mechanical-action'."
+                "Currently supported: 'mechanical-action' and 'plan'."
             ),
         },
         "target_id": {

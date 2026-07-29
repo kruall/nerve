@@ -84,10 +84,11 @@ Implementations:
   mention-triggered conversation-thread creation, mention-free follow-ups in
   ordinary-channel threads, mention-gated project-forum turns, durable restart
   catch-up, one session per thread, deliberate output through the
-  session-bound `discord_send` MCP tool, and approval-gated project-forum tag
-  management. An optional outbound-only audit forum mirrors every active Nerve
-  session into a durable, incrementally updated Discord thread, batching
-  adjacent activity to reduce Discord API calls.
+  session-bound `discord_send` MCP tool, a pinned audit-forum approval inbox
+  with persistent buttons and feedback modals, and approval-gated
+  project-forum tag management. An optional outbound-only audit forum mirrors
+  every active Nerve session into a durable, incrementally updated Discord
+  thread, batching adjacent activity to reduce Discord API calls.
 - **Web** — Passive channel using gateway WebSocket
 
 Adding a new channel (WhatsApp, etc.) requires implementing ~5 methods and zero session/routing logic.

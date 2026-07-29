@@ -799,6 +799,9 @@ def dispatch_discord_forum_tag_action(
         "target_id": target_id,
         "decision": decision,
     }
+    feedback = notification_handlers._decision_feedback(notification)
+    if feedback:
+        base_event["feedback"] = feedback
     if decision == "decline":
         return notification_handlers.DispatchResult(
             ok=True,
