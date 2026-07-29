@@ -63,6 +63,9 @@ on Telegram / web as usual, but Nerve does **not** try to inject the
 answer back into the external client's conversation (Codex owns its
 own thread). If the external agent really needs blocking input, use
 the client's native input mechanism instead of `ask_user`.
+For the same reason, external sessions cannot set `continuation_prompt`
+on `propose_action`; only sessions owned by Nerve's engine can be
+re-invoked after an approval decision.
 
 ## Out of scope (for now)
 

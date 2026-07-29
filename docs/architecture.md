@@ -106,9 +106,13 @@ Adding a new channel (WhatsApp, etc.) requires implementing ~5 methods and zero 
 Async notification system for agent→user communication:
 - **`notify` tool** — fire-and-forget notifications (status updates, alerts, reminders)
 - **`ask_user` tool** — questions with predefined options (rendered as buttons) + free-text input. Supports blocking mode (`wait=true`) and async mode (answer injected as session message)
+- **`propose_action` tool** — approval-gated server-side dispatch with an
+  optional `continuation_prompt`. Opted-in terminal decisions and expiries
+  resume the same Nerve-owned session after dispatch, using persisted origin
+  channel context; snoozes remain pending and do not resume.
 - **NotificationService** — centralized fanout to configurable channels (web + Telegram by default, plus Discord inboxes when an audit forum is configured), answer routing, periodic expiry
 - **Multi-channel delivery** — web UI via `__global__` WebSocket broadcast channel, Telegram via direct bot API, and Discord inbox threads with persistent controls
-- **Answer routing** — answers from any channel (web UI, Telegram inline button or `/reply`, Discord button or modal) are persisted and either unblock a waiting tool or injected as a user message into the originating session
+- **Answer routing** — answers from any channel (web UI, Telegram inline button or `/reply`, Discord button or modal) are persisted and either unblock a waiting tool, dispatch an approved action, or re-invoke the originating session when the approval opted into continuation
 - **Web UI** — `/notifications` page with status/type filters, inline answer buttons, dismiss, dismiss-all; real-time toast overlay for new notifications; NavRail badge for pending count
 
 ### Cron Service (`nerve/cron/`)

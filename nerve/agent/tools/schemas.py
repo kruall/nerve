@@ -742,6 +742,18 @@ PROPOSE_ACTION_SCHEMA = {
             ),
             "default": "",
         },
+        "continuation_prompt": {
+            "type": "string",
+            "description": (
+                "Optional prompt that re-invokes this same Nerve-owned "
+                "session after a terminal approval decision or expiry. "
+                "The continuation runs after the dispatcher and receives "
+                "the decision, feedback, and dispatch outcome. Snooze does "
+                "not trigger it. Leave empty when the dispatcher is the "
+                "complete workflow."
+            ),
+            "default": "",
+        },
     },
     "required": ["target_kind", "target_id", "title"],
 }

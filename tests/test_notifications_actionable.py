@@ -28,6 +28,8 @@ import pytest
 
 from nerve.config import NerveConfig, NotificationsConfig
 from nerve.db import Database
+from nerve.agent.tools.handlers.notifications import propose_action_handler
+from nerve.agent.tools.registry import ToolContext
 from nerve.notifications import handlers as _handlers
 from nerve.notifications.service import NotificationService
 
@@ -59,6 +61,8 @@ def fake_engine() -> MagicMock:
     engine.sessions.is_running.return_value = False
     engine.router = MagicMock()
     engine.router.get_channel.return_value = None
+    engine.router.get_message_context.return_value = None
+    engine.get_active_channel.return_value = None
     engine.run = AsyncMock()
     return engine
 
@@ -386,6 +390,87 @@ class TestProposeAction:
         assert meta["target_kind"] == "discord-forum-tag"
         assert meta["target_id"] == "discord-tag-1"
 
+    async def test_continuation_persists_origin_channel_context(
+        self,
+        db: Database,
+        fake_config: NerveConfig,
+        fake_engine: MagicMock,
+        patch_broadcaster: list,
+    ):
+        await db.create_session("s1", source="discord")
+        fake_engine.get_active_channel.return_value = "discord"
+        fake_engine.router.get_message_context.return_value = {
+            "channel_name": "discord",
+            "target": "12345",
+            "message_id": "67890",
+            "private": "must-not-persist",
+        }
+        svc = NotificationService(fake_config, db, fake_engine)
+
+        result = await svc.propose_action(
+            session_id="s1",
+            target_kind="resume-test",
+            target_id="action-1",
+            title="continue later",
+            continuation_prompt="Inspect the result and finish.",
+        )
+
+        notif = await db.get_notification(result["notification_id"])
+        continuation = json.loads(notif["metadata"])[
+            "approval_continuation"
+        ]
+        assert continuation == {
+            "prompt": "Inspect the result and finish.",
+            "channel": "discord",
+            "channel_context": {
+                "channel_name": "discord",
+                "target": "12345",
+                "message_id": "67890",
+            },
+        }
+
+    async def test_continuation_rejects_external_session(
+        self,
+        db: Database,
+        fake_config: NerveConfig,
+        fake_engine: MagicMock,
+        patch_broadcaster: list,
+    ):
+        await db.create_session("external:codex:1", source="external")
+        svc = NotificationService(fake_config, db, fake_engine)
+
+        with pytest.raises(ValueError, match="Nerve-owned session"):
+            await svc.propose_action(
+                session_id="external:codex:1",
+                target_kind="resume-test",
+                target_id="action-1",
+                title="cannot resume",
+                continuation_prompt="Continue.",
+            )
+
+    async def test_tool_handler_forwards_continuation_prompt(self):
+        service = MagicMock()
+        service.propose_action = AsyncMock(return_value={
+            "notification_id": "approval-resume-1",
+            "status": "sent",
+        })
+        ctx = ToolContext(
+            session_id="s1",
+            notification_service=service,
+        )
+
+        result = await propose_action_handler(ctx, {
+            "target_kind": "resume-test",
+            "target_id": "action-1",
+            "title": "continue",
+            "continuation_prompt": "Finish after the decision.",
+        })
+
+        assert service.propose_action.await_args.kwargs[
+            "continuation_prompt"
+        ] == "Finish after the decision."
+        assert "automatically re-invoked" in result.content[0]["text"]
+
 
 # ----------------------------------------------------------------------
 #  handle_answer dispatch path
@@ -451,6 +536,110 @@ class TestHandleAnswerApproval:
             if m.get("type") == "answer_injected"
         ]
         assert not injected
+        fake_engine.run.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "decision", ["approve", "decline", "request_changes"],
+    )
+    async def test_terminal_answer_resumes_same_session_after_service_restart(
+        self,
+        decision: str,
+        db: Database,
+        fake_config: NerveConfig,
+        fake_engine: MagicMock,
+        patch_broadcaster: list,
+    ):
+        def dispatch(notification, target_id, decision, config):
+            return _handlers.DispatchResult(
+                ok=True,
+                audit_event={
+                    "event": "approval-acted",
+                    "notification_id": notification["id"],
+                    "target_kind": "resume-test",
+                    "target_id": target_id,
+                    "decision": decision,
+                    "ok": True,
+                },
+            )
+
+        _handlers.register("resume-test", dispatch)
+        await db.create_session("s1", source="discord")
+        fake_engine.get_active_channel.return_value = "discord"
+        fake_engine.router.get_message_context.return_value = {
+            "channel_name": "discord",
+            "target": "thread-123",
+            "message_id": "message-456",
+        }
+        creator = NotificationService(fake_config, db, fake_engine)
+        result = await creator.propose_action(
+            session_id="s1",
+            target_kind="resume-test",
+            target_id="action-1",
+            title="resume this work",
+            continuation_prompt="Verify the action and report completion.",
+        )
+
+        # A fresh service/engine pair models an answer received after a
+        # daemon restart: only DB state survives.
+        resumed_engine = MagicMock()
+        resumed_engine.router = MagicMock()
+        resumed_engine.run = AsyncMock()
+        service = NotificationService(fake_config, db, resumed_engine)
+        ok = await service.handle_answer(
+            result["notification_id"],
+            decision,
+            "discord:42",
+            feedback="Proceed with the final verification.",
+        )
+        assert ok is True
+        await asyncio.sleep(0)
+
+        resumed_engine.router.restore_message_context.assert_called_once_with(
+            "s1",
+            {
+                "channel_name": "discord",
+                "target": "thread-123",
+                "message_id": "message-456",
+            },
+        )
+        resumed_engine.run.assert_called_once()
+        kwargs = resumed_engine.run.call_args.kwargs
+        assert kwargs["session_id"] == "s1"
+        assert kwargs["source"] == "notification:approval"
+        assert kwargs["channel"] == "discord"
+        assert kwargs["internal"] is True
+        assert f"Decision: {decision}" in kwargs["user_message"]
+        assert "Outcome: dispatcher succeeded" in kwargs["user_message"]
+        assert "Proceed with the final verification." in kwargs["user_message"]
+        assert "Verify the action and report completion." in kwargs["user_message"]
+
+    async def test_dispatch_failure_still_resumes_for_recovery(
+        self,
+        db: Database,
+        fake_config: NerveConfig,
+        fake_engine: MagicMock,
+        patch_broadcaster: list,
+    ):
+        await db.create_session("s1", source="web")
+        svc = NotificationService(fake_config, db, fake_engine)
+        result = await svc.propose_action(
+            session_id="s1",
+            target_kind="missing-dispatcher",
+            target_id="action-1",
+            title="broken action",
+            continuation_prompt="Recover or explain the failure.",
+        )
+
+        assert await svc.handle_answer(
+            result["notification_id"], "approve", "web",
+        )
+        await asyncio.sleep(0)
+
+        fake_engine.run.assert_called_once()
+        message = fake_engine.run.call_args.kwargs["user_message"]
+        assert "Outcome: dispatcher failed" in message
+        assert "no dispatcher registered" in message
+        assert "Recover or explain the failure." in message
 
     async def test_snooze_keeps_pending_and_advances_expiry(
         self,
@@ -468,6 +657,7 @@ class TestHandleAnswerApproval:
             target_id="prop-2",
             title="snooze me",
             expiry_hours=2,
+            continuation_prompt="Continue after a final decision.",
         )
         nid = result["notification_id"]
 
@@ -495,6 +685,9 @@ class TestHandleAnswerApproval:
             and m.get("notification_id") == nid
         ]
         assert approval_broadcasts[0]["approval_status"] == "snoozed"
+
+        # Snooze is non-terminal: even an opted-in approval remains waiting.
+        fake_engine.run.assert_not_called()
 
     async def test_decline_marks_answered_with_decline(
         self,

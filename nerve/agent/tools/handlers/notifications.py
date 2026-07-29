@@ -6,7 +6,9 @@ to the correct chat (web, Telegram, or Discord). The session_id arrives via
 
 ``propose_action`` files an ``approval``-kind notification whose answer
 routes through a server-side dispatcher (``ctx.notification_service``)
-instead of being injected back into the originating session.
+instead of being injected back into the originating session by default.
+An optional ``continuation_prompt`` re-invokes Nerve-owned sessions after
+the dispatcher reaches a terminal decision.
 
 ``send_file`` enforces workspace containment via :py:meth:`Path.relative_to`
 (path-aware) — a string prefix check would let sibling-prefix paths
@@ -199,8 +201,8 @@ async def propose_action_handler(ctx: ToolContext, args: dict) -> ToolResult:
     """Ask the user to approve/decline/snooze a queued action.
 
     Unlike ask_user, the answer routes through a server-side dispatcher
-    keyed by ``target_kind`` and acts on ``target_id`` directly — it is
-    NOT injected back into this session.
+    keyed by ``target_kind`` and acts on ``target_id`` directly. Callers
+    may opt into a follow-up turn by providing ``continuation_prompt``.
     """
     if not ctx.notification_service:
         return ToolResult.text("Notification service not available.")
@@ -217,6 +219,9 @@ async def propose_action_handler(ctx: ToolContext, args: dict) -> ToolResult:
     options = _parse_action_options(args.get("options"))
     priority = args.get("priority", "high")
     expires_at = args.get("expires_at") or None
+    continuation_prompt = str(
+        args.get("continuation_prompt") or ""
+    ).strip() or None
 
     try:
         result = await ctx.notification_service.propose_action(
@@ -228,9 +233,17 @@ async def propose_action_handler(ctx: ToolContext, args: dict) -> ToolResult:
             options=options,
             priority=priority,
             expires_at=expires_at,
+            continuation_prompt=continuation_prompt,
         )
 
         nid = result["notification_id"]
+        if continuation_prompt:
+            return ToolResult.text(
+                f"Approval requested ({nid}). When the user gives a terminal "
+                f"answer, the {target_kind} dispatcher acts on {target_id}, "
+                "then this session is automatically re-invoked with the "
+                "decision and dispatch outcome. Snooze leaves it waiting."
+            )
         return ToolResult.text(
             f"Approval requested ({nid}). When the user picks a button, "
             f"the {target_kind} dispatcher acts on {target_id}; the answer "
@@ -506,7 +519,9 @@ PROPOSE_ACTION_SPEC = ToolSpec(
         "Ask the user to approve, decline, or snooze a queued action. "
         "Unlike ask_user, the answer routes through a server-side dispatcher "
         "keyed by target_kind (e.g. 'mechanical-action') and acts on target_id "
-        "directly. The answer is NOT injected back into this session. "
+        "directly. Set continuation_prompt to re-invoke this same Nerve-owned "
+        "session after a terminal decision or expiry; snooze remains pending. "
+        "Without it, the answer is not injected back into this session. "
         "Use for queued mechanical actions, pending plans, or any binary "
         "decision the user owns and the agent has already prepared."
     ),

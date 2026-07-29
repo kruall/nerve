@@ -67,6 +67,8 @@ def fake_engine() -> MagicMock:
     engine.sessions.is_running.return_value = False
     engine.router = MagicMock()
     engine.router.get_channel.return_value = None
+    engine.router.get_message_context.return_value = None
+    engine.get_active_channel.return_value = None
     engine.run = AsyncMock()
     return engine
 
@@ -478,7 +480,7 @@ class TestExpiryReporting:
         assert await svc.expire_stale() == 1
         await asyncio.sleep(0)
 
-        fake_engine.run.assert_not_called()      # approvals never inject
+        fake_engine.run.assert_not_called()      # opt-out remains dispatcher-only
         events = read_audit_jsonl(
             audit_workspace / ".nerve" / "mechanical-actions",
         )
@@ -489,6 +491,73 @@ class TestExpiryReporting:
             and e.get("target_id") == "prop-1"
             for e in expired
         )
+
+    async def test_expired_opted_in_approval_resumes_origin_session(
+        self, db: Database, fake_config, fake_engine, patch_broadcaster,
+        audit_workspace: Path,
+    ):
+        await db.create_session("s1", source="discord")
+        fake_engine.get_active_channel.return_value = "discord"
+        fake_engine.router.get_message_context.return_value = {
+            "channel_name": "discord",
+            "target": "thread-123",
+            "message_id": "message-456",
+        }
+        svc = NotificationService(fake_config, db, fake_engine)
+        nid = await _make_approval(
+            svc,
+            db,
+            title="approval that expires",
+            continuation_prompt="Choose a safe fallback and continue.",
+        )
+        await db.update_notification(nid, expires_at=_iso(-1))
+
+        assert await svc.expire_stale() == 1
+        await asyncio.sleep(0)
+
+        fake_engine.router.restore_message_context.assert_called_once_with(
+            "s1",
+            {
+                "channel_name": "discord",
+                "target": "thread-123",
+                "message_id": "message-456",
+            },
+        )
+        fake_engine.run.assert_called_once()
+        kwargs = fake_engine.run.call_args.kwargs
+        assert kwargs["session_id"] == "s1"
+        assert kwargs["channel"] == "discord"
+        assert kwargs["internal"] is True
+        assert "Decision: expired" in kwargs["user_message"]
+        assert "Outcome: expired unanswered" in kwargs["user_message"]
+        assert "Choose a safe fallback and continue." in kwargs["user_message"]
+
+    async def test_external_approval_continuation_is_never_run(
+        self, db: Database, fake_config, fake_engine, patch_broadcaster,
+        audit_workspace: Path,
+    ):
+        await db.create_session("sat-1", source="external")
+        await db.create_notification(
+            notification_id="approval-external-1",
+            session_id="sat-1",
+            type="approval",
+            title="external approval",
+            expires_at=_iso(-1),
+            target_kind="lifecycle-test",
+            target_id="prop-1",
+            metadata={
+                "approval_continuation": {
+                    "prompt": "Must not run.",
+                    "channel": "discord",
+                },
+            },
+        )
+        svc = NotificationService(fake_config, db, fake_engine)
+
+        assert await svc.expire_stale() == 1
+        await asyncio.sleep(0)
+
+        fake_engine.run.assert_not_called()
 
     async def test_notify_kind_expiry_stays_silent(
         self, db: Database, fake_config, fake_engine, patch_broadcaster,

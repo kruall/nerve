@@ -39,6 +39,19 @@ _APPROVAL_EMOJIS: dict[str, str] = {
     "snooze_24h": "\U0001F4A4",  # zzz
 }
 
+_APPROVAL_CONTINUATION_KEY = "approval_continuation"
+_CONTINUATION_CONTEXT_KEYS = ("channel_name", "target", "message_id")
+
+
+def _notification_metadata(row: dict[str, Any]) -> dict[str, Any]:
+    """Return one notification row's metadata as a defensive dict copy."""
+    raw = row.get("metadata")
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
 
 def _resolve_workspace(config: NerveConfig | None) -> Path | None:
     """Resolve the workspace directory.
@@ -334,6 +347,7 @@ class NotificationService:
         expiry_hours: int | None = None,
         metadata: dict[str, Any] | None = None,
         channels: list[str] | None = None,
+        continuation_prompt: str | None = None,
     ) -> dict:
         """File an actionable ``approval``-kind notification.
 
@@ -346,9 +360,16 @@ class NotificationService:
         ``metadata`` is merged with the reserved routing and option-label
         fields before the notification row is stored.
 
+        When ``continuation_prompt`` is non-empty, a terminal answer (or
+        expiry) re-invokes the same Nerve-owned session after the dispatcher
+        has finished. The originating channel and bounded outbound context
+        are persisted with the notification so an answer received after a
+        daemon restart still resumes in the original conversation.
+
         Returns ``{"notification_id": <id>, "status": "sent"}``.
         """
         notification_id = f"approval-{uuid.uuid4().hex[:8]}"
+        continuation_prompt = str(continuation_prompt or "").strip()
 
         # Resolve options. Default to the registered dispatcher's
         # canonical set when none was passed. Falling back to the
@@ -384,6 +405,46 @@ class NotificationService:
             "target_id": target_id,
             "option_labels": option_labels,
         })
+        if continuation_prompt:
+            session = await self.db.get_session(session_id)
+            if not session or session.get("source") == "external":
+                raise ValueError(
+                    "propose_action: continuation_prompt requires a "
+                    "Nerve-owned session"
+                )
+
+            origin_channel: str | None = None
+            get_active_channel = getattr(
+                self.engine, "get_active_channel", None,
+            )
+            if callable(get_active_channel):
+                candidate = get_active_channel(session_id)
+                if isinstance(candidate, str) and candidate:
+                    origin_channel = candidate
+            if origin_channel is None:
+                source = session.get("source")
+                if isinstance(source, str) and source:
+                    origin_channel = source
+
+            context: dict[str, Any] | None = None
+            router = getattr(self.engine, "router", None)
+            get_context = getattr(router, "get_message_context", None)
+            if callable(get_context):
+                candidate = get_context(session_id)
+                if isinstance(candidate, dict):
+                    bounded = {
+                        key: candidate[key]
+                        for key in _CONTINUATION_CONTEXT_KEYS
+                        if key in candidate
+                    }
+                    if bounded:
+                        context = bounded
+
+            notification_metadata[_APPROVAL_CONTINUATION_KEY] = {
+                "prompt": continuation_prompt,
+                "channel": origin_channel,
+                "channel_context": context,
+            }
 
         await self.db.create_notification(
             notification_id=notification_id,
@@ -662,7 +723,117 @@ class NotificationService:
             payload["snooze_until"] = snooze_until
         await broadcaster.broadcast("__global__", payload)
 
+        if not snoozed:
+            await self._resume_approval_session(
+                notif,
+                decision=answer,
+                dispatch_ok=result.ok,
+                dispatch_error=str(result.audit_event.get("error") or ""),
+            )
+
         return True
+
+    async def _resume_approval_session(
+        self,
+        notif: dict[str, Any],
+        *,
+        decision: str,
+        dispatch_ok: bool | None,
+        dispatch_error: str = "",
+    ) -> None:
+        """Re-invoke an approval's originating session when opted in."""
+        metadata = _notification_metadata(notif)
+        continuation = metadata.get(_APPROVAL_CONTINUATION_KEY)
+        if not isinstance(continuation, dict):
+            return
+        prompt = str(continuation.get("prompt") or "").strip()
+        if not prompt:
+            return
+
+        session_id = str(notif.get("session_id") or "")
+        try:
+            session = await self.db.get_session(session_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "approval continuation: session lookup failed for %s: %s",
+                session_id, exc,
+            )
+            return
+        if not session:
+            logger.info(
+                "approval continuation: session %s is missing", session_id,
+            )
+            return
+        if session.get("status") == "archived":
+            logger.info(
+                "approval continuation: session %s is archived", session_id,
+            )
+            return
+        if session.get("source") == "external":
+            logger.info(
+                "approval continuation: session %s is external", session_id,
+            )
+            return
+
+        channel = continuation.get("channel")
+        if not isinstance(channel, str) or not channel:
+            source = session.get("source")
+            channel = source if isinstance(source, str) and source else None
+
+        channel_context = continuation.get("channel_context")
+        if isinstance(channel_context, dict):
+            router = getattr(self.engine, "router", None)
+            restore_context = getattr(
+                router, "restore_message_context", None,
+            )
+            if callable(restore_context):
+                try:
+                    restore_context(session_id, channel_context)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning(
+                        "approval continuation: failed to restore channel "
+                        "context for %s: %s",
+                        session_id, exc,
+                    )
+
+        feedback = str(metadata.get("decision_feedback") or "").strip()
+        outcome = (
+            "expired unanswered"
+            if decision == "expired"
+            else (
+                "dispatcher succeeded"
+                if dispatch_ok
+                else "dispatcher failed"
+            )
+        )
+        details = [
+            "[Approval continuation]",
+            f"Notification: {notif.get('id') or ''}",
+            f"Title: {notif.get('title') or ''}",
+            f"Target: {notif.get('target_kind') or ''}:{notif.get('target_id') or ''}",
+            f"Decision: {decision}",
+            f"Outcome: {outcome}",
+        ]
+        if feedback:
+            details.append(f"Feedback: {feedback}")
+        if dispatch_error:
+            details.append(f"Error: {dispatch_error}")
+        details.extend(("", "Continuation instructions:", prompt))
+        message = "\n".join(details)
+
+        try:
+            self._dispatch_into_session(
+                session_id,
+                message,
+                source="notification:approval",
+                channel=channel,
+                internal=True,
+            )
+        except Exception as exc:  # pragma: no cover - create_task failure
+            logger.error(
+                "Failed to resume session %s for approval %s: %s",
+                session_id, notif.get("id"), exc,
+            )
 
     async def _dispatch_plan_approval(
         self,
@@ -1348,8 +1519,8 @@ class NotificationService:
             # Telegram: mark the card expired, drop dead buttons.
             await self._edit_telegram_expired(notif)
 
-            # Approvals: the proposer is the mechanical pipeline, not a
-            # conversation — record the expiry in its audit log.
+            # Approvals always record expiry in the mechanical audit log.
+            # Opted-in conversation workflows are then resumed below.
             if notif.get("type") == "approval":
                 await self._append_approval_audit({
                     "event": "approval-expired",
@@ -1358,6 +1529,11 @@ class NotificationService:
                     "target_id": notif.get("target_id") or "",
                     "redelivery_count": notif.get("redelivery_count") or 0,
                 })
+                await self._resume_approval_session(
+                    notif,
+                    decision="expired",
+                    dispatch_ok=None,
+                )
 
         # Questions: tell the asking session its question died, so the
         # agent can adapt (re-ask, escalate, or record "no decision").
