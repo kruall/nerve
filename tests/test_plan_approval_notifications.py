@@ -27,6 +27,7 @@ async def _task_and_plan(db, tmp_path):
         status="pending",
         content=task_file.read_text(encoding="utf-8"),
     )
+    await db.create_session("planner-1", model="gpt-5.6-terra")
     await db.create_plan(
         plan_id="plan-1",
         task_id="task-1",
@@ -48,6 +49,7 @@ async def test_plan_propose_creates_review_approval(db, tmp_path):
         status="pending",
         content=task_file.read_text(encoding="utf-8"),
     )
+    await db.create_session("planner-1", model="gpt-5.6-terra")
     notifications = MagicMock()
     notifications.propose_action = AsyncMock(return_value={
         "notification_id": "approval-plan-1",
@@ -72,6 +74,7 @@ async def test_plan_propose_creates_review_approval(db, tmp_path):
     result = await plan_propose_handler(ctx, {
         "task_id": "task-1",
         "content": "1. Implement\n2. Test",
+        "summary": "Implement the requested behavior and verify it with tests.",
     })
 
     kwargs = notifications.propose_action.await_args.kwargs
@@ -84,6 +87,11 @@ async def test_plan_propose_creates_review_approval(db, tmp_path):
         {"label": "Decline", "value": "decline"},
     ]
     assert kwargs["channels"] == ["discord"]
+    assert kwargs["metadata"]["plan_summary"] == (
+        "Implement the requested behavior and verify it with tests."
+    )
+    plan = await db.get_plan(kwargs["target_id"])
+    assert plan["model"] == "gpt-5.6-terra"
     assert "Approval requested: approval-plan-1" in result.content[0]["text"]
 
 
@@ -114,6 +122,7 @@ async def test_revised_plan_creates_fresh_review_approval(db, tmp_path):
     result = await plan_update_handler(ctx, {
         "plan_id": "plan-1",
         "content": "1. Revised implementation\n2. Rollback tests",
+        "summary": "Add rollback coverage to the revised implementation plan.",
         "feedback": "Add rollback coverage",
     })
 
@@ -121,6 +130,11 @@ async def test_revised_plan_creates_fresh_review_approval(db, tmp_path):
     assert kwargs["target_kind"] == "plan"
     assert kwargs["target_id"] != "plan-1"
     assert kwargs["metadata"]["plan_version"] == 2
+    assert kwargs["metadata"]["plan_summary"] == (
+        "Add rollback coverage to the revised implementation plan."
+    )
+    plan = await db.get_plan(kwargs["target_id"])
+    assert plan["model"] == "gpt-5.6-terra"
     assert "Approval requested: approval-plan-2" in result.content[0]["text"]
 
 

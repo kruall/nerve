@@ -30,6 +30,7 @@ _THREAD_INTRO = (
 )
 _MAX_MESSAGE_LENGTH = 2000
 _MAX_ACTION_CARD_LENGTH = 1500
+_MAX_PLAN_SUMMARY_LENGTH = 600
 _FEEDBACK_DECISIONS = frozenset({"decline", "revise", "request_changes"})
 
 _BUTTON_STYLES = {
@@ -83,6 +84,13 @@ def _option_values(row: dict[str, Any]) -> list[str]:
     if not isinstance(raw, list):
         return []
     return [str(value) for value in raw if str(value)]
+
+
+def _plan_summary(row: dict[str, Any]) -> str:
+    """Return the model-authored brief description for a plan approval."""
+    return str(_metadata(row).get("plan_summary") or "").strip()[
+        :_MAX_PLAN_SUMMARY_LENGTH
+    ]
 
 
 def _safe_label(value: str, labels: dict[str, str]) -> str:
@@ -296,6 +304,52 @@ class ApprovalPlanButton(discord.ui.Button["ApprovalView"]):
             )
 
 
+class ApprovalDescribeButton(discord.ui.Button["ApprovalView"]):
+    """Show the model-authored plan overview privately."""
+
+    def __init__(
+        self,
+        notification_id: str,
+        *,
+        disabled: bool = False,
+    ) -> None:
+        super().__init__(
+            style=discord.ButtonStyle.secondary,
+            label="Describe",
+            emoji="🧭",
+            custom_id=f"nerve:approval:{notification_id}:describe",
+            disabled=disabled,
+            row=1,
+        )
+        self.notification_id = notification_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if view is None:
+            return
+        if not view.inbox.interaction_allowed(interaction):
+            await interaction.response.send_message(
+                "You are not allowed to view Nerve approval details.",
+                ephemeral=True,
+            )
+            return
+
+        row = await view.inbox.db.get_notification(self.notification_id)
+        summary = _plan_summary(row or {})
+        if not summary:
+            await interaction.response.send_message(
+                "A brief description is unavailable for this plan.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(
+            f"**Plan overview**\n\n{summary}",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+
 class ApprovalView(discord.ui.View):
     """Persistent view reconstructed from a notification row."""
 
@@ -308,6 +362,7 @@ class ApprovalView(discord.ui.View):
         *,
         disabled: bool = False,
         show_plan: bool = False,
+        show_describe: bool = False,
     ) -> None:
         super().__init__(timeout=None)
         self.inbox = inbox
@@ -323,6 +378,11 @@ class ApprovalView(discord.ui.View):
             ))
         if show_plan:
             self.add_item(ApprovalPlanButton(
+                notification_id,
+                disabled=disabled,
+            ))
+        if show_describe:
+            self.add_item(ApprovalDescribeButton(
                 notification_id,
                 disabled=disabled,
             ))
@@ -441,12 +501,14 @@ class DiscordApprovalInbox:
         if not options:
             raise ValueError("Discord approval has no options")
         show_plan = self._has_plan_details(row)
+        show_describe = bool(_plan_summary(row))
         view = ApprovalView(
             self,
             row["id"],
             options,
             labels,
             show_plan=show_plan,
+            show_describe=show_describe,
         )
         content = self._render_card(row)
         if len(content) > _MAX_ACTION_CARD_LENGTH:
@@ -504,6 +566,7 @@ class DiscordApprovalInbox:
                     options,
                     _option_labels(row),
                     show_plan=self._has_plan_details(row),
+                    show_describe=bool(_plan_summary(row)),
                 ),
                 message_id=message_id,
             )
@@ -563,6 +626,7 @@ class DiscordApprovalInbox:
                     labels,
                     disabled=True,
                     show_plan=self._has_plan_details(row or {}),
+                    show_describe=bool(_plan_summary(row or {})),
                 ),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
@@ -585,9 +649,10 @@ class DiscordApprovalInbox:
         target_id = str(row.get("target_id") or "").strip()
         parts = [f"{prefix}**{title}**"]
         if body and target_kind == "plan":
-            parts.append(
-                "Use **Show plan** to view the full plan privately."
-            )
+            actions = "**Show plan** to view the full plan privately"
+            if _plan_summary(row):
+                actions = "**Describe** for a short overview or " + actions
+            parts.append(f"Use {actions}.")
         elif body:
             parts.append(body)
         if target_kind or target_id:

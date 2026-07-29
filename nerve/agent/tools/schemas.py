@@ -463,13 +463,23 @@ PLAN_PROPOSE_SCHEMA = {
     "properties": {
         "task_id": {"type": "string", "description": "The task ID to propose a plan for"},
         "content": {"type": "string", "description": "The plan content in markdown format"},
+        "summary": {
+            "type": "string",
+            "description": (
+                "A concise 1–3 sentence plain-language description of what "
+                "the plan is for and its intended outcome. Use the user's "
+                "language. It is shown through Discord's Describe button, "
+                "not in the public approval card."
+            ),
+            "maxLength": 600,
+        },
         "plan_type": {
             "type": "string",
             "description": "Plan type: 'generic' (default), 'skill-create', 'skill-update'. Auto-detected from task source if omitted.",
             "default": "",
         },
     },
-    "required": ["task_id", "content"],
+    "required": ["task_id", "content", "summary"],
 }
 
 PLAN_UPDATE_SCHEMA = {
@@ -477,13 +487,23 @@ PLAN_UPDATE_SCHEMA = {
     "properties": {
         "plan_id": {"type": "string", "description": "The pending plan ID to update"},
         "content": {"type": "string", "description": "The full revised plan content in markdown"},
+        "summary": {
+            "type": "string",
+            "description": (
+                "A concise 1–3 sentence plain-language description of what "
+                "this revised plan is for and its intended outcome. Use the "
+                "user's language. It is shown through Discord's Describe "
+                "button, not in the public approval card."
+            ),
+            "maxLength": 600,
+        },
         "feedback": {
             "type": "string",
             "description": "Optional reason for the revision — stored on the superseded plan",
             "default": "",
         },
     },
-    "required": ["plan_id", "content"],
+    "required": ["plan_id", "content", "summary"],
 }
 
 PLAN_LIST_SCHEMA = {

@@ -10,7 +10,7 @@ Nerve includes a proactive planner that autonomously picks open tasks, explores 
 Cron (every 4h) → persistent "task-planner" job
   → agent browses tasks, checks memory, picks one worth planning
   → explores codebase with Read, Glob, Grep, Bash, etc.
-  → calls plan_propose(task_id, content) to store the proposal
+  → calls plan_propose(task_id, content, summary) to store the proposal
   → plan appears in /plans UI and, when configured, the pinned Discord
     Approvals thread
 
@@ -32,13 +32,16 @@ User reviews (via /plans UI, Discord buttons, or chat tools)
 | `plan_decline` | Decline a pending plan with optional feedback. Moves the related task to `done` (declining is treated as abandoning the effort, not pausing it). |
 | `plan_revise` | Request revision of a pending plan — sends feedback to the planner session, which calls `plan_update` to produce v+1. |
 
-### `plan_propose(task_id, content, plan_type?)`
+### `plan_propose(task_id, content, summary, plan_type?)`
 
 - Validates the task exists
 - Checks no pending/implementing plan already exists → returns error if duplicate
 - Auto-detects `plan_type` from task source (`skill-extractor` → `skill-create`, etc.)
 - Auto-increments version if previous plans exist for the same task
 - Supersedes any prior pending plan for the same task
+- Captures a short description in the same model call that drafted the plan;
+  Discord presents it privately through **Describe** while **Show plan** keeps
+  the full plan out of the public approval card
 - Returns `{ plan_id, task_id, version }`
 
 ### `plan_list(status?)`
@@ -63,11 +66,12 @@ User reviews (via /plans UI, Discord buttons, or chat tools)
 - Spawns `engine.run()` in background (unchanged — the agent decides how to implement)
 - Returns `{ plan_id, impl_session_id }`
 
-### `plan_update(plan_id, content, feedback?)`
+### `plan_update(plan_id, content, summary, feedback?)`
 
 - Guards: only pending plans can be updated
 - Marks the old plan as `superseded` (and stores optional `feedback` on it explaining the change)
 - Creates a new plan record: `version = old.version + 1`, `parent_plan_id = old.id`, same `task_id`/`plan_type`, fresh `session_id` from the updating agent
+- Replaces the Discord **Describe** text together with the revised plan
 - Writes a "Plan updated: …" note to task history
 - Task status is untouched — the plan is just being refined
 - Returns `{ new_plan_id, version }`

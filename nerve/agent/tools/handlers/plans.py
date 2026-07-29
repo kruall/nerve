@@ -40,6 +40,26 @@ _PLAN_APPROVAL_OPTIONS = [
     {"label": "Request changes", "value": "revise"},
     {"label": "Decline", "value": "decline"},
 ]
+_MAX_PLAN_SUMMARY_LENGTH = 600
+
+
+def _plan_summary(args: dict) -> str:
+    """Normalize the model-authored description shown by Discord Describe."""
+    return str(args.get("summary") or "").strip()[:_MAX_PLAN_SUMMARY_LENGTH]
+
+
+async def _planning_model(ctx: ToolContext) -> str:
+    """Capture the serving model that authored this plan when available."""
+    if ctx.db is None:
+        return ""
+    session = await ctx.db.get_session(ctx.session_id) or {}
+    model = str(session.get("model") or "").strip()
+    current_model = getattr(ctx.engine, "get_current_model", None)
+    if callable(current_model):
+        observed = current_model(ctx.session_id)
+        if isinstance(observed, str) and observed.strip():
+            model = observed.strip()
+    return model
 
 
 async def _request_plan_approval(
@@ -49,6 +69,7 @@ async def _request_plan_approval(
     task_id: str,
     task_title: str,
     content: str,
+    summary: str,
     version: int,
 ) -> str | None:
     """Create the actionable notification rendered in Discord's inbox."""
@@ -69,7 +90,11 @@ async def _request_plan_approval(
             body=content,
             options=_PLAN_APPROVAL_OPTIONS,
             priority="high",
-            metadata={"task_id": task_id, "plan_version": version},
+            metadata={
+                "task_id": task_id,
+                "plan_version": version,
+                "plan_summary": summary,
+            },
             channels=["discord"],
         )
     except Exception:
@@ -86,6 +111,7 @@ async def _request_plan_approval(
 async def plan_propose_handler(ctx: ToolContext, args: dict) -> ToolResult:
     task_id = args["task_id"]
     content = args["content"]
+    summary = _plan_summary(args)
     plan_type = (args.get("plan_type", "") or "").strip()
 
     if not ctx.db:
@@ -126,7 +152,7 @@ async def plan_propose_handler(ctx: ToolContext, args: dict) -> ToolResult:
         task_id=task_id,
         content=content,
         session_id=ctx.session_id,  # Attribution: which agent proposed this plan
-        model="",
+        model=await _planning_model(ctx),
         version=version,
         plan_type=plan_type,
     )
@@ -142,6 +168,7 @@ async def plan_propose_handler(ctx: ToolContext, args: dict) -> ToolResult:
         task_id=task_id,
         task_title=task["title"],
         content=content,
+        summary=summary,
         version=version,
     )
 
@@ -164,6 +191,7 @@ async def plan_update_handler(ctx: ToolContext, args: dict) -> ToolResult:
     """
     plan_id = args["plan_id"]
     content = args["content"]
+    summary = _plan_summary(args)
     feedback = (args.get("feedback", "") or "").strip()
 
     if not ctx.db:
@@ -190,7 +218,7 @@ async def plan_update_handler(ctx: ToolContext, args: dict) -> ToolResult:
         task_id=old_plan["task_id"],
         content=content,
         session_id=ctx.session_id,
-        model="",
+        model=await _planning_model(ctx),
         version=new_version,
         parent_plan_id=plan_id,
         plan_type=old_plan.get("plan_type", "generic"),
@@ -209,6 +237,7 @@ async def plan_update_handler(ctx: ToolContext, args: dict) -> ToolResult:
         task_id=old_plan["task_id"],
         task_title=old_plan.get("task_title") or old_plan["task_id"],
         content=content,
+        summary=summary,
         version=new_version,
     )
 

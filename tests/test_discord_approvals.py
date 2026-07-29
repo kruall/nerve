@@ -178,6 +178,7 @@ async def test_delivery_posts_persistent_view_and_saves_coordinates():
                 "revise": "Request changes",
                 "decline": "Decline",
             },
+            "plan_summary": "Implement the requested behavior and cover it with tests.",
         }),
     }
 
@@ -192,9 +193,11 @@ async def test_delivery_posts_persistent_view_and_saves_coordinates():
         "nerve:approval:approval-1:revise",
         "nerve:approval:approval-1:decline",
         "nerve:approval:approval-1:show_plan",
+        "nerve:approval:approval-1:describe",
     ]
     assert "Details" not in thread.send.await_args.args[0]
     assert "Show plan" in thread.send.await_args.args[0]
+    assert "Describe" in thread.send.await_args.args[0]
     encoded = inbox.db.update_notification.await_args.kwargs["metadata"]
     assert json.loads(encoded)["discord_approval"] == {
         "thread_id": str(THREAD_ID),
@@ -217,7 +220,10 @@ async def test_long_plan_posts_only_compact_action_card():
         "target_kind": "plan",
         "target_id": "plan-long",
         "options": json.dumps(["approve", "revise", "decline"]),
-        "metadata": json.dumps({"option_labels": {}}),
+        "metadata": json.dumps({
+            "option_labels": {},
+            "plan_summary": "Implement the requested behavior and verify it.",
+        }),
     }
 
     await inbox.deliver(row)
@@ -227,6 +233,7 @@ async def test_long_plan_posts_only_compact_action_card():
     assert isinstance(calls[0].kwargs["view"], ApprovalView)
     assert "step" not in calls[0].args[0]
     assert "Show plan" in calls[0].args[0]
+    assert "Describe" in calls[0].args[0]
 
 
 @pytest.mark.asyncio
@@ -239,6 +246,7 @@ async def test_restart_restores_pending_view_by_message_id():
         "options": json.dumps(["approve", "decline"]),
         "metadata": json.dumps({
             "option_labels": {"approve": "Approve", "decline": "Decline"},
+            "plan_summary": "A concise plan overview.",
             "discord_approval": {
                 "thread_id": str(THREAD_ID),
                 "message_id": str(MESSAGE_ID),
@@ -250,8 +258,11 @@ async def test_restart_restores_pending_view_by_message_id():
 
     view = inbox.client.add_view.call_args.args[0]
     assert isinstance(view, ApprovalView)
-    assert view.children[-1].custom_id == (
+    assert view.children[-2].custom_id == (
         "nerve:approval:approval-1:show_plan"
+    )
+    assert view.children[-1].custom_id == (
+        "nerve:approval:approval-1:describe"
     )
     assert inbox.client.add_view.call_args.kwargs["message_id"] == MESSAGE_ID
 
@@ -282,6 +293,36 @@ async def test_show_plan_button_sends_ephemeral_chunks():
     assert all(len(call.args[0]) <= 2000 for call in calls)
     assert "Review long plan" in calls[0].args[0]
     thread.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_describe_button_sends_ephemeral_summary():
+    inbox = _inbox(thread=_thread())
+    inbox.db.get_notification.return_value = {
+        "metadata": json.dumps({
+            "plan_summary": "This adds a concise plan overview to approvals.",
+        }),
+    }
+    view = ApprovalView(
+        inbox,
+        "approval-1",
+        ["approve"],
+        {"approve": "Approve"},
+        show_describe=True,
+    )
+    interaction = _interaction()
+
+    await view.children[-1].callback(interaction)
+
+    interaction.response.send_message.assert_awaited_once()
+    args = interaction.response.send_message.await_args
+    assert args.args == (
+        "**Plan overview**\n\nThis adds a concise plan overview to approvals.",
+    )
+    assert args.kwargs["ephemeral"] is True
+    assert args.kwargs["allowed_mentions"].everyone is False
+    assert args.kwargs["allowed_mentions"].users is False
+    assert args.kwargs["allowed_mentions"].roles is False
 
 
 @pytest.mark.asyncio
