@@ -40,6 +40,25 @@ class _StubChannel(BaseChannel):
         self.sent.append(message)
 
 
+class _TypingChannel(_StubChannel):
+    def __init__(self, *, automatic_responses: bool = False):
+        super().__init__(automatic_responses=automatic_responses)
+        self.typing_targets: list[str] = []
+        self.typing_refreshed = asyncio.Event()
+
+    @property
+    def capabilities(self) -> ChannelCapability:
+        return (
+            ChannelCapability.SEND_TEXT
+            | ChannelCapability.TYPING_INDICATOR
+        )
+
+    async def send_typing(self, target: str) -> None:
+        self.typing_targets.append(target)
+        if len(self.typing_targets) >= 2:
+            self.typing_refreshed.set()
+
+
 def test_unregister_removes_failed_channel():
     engine = MagicMock()
     router = ChannelRouter(engine)
@@ -142,6 +161,63 @@ async def test_run_without_automatic_responses_does_not_register_adapter():
     assert response == "internal answer"
     router._setup_streaming.assert_not_awaited()
     router._teardown_streaming.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_refreshes_typing_until_engine_finishes():
+    finish_run = asyncio.Event()
+
+    async def run_agent(**_kwargs):
+        await finish_run.wait()
+        return "done"
+
+    engine = MagicMock()
+    engine.run = AsyncMock(side_effect=run_agent)
+    engine.register_task = MagicMock()
+    router = ChannelRouter(engine)
+    router.TYPING_REFRESH_INTERVAL = 0.01
+    channel = _TypingChannel()
+    message = InboundMessage(
+        channel_name="manual",
+        channel_key="manual:channel-1",
+        sender_id="channel-1",
+        text="hello",
+    )
+
+    run_task = asyncio.create_task(
+        router._run_single(channel, message, "shared"),
+    )
+    await asyncio.wait_for(channel.typing_refreshed.wait(), timeout=1)
+
+    finish_run.set()
+    assert await run_task == "done"
+    typing_count = len(channel.typing_targets)
+    await asyncio.sleep(0.03)
+
+    assert typing_count >= 2
+    assert len(channel.typing_targets) == typing_count
+    assert set(channel.typing_targets) == {"channel-1"}
+
+
+@pytest.mark.asyncio
+async def test_typing_failure_does_not_abort_agent_run():
+    engine = MagicMock()
+    engine.run = AsyncMock(return_value="done")
+    engine.register_task = MagicMock()
+    router = ChannelRouter(engine)
+    channel = _TypingChannel()
+    channel.send_typing = AsyncMock(side_effect=RuntimeError("unavailable"))
+    message = InboundMessage(
+        channel_name="manual",
+        channel_key="manual:channel-1",
+        sender_id="channel-1",
+        text="hello",
+    )
+
+    response = await router._run_single(channel, message, "shared")
+
+    assert response == "done"
+    channel.send_typing.assert_awaited_once_with("channel-1")
 
 
 @pytest.mark.asyncio

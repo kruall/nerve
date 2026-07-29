@@ -125,6 +125,9 @@ class ChannelRouter:
     # Debounce window (seconds) for collecting simultaneous messages
     # (e.g. forwarded messages, rapid-fire sends) into a single batch.
     BATCH_DEBOUNCE = 0.60
+    # Discord typing indicators expire after a few seconds. Refresh them
+    # while the agent turn is still running so long tool calls remain visible.
+    TYPING_REFRESH_INTERVAL = 5.0
 
     async def handle_message(self, msg: InboundMessage) -> str:
         """Process an inbound user message.
@@ -234,19 +237,12 @@ class ChannelRouter:
         session_id: str,
     ) -> str:
         """Run the engine for a single message with streaming."""
-        if ChannelCapability.TYPING_INDICATOR in channel.capabilities:
-            try:
-                await channel.send_typing(msg.sender_id)
-            except Exception as e:
-                logger.debug(
-                    "Typing indicator failed for %s: %s", msg.channel_name, e,
-                )
-
         if channel.automatic_responses:
             await self._setup_streaming(
                 channel, msg.sender_id, session_id,
             )
         images = msg.metadata.get("images") if msg.metadata else None
+        typing_task = await self._start_typing(channel, msg.sender_id)
 
         task = asyncio.create_task(
             self.engine.run(
@@ -265,6 +261,7 @@ class ChannelRouter:
                 return task.result()
             return ""
         finally:
+            await self._stop_typing(typing_task)
             if channel.automatic_responses:
                 await self._teardown_streaming(
                     channel.name, msg.sender_id, session_id,
@@ -299,18 +296,10 @@ class ChannelRouter:
                 "message_id": msg_id,
             }
 
-        if ChannelCapability.TYPING_INDICATOR in channel.capabilities:
-            try:
-                await channel.send_typing(sender_id)
-            except Exception as e:
-                logger.debug(
-                    "Typing indicator failed for %s: %s",
-                    last_msg.channel_name, e,
-                )
-
         if channel.automatic_responses:
             await self._setup_streaming(channel, sender_id, session_id)
 
+        typing_task = await self._start_typing(channel, sender_id)
         task = asyncio.create_task(
             self.engine.run(
                 session_id=session_id,
@@ -328,10 +317,56 @@ class ChannelRouter:
                 return task.result()
             return ""
         finally:
+            await self._stop_typing(typing_task)
             if channel.automatic_responses:
                 await self._teardown_streaming(
                     channel.name, sender_id, session_id,
                 )
+
+    async def _start_typing(
+        self,
+        channel: BaseChannel,
+        target: str,
+    ) -> asyncio.Task[None] | None:
+        """Start and periodically refresh a channel's typing indicator."""
+        if ChannelCapability.TYPING_INDICATOR not in channel.capabilities:
+            return None
+        await self._send_typing(channel, target)
+        return asyncio.create_task(
+            self._refresh_typing(channel, target),
+            name=f"typing:{channel.name}:{target}",
+        )
+
+    async def _refresh_typing(
+        self,
+        channel: BaseChannel,
+        target: str,
+    ) -> None:
+        """Keep a transient typing indicator alive until the turn finishes."""
+        while True:
+            await asyncio.sleep(self.TYPING_REFRESH_INTERVAL)
+            await self._send_typing(channel, target)
+
+    @staticmethod
+    async def _send_typing(channel: BaseChannel, target: str) -> None:
+        try:
+            await channel.send_typing(target)
+        except Exception as exc:
+            logger.debug(
+                "Typing indicator failed for %s: %s",
+                channel.name,
+                exc,
+            )
+
+    @staticmethod
+    async def _stop_typing(task: asyncio.Task[None] | None) -> None:
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     def _cancel_pending(self, session_id: str) -> None:
         """Cancel all pending futures for a session."""
