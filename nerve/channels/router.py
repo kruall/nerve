@@ -373,9 +373,9 @@ class ChannelRouter:
                 ):
                     target = str(context["target"])
         except Exception as exc:
-            logger.debug(
+            logger.warning(
                 "Typing target resolution failed for session %s: %s",
-                session_id,
+                session_id[:8],
                 exc,
             )
             return None
@@ -384,9 +384,16 @@ class ChannelRouter:
             return None
         if ChannelCapability.TYPING_INDICATOR not in channel.capabilities:
             return None
-        await self._send_typing(channel, target)
+        initial_delivered = await self._send_typing(channel, target)
+        logger.info(
+            "Typing lifecycle started for %s session %s "
+            "(initial_delivered=%s)",
+            channel.name,
+            session_id[:8],
+            initial_delivered,
+        )
         return asyncio.create_task(
-            self._refresh_typing(channel, target),
+            self._refresh_typing(channel, target, session_id),
             name=f"typing:{channel.name}:{target}",
         )
 
@@ -394,22 +401,35 @@ class ChannelRouter:
         self,
         channel: BaseChannel,
         target: str,
+        session_id: str,
     ) -> None:
         """Keep a transient typing indicator alive until the turn finishes."""
+        first_refresh = True
         while True:
             await asyncio.sleep(self.TYPING_REFRESH_INTERVAL)
-            await self._send_typing(channel, target)
+            delivered = await self._send_typing(channel, target)
+            if first_refresh:
+                logger.info(
+                    "Typing lifecycle refreshed for %s session %s "
+                    "(delivered=%s)",
+                    channel.name,
+                    session_id[:8],
+                    delivered,
+                )
+                first_refresh = False
 
     @staticmethod
-    async def _send_typing(channel: BaseChannel, target: str) -> None:
+    async def _send_typing(channel: BaseChannel, target: str) -> bool:
         try:
             await channel.send_typing(target)
         except Exception as exc:
-            logger.debug(
+            logger.warning(
                 "Typing indicator failed for %s: %s",
                 channel.name,
                 exc,
             )
+            return False
+        return True
 
     @staticmethod
     async def stop_session_typing(task: asyncio.Task[None] | None) -> None:
