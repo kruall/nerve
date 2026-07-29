@@ -776,7 +776,7 @@ async def test_send_splits_long_messages_and_disables_mentions():
 
 
 @pytest.mark.asyncio
-async def test_send_uses_model_embed_header_when_model_is_known():
+async def test_send_uses_model_subtext_header_when_model_is_known():
     channel = _channel()
     target = SimpleNamespace(send=AsyncMock())
     channel._client = MagicMock()
@@ -789,11 +789,30 @@ async def test_send_uses_model_embed_header_when_model_is_known():
     ))
 
     target.send.assert_awaited_once()
-    kwargs = target.send.await_args.kwargs
-    assert "content" not in kwargs
-    assert kwargs["embed"].title == "Model: gpt-5.6-luna"
-    assert kwargs["embed"].description == "response"
-    assert "allowed_mentions" in kwargs
+    call = target.send.await_args
+    assert call.args[0] == "-# gpt-5.6-luna\nresponse"
+    assert "embed" not in call.kwargs
+    assert "allowed_mentions" in call.kwargs
+
+
+@pytest.mark.asyncio
+async def test_send_model_subtext_header_is_only_added_to_first_chunk():
+    channel = _channel()
+    target = SimpleNamespace(send=AsyncMock())
+    channel._client = MagicMock()
+    channel._client.get_channel.return_value = target
+
+    await channel.send(OutboundMessage(
+        target=str(TEXT_CHANNEL),
+        text="a" * 2100,
+        metadata={"model": "gpt-5.6-luna"},
+    ))
+
+    chunks = [call.args[0] for call in target.send.await_args_list]
+    assert len(chunks) == 2
+    assert chunks[0].startswith("-# gpt-5.6-luna\n")
+    assert not chunks[1].startswith("-# ")
+    assert "".join([chunks[0].split("\n", 1)[1], chunks[1]]) == "a" * 2100
 
 
 @pytest.mark.asyncio
