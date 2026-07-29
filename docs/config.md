@@ -281,8 +281,9 @@ permissions to the intended reviewers.
 The audit forum also contains an unpinned `System` thread. Nerve appends
 timestamped process lifecycle events when the daemon starts and begins a
 graceful shutdown. The thread is reused across restarts and receives the
-existing `system` tag when that tag is uniquely available; missing or duplicate
-tags do not block startup.
+existing `system` and `user-inbox` tags when those tags are uniquely available,
+matching the notification inboxes while retaining its system classification.
+Missing or duplicate tags do not block startup.
 
 Three notification inbox threads sit alongside it: `Notifications`,
 `Questions`, and `Approvals`. Discord permits only one pinned thread per forum,

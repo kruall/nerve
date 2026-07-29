@@ -70,11 +70,12 @@ def _audit():
 @pytest.mark.asyncio
 async def test_start_creates_unpinned_system_tagged_thread():
     system_tag = _Tag(250, "system")
+    inbox_tag = _Tag(251, "user-inbox")
     thread = _thread()
     audit = _audit()
     guild = MagicMock(spec=discord.Guild)
     forum = MagicMock(spec=discord.ForumChannel)
-    forum.available_tags = [system_tag]
+    forum.available_tags = [system_tag, inbox_tag]
     guild.get_channel.return_value = forum
     guild.active_threads = AsyncMock(return_value=[])
     forum.archived_threads.return_value = _AsyncRows([])
@@ -87,12 +88,13 @@ async def test_start_creates_unpinned_system_tagged_thread():
     assert forum.create_thread.await_args.kwargs["name"] == "System"
     assert forum.create_thread.await_args.kwargs["applied_tags"] == [
         system_tag,
+        inbox_tag,
     ]
     assert thread.edit.await_args.kwargs == {
         "archived": False,
         "pinned": False,
         "reason": "Prepare Nerve system audit",
-        "applied_tags": [system_tag],
+        "applied_tags": [system_tag, inbox_tag],
     }
 
 
@@ -100,11 +102,12 @@ async def test_start_creates_unpinned_system_tagged_thread():
 async def test_start_restores_existing_archived_thread_and_preserves_tags():
     unrelated_tag = _Tag(240, "operator")
     system_tag = _Tag(250, "system")
+    inbox_tag = _Tag(251, "user-inbox")
     thread = _thread(archived=True, applied_tags=[unrelated_tag])
     audit = _audit()
     guild = MagicMock(spec=discord.Guild)
     forum = MagicMock(spec=discord.ForumChannel)
-    forum.available_tags = [system_tag]
+    forum.available_tags = [system_tag, inbox_tag]
     guild.get_channel.return_value = forum
     guild.active_threads = AsyncMock(return_value=[])
     forum.archived_threads.return_value = _AsyncRows([thread])
@@ -118,6 +121,7 @@ async def test_start_restores_existing_archived_thread_and_preserves_tags():
     assert thread.edit.await_args.kwargs["applied_tags"] == [
         unrelated_tag,
         system_tag,
+        inbox_tag,
     ]
 
 

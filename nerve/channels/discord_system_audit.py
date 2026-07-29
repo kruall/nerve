@@ -9,6 +9,8 @@ from typing import Any
 
 import discord
 
+from nerve.channels.discord_inbox import resolve_inbox_tag
+
 logger = logging.getLogger(__name__)
 
 _THREAD_NAME = "System"
@@ -135,11 +137,18 @@ class DiscordSystemAudit:
                 )
 
             thread = await self._find_thread(guild, forum)
-            system_tag = self._resolve_system_tag(forum)
+            managed_tags = [
+                tag
+                for tag in (
+                    self._resolve_system_tag(forum),
+                    resolve_inbox_tag(forum),
+                )
+                if tag is not None
+            ]
             if thread is None:
                 create_kwargs: dict[str, Any] = {}
-                if system_tag is not None:
-                    create_kwargs["applied_tags"] = [system_tag]
+                if managed_tags:
+                    create_kwargs["applied_tags"] = managed_tags
                 created = await forum.create_thread(
                     name=_THREAD_NAME,
                     content=_THREAD_INTRO,
@@ -155,7 +164,10 @@ class DiscordSystemAudit:
                 "pinned": False,
                 "reason": "Prepare Nerve system audit",
             }
-            applied_tags = self._tags_with_system_tag(thread, system_tag)
+            applied_tags = self._tags_with_managed_tags(
+                thread,
+                managed_tags,
+            )
             if applied_tags is not None:
                 edit_kwargs["applied_tags"] = applied_tags
             updated = await thread.edit(**edit_kwargs)
@@ -203,21 +215,25 @@ class DiscordSystemAudit:
         return None
 
     @staticmethod
-    def _tags_with_system_tag(
+    def _tags_with_managed_tags(
         thread: discord.Thread,
-        system_tag: Any | None,
+        managed_tags: list[Any],
     ) -> list[Any] | None:
-        if system_tag is None:
+        if not managed_tags:
             return None
         current = list(getattr(thread, "applied_tags", []) or [])
-        system_tag_id = _tag_id(system_tag)
-        if any(_tag_id(tag) == system_tag_id for tag in current):
+        current_ids = {_tag_id(tag) for tag in current}
+        missing = [
+            tag for tag in managed_tags
+            if _tag_id(tag) not in current_ids
+        ]
+        if not missing:
             return None
-        if len(current) >= _MAX_THREAD_TAGS:
+        if len(current) + len(missing) > _MAX_THREAD_TAGS:
             logger.warning(
-                "Discord System thread %s already has five tags; cannot add %s",
+                "Discord System thread %s has too many tags to add its "
+                "managed audit tags",
                 getattr(thread, "id", "unknown"),
-                _SYSTEM_TAG_NAME,
             )
             return None
-        return [*current, system_tag]
+        return [*current, *missing]
