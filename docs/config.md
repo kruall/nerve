@@ -250,12 +250,14 @@ stored for a later compaction attempt. Messages from authors outside
 `allowed_author_ids` are never added to this context.
 
 For every configured project forum, Nerve creates or restores one pinned
-`Project prompt` thread. The bot's starter post explains the format; the first
-message from an allowed author becomes that project's prompt. Edit that
-human-authored message to change the prompt, or delete it and send a new one to
-replace it. The managed prompt thread never creates a session or contributes to
-ordinary thread context. The current prompt is prepended to each turn started
-from the forum's other threads, so the updated text applies without a restart.
+`Project prompt` thread. The bot's starter post explains the format; every
+non-empty message from an allowed author becomes one part of that project's
+prompt. Nerve joins the parts in Discord chronological order, so prompts longer
+than one Discord message can be split naturally. Edit or delete a
+human-authored message to update or remove only that part. The managed prompt
+thread never creates a session or contributes to ordinary thread context. The
+current combined prompt is prepended to each turn started from the forum's
+other threads, so updates apply without a restart.
 If the forum already has another pinned thread, Nerve leaves it untouched and
 logs that it could not create the managed prompt.
 

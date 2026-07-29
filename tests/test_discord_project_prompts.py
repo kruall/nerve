@@ -24,7 +24,7 @@ def _thread(*, pinned: bool = False):
     thread.pinned = pinned
     thread.archived = False
     thread.edit = AsyncMock(return_value=thread)
-    thread.fetch_message = AsyncMock()
+    thread.history = MagicMock(return_value=_history())
     return thread
 
 
@@ -80,7 +80,7 @@ async def test_start_creates_and_pins_prompt_thread():
 
 
 @pytest.mark.asyncio
-async def test_allowed_human_message_becomes_editable_prompt():
+async def test_allowed_human_messages_become_ordered_editable_prompt():
     db = MagicMock()
     db.get_discord_project_prompt = AsyncMock(return_value=None)
     db.upsert_discord_project_prompt = AsyncMock()
@@ -98,31 +98,97 @@ async def test_allowed_human_message_becomes_editable_prompt():
     prompts = _manager(db, client)
     await prompts.start(guild)
 
-    source = SimpleNamespace(
+    second = SimpleNamespace(
+        id=502,
+        channel=thread,
+        author=SimpleNamespace(id=USER),
+        content="Describe the PR succinctly.",
+    )
+    first = SimpleNamespace(
         id=501,
         channel=thread,
         author=SimpleNamespace(id=USER),
-        content="Use a dedicated worktree and describe the PR succinctly.",
+        content="Use a dedicated worktree.",
     )
-    assert await prompts.observe_message(source) is True
+    assert await prompts.observe_message(second) is True
+    assert await prompts.observe_message(first) is True
     rendered = prompts.prompt_for_thread(FORUM, 999)
     assert "NERVE" in rendered
-    assert source.content in rendered
+    assert rendered.index(first.content) < rendered.index(second.content)
 
-    source.content = "Use a dedicated worktree; request push approval."
-    assert await prompts.observe_edit(source) is True
-    assert source.content in prompts.prompt_for_thread(FORUM, 999)
+    second.content = "Keep the PR description concise."
+    assert await prompts.observe_edit(second) is True
+    rendered = prompts.prompt_for_thread(FORUM, 999)
+    assert first.content in rendered
+    assert second.content in rendered
+    assert "Describe the PR succinctly." not in rendered
 
-    assert await prompts.observe_delete(source) is True
+    assert await prompts.observe_delete(first) is True
+    assert first.content not in prompts.prompt_for_thread(FORUM, 999)
+    assert second.content in prompts.prompt_for_thread(FORUM, 999)
+
+    assert await prompts.observe_delete(second) is True
     assert prompts.prompt_for_thread(FORUM, 999) == ""
     replacement = SimpleNamespace(
-        id=502,
+        id=503,
         channel=thread,
         author=SimpleNamespace(id=USER),
         content="Replacement prompt.",
     )
     assert await prompts.observe_message(replacement) is True
     assert replacement.content in prompts.prompt_for_thread(FORUM, 999)
+
+
+@pytest.mark.asyncio
+async def test_combined_prompt_can_exceed_one_discord_message():
+    db = MagicMock()
+    db.get_discord_project_prompt = AsyncMock(return_value=None)
+    db.upsert_discord_project_prompt = AsyncMock()
+    client = MagicMock()
+    thread = _thread()
+    forum = MagicMock(spec=discord.ForumChannel)
+    forum.id = FORUM
+    forum.create_thread = AsyncMock(
+        return_value=SimpleNamespace(thread=thread),
+    )
+    forum.archived_threads = _empty_history
+    guild = MagicMock()
+    guild.get_channel.return_value = forum
+    guild.active_threads = AsyncMock(return_value=[])
+    prompts = _manager(db, client)
+    await prompts.start(guild)
+
+    first = SimpleNamespace(
+        id=501,
+        channel=thread,
+        author=SimpleNamespace(id=USER),
+        content="A" * 3500,
+    )
+    second = SimpleNamespace(
+        id=502,
+        channel=thread,
+        author=SimpleNamespace(id=USER),
+        content="B" * 3500,
+    )
+    unauthorized = SimpleNamespace(
+        id=503,
+        channel=thread,
+        author=SimpleNamespace(id=USER + 1),
+        content="must not be included",
+    )
+
+    assert await prompts.observe_message(first) is True
+    assert await prompts.observe_message(second) is True
+    assert await prompts.observe_message(unauthorized) is True
+
+    rendered = prompts.prompt_for_thread(FORUM, 999)
+    assert first.content in rendered
+    assert second.content in rendered
+    assert unauthorized.content not in rendered
+    assert len(rendered) > 7000
+    persisted = db.upsert_discord_project_prompt.await_args.kwargs
+    assert persisted["message_id"] == first.id
+    assert persisted["content"] == f"{first.content}\n\n{second.content}"
 
 
 @pytest.mark.asyncio
@@ -138,7 +204,23 @@ async def test_restart_refreshes_prompt_from_human_source_message():
     })
     db.upsert_discord_project_prompt = AsyncMock()
     thread = _thread(pinned=True)
-    thread.fetch_message.return_value = SimpleNamespace(content="fresh prompt")
+    thread.history.return_value = _history(
+        SimpleNamespace(
+            id=1,
+            author=SimpleNamespace(id=999),
+            content="Bot-owned starter.",
+        ),
+        SimpleNamespace(
+            id=501,
+            author=SimpleNamespace(id=USER),
+            content="fresh first part",
+        ),
+        SimpleNamespace(
+            id=502,
+            author=SimpleNamespace(id=USER),
+            content="fresh second part",
+        ),
+    )
     client = MagicMock()
     client.get_channel.return_value = thread
     forum = MagicMock(spec=discord.ForumChannel)
@@ -149,10 +231,47 @@ async def test_restart_refreshes_prompt_from_human_source_message():
     prompts = _manager(db, client)
     await prompts.start(guild)
 
-    thread.fetch_message.assert_awaited_once_with(501)
-    assert "fresh prompt" in prompts.prompt_for_thread(FORUM, 999)
+    thread.history.assert_called_once_with(limit=None, oldest_first=True)
+    rendered = prompts.prompt_for_thread(FORUM, 999)
+    assert "Bot-owned starter." not in rendered
+    assert rendered.index("fresh first part") < rendered.index("fresh second part")
+
+
+@pytest.mark.asyncio
+async def test_restart_keeps_persisted_snapshot_when_history_is_unavailable():
+    db = MagicMock()
+    db.get_discord_project_prompt = AsyncMock(return_value={
+        "guild_id": str(GUILD),
+        "forum_id": str(FORUM),
+        "project": "NERVE",
+        "thread_id": str(PROMPT_THREAD),
+        "message_id": "501",
+        "content": "persisted prompt",
+    })
+    db.upsert_discord_project_prompt = AsyncMock()
+    thread = _thread(pinned=True)
+    thread.history.side_effect = discord.Forbidden(
+        MagicMock(status=403, reason="Forbidden"),
+        "Missing permissions",
+    )
+    client = MagicMock()
+    client.get_channel.return_value = thread
+    forum = MagicMock(spec=discord.ForumChannel)
+    forum.id = FORUM
+    guild = MagicMock()
+    guild.get_channel.return_value = forum
+
+    prompts = _manager(db, client)
+    await prompts.start(guild)
+
+    assert "persisted prompt" in prompts.prompt_for_thread(FORUM, 999)
 
 
 async def _empty_history(**_kwargs):
     if False:
         yield None
+
+
+async def _history(*messages):
+    for message in messages:
+        yield message

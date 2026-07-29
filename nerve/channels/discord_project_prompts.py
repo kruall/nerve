@@ -18,8 +18,9 @@ class DiscordProjectPrompts:
     """Maintain one reserved, pinned prompt thread per project forum.
 
     The bot owns the thread's explanatory starter post, but an allowed human
-    owns the prompt message itself. That lets the human edit the prompt in
-    Discord without granting anyone access to the bot token or local config.
+    owns the prompt messages themselves. That lets humans split long prompts
+    across messages and edit them in Discord without granting anyone access to
+    the bot token or local config.
     """
 
     def __init__(
@@ -78,7 +79,7 @@ class DiscordProjectPrompts:
         )
 
     async def observe_message(self, message: Any) -> bool:
-        """Capture the first allowed human message in a prompt thread.
+        """Capture an allowed human message as one ordered prompt part.
 
         Returns whether the message belongs to a reserved prompt thread and
         must therefore not be handled as ordinary project discussion.
@@ -88,8 +89,6 @@ class DiscordProjectPrompts:
         )
         if prompt is None:
             return False
-        if str(prompt.get("message_id") or ""):
-            return True
 
         author_id = int(
             getattr(getattr(message, "author", None), "id", 0) or 0,
@@ -98,45 +97,52 @@ class DiscordProjectPrompts:
         if author_id not in self.allowed_author_ids or not content.strip():
             return True
 
-        updated = {**prompt, "message_id": str(message.id), "content": content}
-        await self._persist(updated)
-        self._prompts[int(updated["forum_id"])] = updated
+        parts = dict(self._parts(prompt))
+        parts[str(message.id)] = content
+        self._set_parts(prompt, parts)
+        await self._persist(prompt)
         return True
 
     async def observe_edit(self, message: Any) -> bool:
-        """Refresh the prompt after its human-owned source message is edited."""
+        """Refresh one prompt part after its source message is edited."""
         message_id = str(getattr(message, "id", "") or "")
         prompt = next(
             (
                 candidate
                 for candidate in self._prompts.values()
-                if str(candidate.get("message_id") or "") == message_id
+                if message_id in self._parts(candidate)
             ),
             None,
         )
         if prompt is None:
             return False
-        updated = {**prompt, "content": str(getattr(message, "content", "") or "")}
-        await self._persist(updated)
-        self._prompts[int(updated["forum_id"])] = updated
+        parts = dict(self._parts(prompt))
+        content = str(getattr(message, "content", "") or "")
+        if content.strip():
+            parts[message_id] = content
+        else:
+            parts.pop(message_id, None)
+        self._set_parts(prompt, parts)
+        await self._persist(prompt)
         return True
 
     async def observe_delete(self, message: Any) -> bool:
-        """Clear a deleted prompt so an allowed author can post a replacement."""
+        """Remove only the prompt part owned by the deleted message."""
         message_id = str(getattr(message, "id", "") or "")
         prompt = next(
             (
                 candidate
                 for candidate in self._prompts.values()
-                if str(candidate.get("message_id") or "") == message_id
+                if message_id in self._parts(candidate)
             ),
             None,
         )
         if prompt is None:
             return False
-        updated = {**prompt, "message_id": "", "content": ""}
-        await self._persist(updated)
-        self._prompts[int(updated["forum_id"])] = updated
+        parts = dict(self._parts(prompt))
+        parts.pop(message_id, None)
+        self._set_parts(prompt, parts)
+        await self._persist(prompt)
         return True
 
     async def _ensure_prompt(
@@ -164,10 +170,11 @@ class DiscordProjectPrompts:
                     name=_THREAD_NAME,
                     content=(
                         f"Project prompt for **{project}**.\n\n"
-                        "Send one message with the working instructions Nerve "
-                        "should apply in this project, then edit that message "
-                        "whenever the instructions change. This reserved thread "
-                        "never starts an agent session."
+                        "Send one or more messages with the working instructions "
+                        "Nerve should apply in this project. Messages from "
+                        "allowed participants are joined in chronological order; "
+                        "edit or delete any message to update only that part. "
+                        "This reserved thread never starts an agent session."
                     ),
                     auto_archive_duration=_ARCHIVE_DURATION_MINUTES,
                     allowed_mentions=discord.AllowedMentions.none(),
@@ -262,21 +269,25 @@ class DiscordProjectPrompts:
         thread: discord.Thread,
         prompt: dict[str, Any],
     ) -> None:
-        message_id = str(prompt.get("message_id") or "")
-        if not message_id:
-            return
+        fallback = dict(self._parts(prompt))
+        parts: dict[str, str] = {}
         try:
-            message = await thread.fetch_message(int(message_id))
+            async for message in thread.history(limit=None, oldest_first=True):
+                author_id = int(
+                    getattr(getattr(message, "author", None), "id", 0) or 0,
+                )
+                content = str(getattr(message, "content", "") or "")
+                if author_id in self.allowed_author_ids and content.strip():
+                    parts[str(message.id)] = content
         except Exception:
             logger.warning(
-                "Discord project prompt source message %s is unavailable; "
-                "waiting for a replacement",
-                message_id,
+                "Discord project prompt history is unavailable for thread %s; "
+                "using the persisted snapshot",
+                thread.id,
             )
-            prompt["message_id"] = ""
-            prompt["content"] = ""
+            self._set_parts(prompt, fallback)
             return
-        prompt["content"] = str(getattr(message, "content", "") or "")
+        self._set_parts(prompt, parts)
 
     async def _persist(self, prompt: dict[str, Any]) -> None:
         await self.db.upsert_discord_project_prompt(
@@ -300,4 +311,39 @@ class DiscordProjectPrompts:
                 if int(prompt["thread_id"]) == thread_id
             ),
             None,
+        )
+
+    @staticmethod
+    def _parts(prompt: dict[str, Any]) -> dict[str, str]:
+        parts = prompt.get("_parts")
+        if isinstance(parts, dict):
+            return parts
+        message_id = str(prompt.get("message_id") or "")
+        content = str(prompt.get("content") or "")
+        restored = (
+            {message_id: content}
+            if message_id and content.strip()
+            else {}
+        )
+        prompt["_parts"] = restored
+        return restored
+
+    @staticmethod
+    def _set_parts(
+        prompt: dict[str, Any],
+        parts: dict[str, str],
+    ) -> None:
+        ordered = sorted(
+            (
+                (str(message_id), str(content))
+                for message_id, content in parts.items()
+                if str(content).strip()
+            ),
+            key=lambda item: int(item[0]),
+        )
+        prompt["_parts"] = dict(ordered)
+        prompt["message_id"] = ordered[0][0] if ordered else ""
+        prompt["content"] = "\n\n".join(
+            content.strip()
+            for _, content in ordered
         )
