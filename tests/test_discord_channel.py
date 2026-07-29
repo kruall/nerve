@@ -1018,6 +1018,40 @@ async def test_post_ready_starts_configured_skill_forum_projection():
 
 
 @pytest.mark.asyncio
+async def test_post_ready_prepares_notification_inbox_before_skill_projection():
+    channel = _channel()
+    channel.config.audit_forum_id = AUDIT_FORUM
+    channel.config.skills_forum_id = SKILLS_FORUM
+    channel._skill_manager = MagicMock()
+    channel._notification_service = MagicMock()
+    channel._client = MagicMock()
+    channel._ensure_system_audit = AsyncMock()
+    channel._session_mirror = MagicMock()
+    channel._approval_inbox = MagicMock()
+    channel._sync_backlog = AsyncMock()
+    guild = MagicMock()
+    order: list[str] = []
+
+    with (
+        patch(
+            "nerve.channels.discord_notifications.DiscordNotificationInbox",
+        ) as notification_cls,
+        patch(
+            "nerve.channels.discord_skills.DiscordSkillForum",
+        ) as skill_cls,
+    ):
+        notification_cls.return_value.start = AsyncMock(
+            side_effect=lambda _guild: order.append("notification"),
+        )
+        skill_cls.return_value.start = AsyncMock(
+            side_effect=lambda _guild: order.append("skill"),
+        )
+        await channel._run_post_ready(guild)
+
+    assert order == ["notification", "skill"]
+
+
+@pytest.mark.asyncio
 async def test_slow_backlog_does_not_delay_discord_readiness():
     channel = _channel()
     backlog_release = asyncio.Event()

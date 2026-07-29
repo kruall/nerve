@@ -394,30 +394,6 @@ class DiscordChannel(BaseChannel):
 
     async def _run_post_ready(self, guild: discord.Guild) -> None:
         """Start optional integrations and catch up without blocking startup."""
-        if (
-            self.config.skills_forum_id
-            and self._skill_manager is not None
-            and self._skill_forum is None
-        ):
-            try:
-                from nerve.channels.discord_skills import DiscordSkillForum
-
-                self._skill_forum = DiscordSkillForum(
-                    client=self._client,
-                    skill_manager=self._skill_manager,
-                    guild_id=self.config.guild_id,
-                    forum_id=self.config.skills_forum_id,
-                )
-                await self._skill_forum.start(guild)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                self._skill_forum = None
-                logger.exception(
-                    "Discord skill forum failed to start; "
-                    "continuing without skill threads"
-                )
-
         if self.config.audit_forum_id:
             try:
                 await self._ensure_system_audit(guild)
@@ -529,6 +505,33 @@ class DiscordChannel(BaseChannel):
                 logger.exception(
                     "Discord notification inbox failed to start; "
                     "continuing without Discord notify/question delivery"
+                )
+
+        # Skill reconciliation may scan long thread histories. Keep it after
+        # the user-facing inboxes so enabling the skill forum cannot delay
+        # notification and approval readiness during startup.
+        if (
+            self.config.skills_forum_id
+            and self._skill_manager is not None
+            and self._skill_forum is None
+        ):
+            try:
+                from nerve.channels.discord_skills import DiscordSkillForum
+
+                self._skill_forum = DiscordSkillForum(
+                    client=self._client,
+                    skill_manager=self._skill_manager,
+                    guild_id=self.config.guild_id,
+                    forum_id=self.config.skills_forum_id,
+                )
+                await self._skill_forum.start(guild)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._skill_forum = None
+                logger.exception(
+                    "Discord skill forum failed to start; "
+                    "continuing without skill threads"
                 )
 
         try:
