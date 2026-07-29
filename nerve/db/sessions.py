@@ -20,24 +20,31 @@ class SessionStore:
         forked_from_message: str | None = None,
         backend: str = "claude",
         model: str | None = None,
+        model_tier: str | None = None,
+        reasoning_effort: str | None = None,
+        model_pinned: bool = False,
         cwd: str | None = None,
     ) -> dict:
         now = datetime.now(timezone.utc).isoformat()
         await self._write(
             """INSERT OR IGNORE INTO sessions
                (id, title, source, metadata, status, parent_session_id,
-                forked_from_message, backend, model, cwd, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                forked_from_message, backend, model, model_tier,
+                reasoning_effort, model_pinned, cwd, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (session_id, title or session_id, source,
              json.dumps(metadata or {}), status,
-             parent_session_id, forked_from_message, backend, model, cwd,
+             parent_session_id, forked_from_message, backend, model, model_tier,
+             reasoning_effort, 1 if model_pinned else 0, cwd,
              now, now),
         )
         return {
             "id": session_id, "title": title or session_id,
             "source": source, "status": status,
             "parent_session_id": parent_session_id,
-            "backend": backend, "model": model, "cwd": cwd,
+            "backend": backend, "model": model, "model_tier": model_tier,
+            "reasoning_effort": reasoning_effort,
+            "model_pinned": 1 if model_pinned else 0, "cwd": cwd,
         }
 
     async def get_session(self, session_id: str) -> dict | None:
@@ -94,6 +101,70 @@ class SessionStore:
         )
         async with self.db.execute(sql, (f"%{query}%", limit)) as cursor:
             return [dict(row) async for row in cursor]
+
+    async def get_model_routing_audit_batch(
+        self, limit: int = 20,
+    ) -> tuple[dict, list[dict]]:
+        """Return new interactive Codex sessions after the durable cursor."""
+        async with self.db.execute(
+            "SELECT * FROM model_routing_audit_state WHERE id = 1"
+        ) as cursor:
+            row = await cursor.fetchone()
+        state = dict(row) if row else {
+            "cursor_updated_at": "",
+            "cursor_session_id": "",
+            "last_run_at": None,
+            "last_summary": None,
+        }
+        updated_at = state.get("cursor_updated_at") or ""
+        session_id = state.get("cursor_session_id") or ""
+        async with self.db.execute(
+            """
+            SELECT * FROM sessions
+            WHERE backend = 'codex'
+              AND source NOT IN ('cron', 'hook', 'external')
+              AND (
+                    updated_at > ?
+                    OR (updated_at = ? AND id > ?)
+              )
+            ORDER BY updated_at ASC, id ASC
+            LIMIT ?
+            """,
+            (updated_at, updated_at, session_id, max(1, min(limit, 100))),
+        ) as cursor:
+            sessions = [dict(item) async for item in cursor]
+        return state, sessions
+
+    async def advance_model_routing_audit_cursor(
+        self,
+        *,
+        updated_at: str,
+        session_id: str,
+        summary: str,
+    ) -> None:
+        """Commit a completed audit cursor without allowing it to move back."""
+        now = datetime.now(timezone.utc).isoformat()
+        await self._write(
+            """
+            UPDATE model_routing_audit_state
+            SET cursor_updated_at = ?,
+                cursor_session_id = ?,
+                last_run_at = ?,
+                last_summary = ?
+            WHERE id = 1
+              AND (
+                    cursor_updated_at < ?
+                    OR (
+                    cursor_updated_at = ?
+                        AND cursor_session_id < ?
+                    )
+              )
+            """,
+            (
+                updated_at, session_id, now, summary[:2000],
+                updated_at, updated_at, session_id,
+            ),
+        )
 
     async def touch_session(self, session_id: str) -> None:
         now = datetime.now(timezone.utc).isoformat()
@@ -161,7 +232,8 @@ class SessionStore:
             "status", "sdk_session_id", "connected_at", "last_activity_at",
             "archived_at", "title", "message_count", "total_cost_usd",
             "parent_session_id", "forked_from_message", "last_memorized_at",
-            "starred", "model", "backend", "cwd",
+            "starred", "model", "model_tier", "reasoning_effort",
+            "model_pinned", "backend", "cwd",
         }
         set_clauses: list[str] = []
         params: list = []

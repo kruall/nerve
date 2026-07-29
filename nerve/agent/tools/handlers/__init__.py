@@ -13,6 +13,7 @@ from nerve.agent.tools.handlers.discord import DISCORD_SPECS
 from nerve.agent.tools.handlers.hoa import HOA_SPECS
 from nerve.agent.tools.handlers.mcp_admin import MCP_ADMIN_SPECS
 from nerve.agent.tools.handlers.memory import MEMORY_SPECS
+from nerve.agent.tools.handlers.model_routing import MODEL_ROUTING_SPECS
 from nerve.agent.tools.handlers.notifications import NOTIFICATION_SPECS
 from nerve.agent.tools.handlers.plans import PLAN_SPECS
 from nerve.agent.tools.handlers.skills import SKILL_SPECS
@@ -39,6 +40,7 @@ def build_default_registry() -> ToolRegistry:
         *NOTIFICATION_SPECS,
         *DISCORD_SPECS,
         *MCP_ADMIN_SPECS,
+        *MODEL_ROUTING_SPECS,
         *WAKEUP_SPECS,
         *HOA_SPECS,
     ):

@@ -1005,6 +1005,36 @@ _DEFAULT_CODEX_PRICING: dict[str, dict[str, float]] = {
     "gpt-5.6-luna":   {"input": 1.0,  "cached_input": 0.1,  "output": 6.0},
 }
 
+_CODEX_REASONING_EFFORTS = {
+    "low", "medium", "high", "xhigh", "max", "ultra",
+}
+
+
+@dataclass(frozen=True)
+class CodexModelTier:
+    """One adjacent step in the agent-controlled Codex model ladder."""
+
+    id: str
+    model: str
+    effort: str
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "CodexModelTier":
+        return cls(
+            id=str(raw.get("id") or "").strip(),
+            model=str(raw.get("model") or "").strip(),
+            effort=str(raw.get("effort") or "").strip().lower(),
+        )
+
+
+def _default_codex_model_tiers() -> list[CodexModelTier]:
+    return [
+        CodexModelTier("luna-high", "gpt-5.6-luna", "high"),
+        CodexModelTier("terra-high", "gpt-5.6-terra", "high"),
+        CodexModelTier("sol-medium", "gpt-5.6-sol", "medium"),
+        CodexModelTier("sol-xhigh", "gpt-5.6-sol", "xhigh"),
+    ]
+
 
 @dataclass
 class UltracodeConfig:
@@ -1077,7 +1107,18 @@ class CodexConfig:
     max_version: str = "0.145.0"            # exclusive
     home_dir: str = "~/.nerve/codex"        # isolated CODEX_HOME (auth/config/sessions)
     model: str = "gpt-5.6-sol"
-    cron_model: str = ""                    # empty → model
+    cron_model: str = ""                    # empty → default_tier/model
+    # Named default from ``model_tiers``. A config that explicitly sets
+    # ``model`` but omits ``default_tier`` keeps legacy behavior; set
+    # ``default_tier`` explicitly to opt that existing config into routing.
+    default_tier: str = "luna-high"
+    # Ordered low→high. The agent may move one adjacent step per tool call.
+    model_tiers: list[CodexModelTier] = field(
+        default_factory=_default_codex_model_tiers,
+    )
+    # Optional learned guidance appended to the built-in routing rules.
+    # The model-routing auditor updates this through a versioned server tool.
+    routing_policy_file: str = "~/.nerve/model-routing-policy.md"
     auth: str = "chatgpt"                   # chatgpt | api_key
     api_key: str = ""                       # literal key (config.local.yaml)
     api_key_env: str = "OPENAI_API_KEY"     # env fallback when auth=api_key
@@ -1125,6 +1166,18 @@ class CodexConfig:
         raw_effort = d.get("effort_map") or {}
         if isinstance(raw_effort, dict):
             effort_map.update({str(k): str(v) for k, v in raw_effort.items()})
+        raw_tiers = d.get("model_tiers")
+        if raw_tiers is None:
+            model_tiers = _default_codex_model_tiers()
+        elif isinstance(raw_tiers, list):
+            model_tiers = [
+                CodexModelTier.from_dict(item)
+                for item in raw_tiers
+                if isinstance(item, dict)
+            ]
+        else:
+            model_tiers = []
+            logger.warning("Ignoring non-list codex.model_tiers value")
         return cls(
             bin_path=str(d.get("bin_path", "codex")),
             min_version=str(d.get("min_version", "0.144.1")),
@@ -1132,6 +1185,16 @@ class CodexConfig:
             home_dir=str(d.get("home_dir", "~/.nerve/codex")),
             model=str(d.get("model", "gpt-5.6-sol") or "").strip(),
             cron_model=str(d.get("cron_model") or "").strip(),
+            default_tier=str(
+                d["default_tier"]
+                if "default_tier" in d
+                else ("" if "model" in d else "luna-high")
+            ).strip(),
+            model_tiers=model_tiers,
+            routing_policy_file=str(
+                d.get("routing_policy_file")
+                or "~/.nerve/model-routing-policy.md"
+            ),
             auth=str(d.get("auth", "chatgpt")).strip().lower(),
             api_key=str(d.get("api_key") or ""),
             api_key_env=str(d.get("api_key_env", "OPENAI_API_KEY")),
@@ -1148,6 +1211,38 @@ class CodexConfig:
             ultracode=UltracodeConfig.from_dict(d.get("ultracode")),
         )
 
+    def tier(self, tier_id: str | None) -> CodexModelTier | None:
+        if not tier_id:
+            return None
+        return next((tier for tier in self.model_tiers if tier.id == tier_id), None)
+
+    @property
+    def resolved_default_tier(self) -> CodexModelTier | None:
+        return self.tier(self.default_tier)
+
+    def tier_for(
+        self, model: str | None, effort: str | None = None,
+    ) -> CodexModelTier | None:
+        """Resolve a stored model/effort pair back to a unique tier."""
+        matches = [tier for tier in self.model_tiers if tier.model == model]
+        if effort:
+            matches = [tier for tier in matches if tier.effort == effort]
+        return matches[0] if len(matches) == 1 else None
+
+    def adjacent_tier(
+        self, tier_id: str, direction: str,
+    ) -> CodexModelTier | None:
+        ids = [tier.id for tier in self.model_tiers]
+        try:
+            index = ids.index(tier_id)
+        except ValueError:
+            return None
+        offset = 1 if direction == "up" else -1
+        target = index + offset
+        if target < 0 or target >= len(self.model_tiers):
+            return None
+        return self.model_tiers[target]
+
     def validate(self) -> list[str]:
         """Config-load-time validation; returns human-readable problems."""
         problems: list[str] = []
@@ -1160,6 +1255,32 @@ class CodexConfig:
                 f"codex.approval_policy must be one of "
                 f"{_CODEX_APPROVAL_POLICIES}, got {self.approval_policy!r} "
                 "(note: 'on-failure' is not accepted by the app-server v2 API)"
+            )
+        tier_ids = [tier.id for tier in self.model_tiers]
+        if len(tier_ids) != len(set(tier_ids)):
+            problems.append("codex.model_tiers ids must be unique")
+        tier_profiles = [
+            (tier.model, tier.effort) for tier in self.model_tiers
+        ]
+        if len(tier_profiles) != len(set(tier_profiles)):
+            problems.append(
+                "codex.model_tiers model/effort pairs must be unique"
+            )
+        for tier in self.model_tiers:
+            if not tier.id or not tier.model:
+                problems.append(
+                    "every codex.model_tiers entry needs non-empty id and model"
+                )
+                break
+            if tier.effort not in _CODEX_REASONING_EFFORTS:
+                problems.append(
+                    f"codex.model_tiers[{tier.id!r}].effort must be one of "
+                    f"{sorted(_CODEX_REASONING_EFFORTS)}, got {tier.effort!r}"
+                )
+        if self.default_tier and self.default_tier not in tier_ids:
+            problems.append(
+                f"codex.default_tier {self.default_tier!r} is not present "
+                "in codex.model_tiers"
             )
         if self.sandbox not in _CODEX_SANDBOX_MODES:
             problems.append(

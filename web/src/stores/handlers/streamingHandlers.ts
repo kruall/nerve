@@ -120,6 +120,27 @@ export function handleModelChanged(
   set({ streamingBlocks: blocks });
 }
 
+export function handleModelTierChanged(
+  msg: Extract<WSMessage, { type: 'model_tier_changed' }>,
+  get: Get,
+  set: Set,
+): void {
+  const state = get();
+  set({
+    sessions: state.sessions.map((session) => (
+      session.id === msg.session_id
+        ? {
+            ...session,
+            model: msg.model,
+            model_tier: msg.to_tier,
+            reasoning_effort: msg.effort,
+            model_pinned: false,
+          }
+        : session
+    )),
+  });
+}
+
 export function handleAutoTurn(
   _msg: Extract<WSMessage, { type: 'auto_turn' }>,
   get: Get,

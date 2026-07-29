@@ -168,6 +168,9 @@ class CodexBackend:
     def default_model(self, source: str) -> str:
         if source in ("cron", "hook") and self.codex.cron_model:
             return self.codex.cron_model
+        default_tier = self.codex.resolved_default_tier
+        if default_tier is not None:
+            return default_tier.model
         return self.codex.model
 
     def excluded_tools(self) -> set[str]:
@@ -183,6 +186,7 @@ class CodexBackend:
         allowed = {
             self.codex.model,
             self.codex.cron_model or self.codex.model,
+            *(tier.model for tier in self.codex.model_tiers),
             *(self.codex.pricing or {}).keys(),
             *self._live_models,
         }
@@ -284,13 +288,14 @@ class CodexBackend:
                     for item in models if isinstance(item, dict)
                     and (item.get("id") or item.get("model") or item.get("slug"))
                 })
+                configured_default = self.default_model("web")
                 if (
                     validate_default_model
                     and model_ids
-                    and self.codex.model not in model_ids
+                    and configured_default not in model_ids
                 ):
                     raise BackendError(
-                        f"Configured Codex model {self.codex.model!r} is unavailable"
+                        f"Configured Codex model {configured_default!r} is unavailable"
                     )
                 self._live_models = set(model_ids)
                 rate_limits = rate_result.get("rateLimits")
@@ -316,7 +321,7 @@ class CodexBackend:
                     ),
                     "account_type": account_type,
                     "models": model_ids,
-                    "default_model": self.codex.model,
+                    "default_model": self.default_model("web"),
                     "rate_limits": self._rate_limits,
                     "ultracode": plugin,
                 }

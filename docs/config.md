@@ -69,8 +69,15 @@ codex:                     # active when a codex backend is selected
   min_version: 0.144.1
   max_version: 0.145.0
   home_dir: ~/.nerve/codex # isolated CODEX_HOME (auth, config, sessions)
-  model: gpt-5.6-sol
-  cron_model: null         # null → model
+  model: gpt-5.6-sol       # legacy fallback when default_tier is empty
+  cron_model: null         # null → default_tier/model
+  default_tier: luna-high  # new interactive sessions start here
+  model_tiers:             # ordered low → high; adjacent agent moves only
+    - {id: luna-high, model: gpt-5.6-luna, effort: high}
+    - {id: terra-high, model: gpt-5.6-terra, effort: high}
+    - {id: sol-medium, model: gpt-5.6-sol, effort: medium}
+    - {id: sol-xhigh, model: gpt-5.6-sol, effort: xhigh}
+  routing_policy_file: ~/.nerve/model-routing-policy.md
   auth: chatgpt            # chatgpt | api_key
   api_key: null            # config.local.yaml; or api_key_env: OPENAI_API_KEY
   sandbox: danger-full-access   # read-only | workspace-write | danger-full-access
@@ -94,6 +101,20 @@ codex:                     # active when a codex backend is selected
     default_token_budget: 250000 # default and maximum per workflow
     max_agents: 8               # lifetime worker cap per workflow
 ```
+
+When `default_tier` is set, new Codex sessions persist the tier, model, and
+reasoning effort together. Existing sessions keep their stored routing.
+`change_model_tier` can move an unpinned session by one adjacent step:
+upgrades finish the current turn and automatically continue after the Codex
+client is recreated; downgrades apply on the next turn. An explicit user model
+selection pins the session and blocks automatic moves until
+`model_pinned=false` is set through the session API.
+
+The built-in routing rules are always present in the system prompt. Concise
+learned guidance from `routing_policy_file` is appended below them. The
+model-routing auditor is the only cron session allowed to replace that file;
+every replacement keeps a versioned backup under
+`~/.nerve/model-routing-policy-history/`.
 
 `codex.ultracode.dashboard` exposes run journals in Nerve's authenticated UI.
 It does not start Ultracode's detached dashboard process. Keep

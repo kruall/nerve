@@ -19,6 +19,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from nerve.agent.backends import (
@@ -189,6 +190,7 @@ class AgentEngine:
 
         self.config = config
         self.db = db
+        default_codex_tier = config.codex.resolved_default_tier
         self.sessions = SessionManager(
             db,
             sticky_period_minutes=config.sessions.sticky_period_minutes,
@@ -196,7 +198,20 @@ class AgentEngine:
             cron_backend=config.agent.resolved_cron_backend,
             backend_models={
                 "claude": config.agent.model,
-                "codex": config.codex.model,
+                "codex": (
+                    default_codex_tier.model
+                    if default_codex_tier is not None
+                    else config.codex.model
+                ),
+            },
+            backend_model_profiles={
+                "codex": {
+                    "model": default_codex_tier.model,
+                    "tier": default_codex_tier.id,
+                    "effort": default_codex_tier.effort,
+                }
+                if default_codex_tier is not None
+                else {},
             },
             default_cwd=str(config.workspace),
         )
@@ -245,6 +260,14 @@ class AgentEngine:
         # detect mid-session model switches (the CLI fixes its model at
         # connect time, so a change requires recreating the client).
         self._session_models: dict[str, str] = {}
+        # Reasoning effort is part of the routing profile. Codex applies it
+        # per turn from the client-bound SessionSpec, so changing only effort
+        # still requires recreating the client just like changing the model.
+        self._session_efforts: dict[str, str] = {}
+        # ``change_model_tier(up)`` requests a second internal turn after the
+        # current weaker turn finishes. The outer run loop drains it without
+        # re-entering the per-session lock.
+        self._pending_model_tier_continuations: dict[str, str] = {}
         # Last model *observed* serving each session (from
         # AssistantMessage.model). The API may silently serve a different
         # model than requested — e.g. a capacity fallback from a frontier
@@ -1024,6 +1047,52 @@ class AgentEngine:
             return cron_effort
         return effort
 
+    def _model_routing_policy(self, current_tier: str | None) -> str | None:
+        if not current_tier or not self.config.codex.model_tiers:
+            return None
+        ladder = " <-> ".join(
+            f"{tier.id} ({tier.model}, {tier.effort})"
+            for tier in self.config.codex.model_tiers
+        )
+        learned = ""
+        policy_path = Path(
+            self.config.codex.routing_policy_file,
+        ).expanduser()
+        try:
+            if policy_path.is_file():
+                learned = policy_path.read_text(encoding="utf-8")[:16_000].strip()
+        except OSError as exc:
+            logger.warning(
+                "Could not read model-routing policy %s: %s",
+                policy_path, exc,
+            )
+        policy = f"""# Model Tier Routing
+
+Current tier: **{current_tier}**
+Ordered ladder (low to high): {ladder}
+
+Use `mcp__nerve__change_model_tier` only when concrete evidence says the
+adjacent tier is a better fit:
+
+- Stay at the current tier for ordinary work it can complete reliably.
+- Move up before continuing when the task needs materially stronger planning,
+  synthesis, debugging, or risk control. After an upgrade tool call, stop the
+  current turn; Nerve automatically continues at the stronger tier.
+- Move down only when the current user task is complete and later turns are
+  expected to be substantially cheaper or mechanical. A downgrade applies on
+  the next turn.
+- Move one adjacent step at a time. Never switch merely to avoid doing the
+  work, and never loop between tiers.
+- A user-pinned model is authoritative and cannot be changed by the tool."""
+        if learned:
+            policy += (
+                "\n\n## Learned routing guidance\n\n"
+                "Treat this versioned guidance as subordinate to the safety "
+                "rules above:\n\n"
+                + learned
+            )
+        return policy
+
     # ------------------------------------------------------------------ #
     #  SDK client lifecycle                                                #
     # ------------------------------------------------------------------ #
@@ -1049,9 +1118,76 @@ class AgentEngine:
             # Session row first — backend resolution is sticky on it.
             session = await self.db.get_session(session_id)
             backend = self._backend_for(session, source)
+            requested_tier: str | None = (
+                (session or {}).get("model_tier")
+                if backend.name == "codex"
+                else None
+            )
+            persistent_effort: str | None = (
+                (session or {}).get("reasoning_effort")
+                if backend.name == "codex"
+                else None
+            )
             requested_model = (
                 model or (session or {}).get("model")
                 or backend.default_model(source)
+            )
+            model_pinned = bool((session or {}).get("model_pinned"))
+
+            # An explicit per-message model is a user override. Map it to a
+            # unique configured tier when possible (Luna/Terra); ambiguous
+            # models such as Sol need an explicit effort and therefore stay
+            # outside the ladder. User overrides pin automatic routing until
+            # the pin is explicitly cleared through the session API.
+            if (
+                backend.name == "codex"
+                and model is not None
+                and source not in self._CRON_EFFORT_SOURCES
+            ):
+                matched = self.config.codex.tier_for(model)
+                requested_tier = matched.id if matched is not None else None
+                persistent_effort = (
+                    matched.effort if matched is not None else None
+                )
+                model_pinned = True
+            elif backend.name == "codex" and model is not None:
+                matched = self.config.codex.tier_for(model, effort_override)
+                requested_tier = matched.id if matched is not None else None
+                persistent_effort = (
+                    matched.effort if matched is not None else None
+                )
+
+            # Lazy backfill for sessions created through older call paths:
+            # only apply the configured default tier when both its model and
+            # this session's stored/default model agree.
+            if (
+                backend.name == "codex"
+                and requested_tier is None
+                and not model_pinned
+                and self.config.codex.resolved_default_tier is not None
+                and requested_model
+                == self.config.codex.resolved_default_tier.model
+                and not (session or {}).get("sdk_session_id")
+            ):
+                default_tier = self.config.codex.resolved_default_tier
+                requested_tier = default_tier.id
+                persistent_effort = default_tier.effort
+
+            # A named tier is the authoritative model/effort pair. This also
+            # repairs a session row whose ``model`` captured a temporary
+            # serving-model fallback before a daemon restart.
+            stored_tier = self.config.codex.tier(requested_tier)
+            if stored_tier is not None:
+                requested_model = stored_tier.model
+                persistent_effort = stored_tier.effort
+
+            requested_effort = (
+                effort_override
+                or persistent_effort
+                or self._base_effort_for_source(
+                    source, self.config.agent.effort,
+                    self.config.agent.cron_effort,
+                )
             )
             validate_model = getattr(backend, "validate_model", None)
             if validate_model is not None:
@@ -1059,6 +1195,7 @@ class AgentEngine:
 
             if client is not None:
                 bound_model = self._session_models.get(session_id)
+                bound_effort = self._session_efforts.get(session_id)
                 # Health check: verify the underlying subprocess is alive
                 if not client.is_alive():
                     logger.warning(
@@ -1069,21 +1206,31 @@ class AgentEngine:
                     self.sessions.remove_client(session_id)
                     self._session_backends.pop(session_id, None)
                     self._session_models.pop(session_id, None)
+                    self._session_efforts.pop(session_id, None)
                     unregister_handler(session_id)
                     await self._safe_disconnect(client)
                     client = None
-                elif bound_model is not None and bound_model != requested_model:
+                elif (
+                    bound_model is not None
+                    and (
+                        bound_model != requested_model
+                        or bound_effort != requested_effort
+                    )
+                ):
                     # Model switched mid-session (e.g. the composer's picker
                     # moved to a different model). Clients bind their model
                     # at connect time, so tear down and recreate below.
                     logger.info(
-                        "Session %s model changed (%s → %s), recreating client",
-                        session_id, bound_model, requested_model,
+                        "Session %s routing changed (%s/%s → %s/%s), "
+                        "recreating client",
+                        session_id, bound_model, bound_effort,
+                        requested_model, requested_effort,
                     )
                     self._stop_idle_watcher(session_id)
                     self.sessions.remove_client(session_id)
                     self._session_backends.pop(session_id, None)
                     self._session_models.pop(session_id, None)
+                    self._session_efforts.pop(session_id, None)
                     unregister_handler(session_id)
                     await self._safe_disconnect(client)
                     client = None
@@ -1226,6 +1373,11 @@ class AgentEngine:
                 recalled_memories=recalled_memories or None,
                 skill_summaries=self._collect_skill_summaries(),
                 excluded_tools=backend.excluded_tools(),
+                model_routing_policy=(
+                    self._model_routing_policy(requested_tier)
+                    if backend.name == "codex"
+                    else None
+                ),
             )
 
             async def _record_wakeup_cb(sid: str, tool_input: dict) -> Any:
@@ -1235,10 +1387,7 @@ class AgentEngine:
                 session_id=session_id,
                 source=source,
                 model=requested_model,
-                effort=effort_override or self._base_effort_for_source(
-                    source, self.config.agent.effort,
-                    self.config.agent.cron_effort,
-                ),
+                effort=requested_effort,
                 system_prompt=system_prompt,
                 cwd=session_cwd,
                 resume_native_id=sdk_resume_id,
@@ -1293,6 +1442,7 @@ class AgentEngine:
             # Record connected_at and the resolved model
             resolved_model = getattr(client, "model", "") or requested_model
             self._session_models[session_id] = resolved_model
+            self._session_efforts[session_id] = requested_effort
             now = datetime.now(timezone.utc).isoformat()
             connected_at = session.get("connected_at") if session and sdk_resume_id else now
             await self.sessions.mark_active(
@@ -1300,7 +1450,19 @@ class AgentEngine:
                 sdk_session_id=sdk_resume_id,
                 connected_at=connected_at,
             )
-            await self.db.update_session_fields(session_id, {"model": resolved_model})
+            routing_fields: dict[str, Any] = {"model": resolved_model}
+            if backend.name == "codex":
+                routing_fields.update({
+                    "model": (
+                        requested_model
+                        if requested_tier is not None
+                        else resolved_model
+                    ),
+                    "model_tier": requested_tier,
+                    "reasoning_effort": persistent_effort,
+                    "model_pinned": 1 if model_pinned else 0,
+                })
+            await self.db.update_session_fields(session_id, routing_fields)
 
             # A brand-new runtime process starts its cumulative cost counter
             # at zero — zero the persisted baseline so the first turn's
@@ -1365,6 +1527,7 @@ class AgentEngine:
         client = self.sessions.remove_client(session_id)
         self._session_backends.pop(session_id, None)
         self._session_models.pop(session_id, None)
+        self._session_efforts.pop(session_id, None)
         unregister_handler(session_id)
 
         if clear_resume:
@@ -1378,6 +1541,125 @@ class AgentEngine:
                 "Discarded client for session %s (clear_resume=%s)",
                 session_id, clear_resume,
             )
+
+    async def change_model_tier(
+        self,
+        session_id: str,
+        *,
+        direction: str,
+        reason: str,
+        continue_prompt: str = "",
+    ) -> dict[str, Any]:
+        """Persist one adjacent Codex routing change for this session.
+
+        The invoking client keeps serving the current turn. An upgrade queues
+        one internal continuation that the outer ``run`` loop drains after the
+        weaker turn finalizes; a downgrade waits for the next external turn.
+        """
+        if direction not in {"up", "down"}:
+            raise ValueError("direction must be 'up' or 'down'")
+        reason = reason.strip()
+        if not reason:
+            raise ValueError("A concrete non-empty reason is required.")
+
+        session = await self.db.get_session(session_id)
+        if not session:
+            raise ValueError(f"Session {session_id!r} was not found.")
+        if session.get("source") == "external":
+            raise ValueError(
+                "External client sessions cannot change Nerve-owned routing."
+            )
+        if session.get("backend") != "codex":
+            raise ValueError(
+                "Model-tier routing is available only for Codex sessions."
+            )
+        if session.get("model_pinned"):
+            raise ValueError(
+                "This session's model is pinned by the user. Clear the pin "
+                "before allowing automatic tier changes."
+            )
+
+        current = self.config.codex.tier(session.get("model_tier"))
+        if current is None:
+            current = self.config.codex.tier_for(
+                session.get("model"),
+                session.get("reasoning_effort")
+                or self._session_efforts.get(session_id),
+            )
+        if current is None:
+            raise ValueError(
+                "The current model/effort pair is not a configured routing "
+                "tier, so an adjacent change is ambiguous."
+            )
+        target = self.config.codex.adjacent_tier(current.id, direction)
+        if target is None:
+            edge = "highest" if direction == "up" else "lowest"
+            raise ValueError(
+                f"Session is already at the {edge} configured tier "
+                f"({current.id})."
+            )
+
+        try:
+            metadata = json.loads(session.get("metadata") or "{}")
+        except (TypeError, ValueError):
+            metadata = {}
+        history = metadata.get("model_tier_history")
+        if not isinstance(history, list):
+            history = []
+        changed_at = datetime.now(timezone.utc).isoformat()
+        history.append({
+            "from": current.id,
+            "to": target.id,
+            "direction": direction,
+            "reason": reason[:1000],
+            "at": changed_at,
+        })
+        metadata["model_tier_history"] = history[-50:]
+        metadata.setdefault("initial_model_tier", current.id)
+
+        await self.db.update_session_fields(session_id, {
+            "model": target.model,
+            "model_tier": target.id,
+            "reasoning_effort": target.effort,
+            "model_pinned": 0,
+        })
+        await self.db.update_session_metadata(session_id, metadata)
+        await self.db.log_session_event(session_id, "model_tier_changed", {
+            "from": current.id,
+            "to": target.id,
+            "direction": direction,
+            "reason": reason[:1000],
+            "model": target.model,
+            "effort": target.effort,
+        })
+        await broadcaster.broadcast(session_id, {
+            "type": "model_tier_changed",
+            "session_id": session_id,
+            "from_tier": current.id,
+            "to_tier": target.id,
+            "model": target.model,
+            "effort": target.effort,
+            "automatic_continuation": direction == "up",
+        })
+
+        if direction == "up":
+            prompt = continue_prompt[:2000].strip() or (
+                "Continue the user's current task at the stronger model tier. "
+                "Use the existing conversation and tool results, reassess the "
+                "unfinished work, and complete it without asking the user to "
+                "repeat the request."
+            )
+            self._pending_model_tier_continuations[session_id] = prompt
+        else:
+            self._pending_model_tier_continuations.pop(session_id, None)
+
+        return {
+            "from_tier": current.id,
+            "to_tier": target.id,
+            "model": target.model,
+            "effort": target.effort,
+            "automatic_continuation": direction == "up",
+        }
 
     # ------------------------------------------------------------------ #
     #  Public API: run, stop, fork, resume                                 #
@@ -2364,6 +2646,63 @@ class AgentEngine:
                         internal=internal, images=images,
                         image_refs=image_refs,
                     )
+                    # A weaker tier can request one adjacent upgrade from its
+                    # session-bound tool. Finish and persist that turn first,
+                    # then rebuild the client from the newly stored
+                    # model/effort and continue internally. Bound this by the
+                    # configured ladder length, with a hard safety cap for
+                    # unexpectedly large custom ladders.
+                    max_escalations = min(
+                        max(len(self.config.codex.model_tiers) - 1, 0),
+                        8,
+                    )
+                    for escalation_index in range(max_escalations):
+                        continuation = (
+                            self._pending_model_tier_continuations.pop(
+                                session_id, None,
+                            )
+                        )
+                        if not continuation:
+                            break
+                        current = await self.db.get_session(session_id)
+                        if (current or {}).get("status") in {
+                            SessionStatus.STOPPED.value,
+                            SessionStatus.ERROR.value,
+                        }:
+                            break
+                        await broadcaster.broadcast(session_id, {
+                            "type": "auto_turn",
+                            "session_id": session_id,
+                            "reason": "model_tier_upgrade",
+                            "index": escalation_index + 1,
+                        })
+                        broadcaster.mark_turn_open(session_id)
+                        await self.db.set_session_run_recovery(
+                            session_id,
+                            source=source,
+                            channel=channel,
+                            user_message=continuation,
+                            channel_context=None,
+                        )
+                        result = await self._run_inner(
+                            session_id,
+                            continuation,
+                            source,
+                            channel,
+                            None,
+                            effort_override=None,
+                            raise_on_error=raise_on_error,
+                            internal=True,
+                        )
+                    if session_id in self._pending_model_tier_continuations:
+                        self._pending_model_tier_continuations.pop(
+                            session_id, None,
+                        )
+                        logger.warning(
+                            "Session %s exhausted the model-tier continuation "
+                            "limit in one run",
+                            session_id,
+                        )
                     completed = True
                     return result
                 finally:
@@ -2378,6 +2717,9 @@ class AgentEngine:
                         with contextlib.suppress(Exception):
                             await self._router.stop_session_typing(typing_task)
                     self.sessions.mark_not_running(session_id)
+                    self._pending_model_tier_continuations.pop(
+                        session_id, None,
+                    )
                     self._active_channel.pop(session_id, None)
                     # Backstop: if _run_inner exited without broadcasting
                     # done/stopped/error (post-stream DB exception, hung

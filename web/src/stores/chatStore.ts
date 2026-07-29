@@ -10,7 +10,7 @@ import { cancelAutoClose, clearAllAutoCloseTimers, MAX_COMPLETED_TABS } from './
 import { extractTodosFromMessages, extractCCTasksFromMessages } from './helpers/bufferReplay';
 import { loadDrafts, persistDraft, removeDraft, pruneDrafts } from './helpers/draftStorage';
 // Handlers
-import { handleThinking, handleToken, handleToolUse, handleToolResult, handleToolOutput, handleDone, handleStopped, handleError, handleWakeup, handleAutoTurn, handleModelChanged } from './handlers/streamingHandlers';
+import { handleThinking, handleToken, handleToolUse, handleToolResult, handleToolOutput, handleDone, handleStopped, handleError, handleWakeup, handleAutoTurn, handleModelChanged, handleModelTierChanged } from './handlers/streamingHandlers';
 import { handleSessionUpdated, handleSessionStatus, handleSessionSwitched, handleSessionForked, handleSessionResumed, handleSessionArchived, handleSessionRunning, handleSessionAwaitingInput, handleAnswerInjected, handleUserMessage } from './handlers/sessionHandlers';
 import { handlePlanUpdate, handleSubagentStart, handleSubagentComplete, handleHoaProgress, handleWorkflowProgress } from './handlers/panelHandlers';
 import { handleInteraction, handleInteractionResolved, handleFileChanged, handleNotification, handleNotificationAnswered, handleNotificationExpired, handleBackgroundTasksUpdate } from './handlers/auxiliaryHandlers';
@@ -788,6 +788,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       case 'wakeup':       return handleWakeup(msg, get, set);
       case 'auto_turn':    return handleAutoTurn(msg, get, set);
       case 'model_changed': return handleModelChanged(msg, get, set);
+      case 'model_tier_changed': return handleModelTierChanged(msg, get, set);
       case 'stopped':      return handleStopped(msg, get, set);
       case 'error':        return handleError(msg, get, set);
       // Sessions

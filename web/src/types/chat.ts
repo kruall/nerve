@@ -115,6 +115,9 @@ export interface Session {
   message_count?: number;
   total_cost_usd?: number;
   model?: string;
+  model_tier?: string;
+  reasoning_effort?: string;
+  model_pinned?: boolean;
   backend?: string;
   cwd?: string;
   // Real-time running status (set by backend + WS updates)

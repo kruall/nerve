@@ -58,6 +58,7 @@ class SessionManager:
         default_backend: str = "claude",
         cron_backend: str | None = None,
         backend_models: dict[str, str] | None = None,
+        backend_model_profiles: dict[str, dict[str, str]] | None = None,
         default_cwd: str | None = None,
     ):
         self.db = db
@@ -65,6 +66,10 @@ class SessionManager:
         self.default_backend = default_backend
         self.cron_backend = cron_backend or default_backend
         self.backend_models = dict(backend_models or {})
+        self.backend_model_profiles = {
+            key: dict(value)
+            for key, value in (backend_model_profiles or {}).items()
+        }
         self.default_cwd = default_cwd
         # In-memory SDK client registry (rebuilt on demand from DB)
         self._clients: dict[str, Any] = {}
@@ -99,6 +104,9 @@ class SessionManager:
         metadata: dict | None = None,
         backend: str | None = None,
         model: str | None = None,
+        model_tier: str | None = None,
+        reasoning_effort: str | None = None,
+        model_pinned: bool = False,
         cwd: str | None = None,
     ) -> dict:
         """Get an existing session or create a new one."""
@@ -106,7 +114,9 @@ class SessionManager:
         if not session:
             session = await self._create_session(
                 session_id, title=title, source=source, metadata=metadata,
-                backend=backend, model=model, cwd=cwd,
+                backend=backend, model=model, model_tier=model_tier,
+                reasoning_effort=reasoning_effort,
+                model_pinned=model_pinned, cwd=cwd,
             )
         return session
 
@@ -120,6 +130,9 @@ class SessionManager:
         forked_from_message: str | None = None,
         backend: str | None = None,
         model: str | None = None,
+        model_tier: str | None = None,
+        reasoning_effort: str | None = None,
+        model_pinned: bool = False,
         cwd: str | None = None,
     ) -> dict:
         """Create a new session with status=created and log the event."""
@@ -132,8 +145,13 @@ class SessionManager:
                 self.cron_backend if source in ("cron", "hook")
                 else self.default_backend
             )).strip().lower()
+        profile = self.backend_model_profiles.get(backend, {})
         if model is None:
-            model = self.backend_models.get(backend)
+            model = profile.get("model") or self.backend_models.get(backend)
+        if model_tier is None and model == profile.get("model"):
+            model_tier = profile.get("tier")
+        if reasoning_effort is None and model_tier == profile.get("tier"):
+            reasoning_effort = profile.get("effort")
         if cwd is None:
             cwd = self.default_cwd
         session = await self.db.create_session(
@@ -143,6 +161,9 @@ class SessionManager:
             forked_from_message=forked_from_message,
             backend=backend,
             model=model,
+            model_tier=model_tier,
+            reasoning_effort=reasoning_effort,
+            model_pinned=model_pinned,
             cwd=cwd,
         )
         await self.db.log_session_event(session_id, "created", {
@@ -548,6 +569,9 @@ class SessionManager:
             forked_from_message=at_message_id,
             backend=parent.get("backend") or "claude",
             model=parent.get("model"),
+            model_tier=parent.get("model_tier"),
+            reasoning_effort=parent.get("reasoning_effort"),
+            model_pinned=bool(parent.get("model_pinned")),
             cwd=parent.get("cwd"),
         )
         return session

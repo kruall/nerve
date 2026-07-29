@@ -81,17 +81,20 @@ class TestDefaultModels:
     def test_codex_models_by_source(self, tmp_path, db):
         engine = _engine(tmp_path, db)
         codex = engine._backends["codex"]
-        assert codex.default_model("web") == "gpt-5.6-sol"
-        assert codex.default_model("cron") == "gpt-5.6-sol"  # cron_model empty → model
+        assert codex.default_model("web") == "gpt-5.6-luna"
+        assert codex.default_model("cron") == "gpt-5.6-luna"
 
     def test_codex_cron_model_override(self, tmp_path, db):
         cfg = NerveConfig.from_dict({
             "workspace": str(tmp_path / "ws"),
-            "codex": {"home_dir": str(tmp_path / "h"), "cron_model": "gpt-5.6-luna"},
+            "codex": {
+                "home_dir": str(tmp_path / "h"),
+                "cron_model": "gpt-5.6-terra",
+            },
         })
         engine = AgentEngine(cfg, db)
-        assert engine._backends["codex"].default_model("cron") == "gpt-5.6-luna"
-        assert engine._backends["codex"].default_model("web") == "gpt-5.6-sol"
+        assert engine._backends["codex"].default_model("cron") == "gpt-5.6-terra"
+        assert engine._backends["codex"].default_model("web") == "gpt-5.6-luna"
 
 
 class TestExcludedTools:

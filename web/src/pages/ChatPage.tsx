@@ -223,10 +223,16 @@ export function ChatPage() {
                 );
               })()}
               {(() => {
-                const model = sessions.find(s => s.id === activeSession)?.model;
+                const session = sessions.find(s => s.id === activeSession);
+                const model = session?.model;
                 return model ? (
-                  <span className="text-[11px] text-text-faint bg-surface-raised px-1.5 py-0.5 rounded">
-                    {formatModelLabel(model)}
+                  <span
+                    className="text-[11px] text-text-faint bg-surface-raised px-1.5 py-0.5 rounded"
+                    title={session?.model_tier
+                      ? `${model}, effort=${session.reasoning_effort ?? 'default'}`
+                      : model}
+                  >
+                    {session?.model_tier ?? formatModelLabel(model)}
                   </span>
                 ) : null;
               })()}

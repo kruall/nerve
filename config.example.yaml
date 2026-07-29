@@ -52,6 +52,23 @@ agent:
   #   cron_model: us.anthropic.claude-sonnet-4-6
   #   title_model: us.anthropic.claude-haiku-4-5-20251001-v1:0
 
+# Codex backend and adaptive model routing (optional). When enabled, new
+# interactive sessions start at Luna/high and may move one adjacent tier at a
+# time through the session-bound change_model_tier tool. Existing sessions keep
+# their stored tier/model/effort.
+# agent:
+#   backend: codex
+#   cron_backend: codex
+# codex:
+#   model: gpt-5.6-sol       # legacy fallback if default_tier is empty
+#   default_tier: luna-high
+#   model_tiers:
+#     - {id: luna-high, model: gpt-5.6-luna, effort: high}
+#     - {id: terra-high, model: gpt-5.6-terra, effort: high}
+#     - {id: sol-medium, model: gpt-5.6-sol, effort: medium}
+#     - {id: sol-xhigh, model: gpt-5.6-sol, effort: xhigh}
+#   routing_policy_file: ~/.nerve/model-routing-policy.md
+
 # Gateway
 gateway:
   host: 0.0.0.0

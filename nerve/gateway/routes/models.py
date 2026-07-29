@@ -44,6 +44,11 @@ async def list_models(user: dict = Depends(require_auth)):
     config = get_config()
     deps = get_deps()
     default_model = config.agent.model
+    codex_default_model = (
+        config.codex.resolved_default_tier.model
+        if config.codex.resolved_default_tier is not None
+        else config.codex.model
+    )
 
     codex_backend = deps.engine._backends.get("codex")
     codex_preflight = (
@@ -62,8 +67,8 @@ async def list_models(user: dict = Depends(require_auth)):
     options.append({
         "id": "codex",
         "label": "Codex",
-        "model": config.codex.model,
-        "models": codex_preflight.get("models") or [config.codex.model],
+        "model": codex_default_model,
+        "models": codex_preflight.get("models") or [codex_default_model],
         "available": bool(codex_preflight.get("available")),
         "reason": codex_preflight.get("reason"),
     })
@@ -86,7 +91,7 @@ async def list_models(user: dict = Depends(require_auth)):
     if codex_preflight.get("available"):
         models.extend({
             "id": model_id, "provider": "openai", "backend": "codex",
-        } for model_id in codex_preflight.get("models") or [config.codex.model])
+        } for model_id in codex_preflight.get("models") or [codex_default_model])
 
     ollama_available = False
     if config.ollama_routable:
@@ -101,7 +106,18 @@ async def list_models(user: dict = Depends(require_auth)):
         "default": default_model,
         "defaults": {
             "claude": default_model,
-            "codex": config.codex.model,
+            "codex": codex_default_model,
+        },
+        "model_tiers": {
+            "default": config.codex.default_tier or None,
+            "options": [
+                {
+                    "id": tier.id,
+                    "model": tier.model,
+                    "effort": tier.effort,
+                }
+                for tier in config.codex.model_tiers
+            ],
         },
         "backends": backends,
         "models": models,

@@ -1,6 +1,7 @@
 """Shared test fixtures for Nerve tests."""
 
 import asyncio
+import os
 import tempfile
 from pathlib import Path
 
@@ -22,10 +23,10 @@ def event_loop():
 def _isolate_nerve_state_files(tmp_path, monkeypatch):
     """Keep tests away from the real ~/.nerve state files.
 
-    The config-dir pointer, wizard init-state, and Telegram pairing files
-    all live under ~/.nerve on a real install. Tests must never read or
-    mutate them (running the suite on a live box would otherwise repoint
-    the daemon's config discovery or leak pairing codes).
+    The config-dir pointer, wizard init-state, cron config, and Telegram
+    pairing files all live under ~/.nerve on a real install. Tests must never
+    read or mutate them. Inherited external-MCP secret variables are also
+    removed so one developer session cannot change another test's inputs.
     """
     import nerve.bootstrap
     import nerve.config
@@ -39,8 +40,14 @@ def _isolate_nerve_state_files(tmp_path, monkeypatch):
         nerve.bootstrap, "INIT_STATE_FILE", state_dir / "init-state.json",
     )
     monkeypatch.setattr(
+        nerve.bootstrap, "SYSTEM_CRON_FILE", state_dir / "cron/system.yaml",
+    )
+    monkeypatch.setattr(
         nerve.pairing, "PAIRING_FILE", state_dir / "telegram_pairing",
     )
+    for name in list(os.environ):
+        if name.startswith("NERVE_CODEX_MCP_EXTERNAL_"):
+            monkeypatch.delenv(name, raising=False)
 
 
 @pytest_asyncio.fixture

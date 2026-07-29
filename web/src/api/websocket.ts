@@ -36,6 +36,7 @@ export type WSMessage =
   | { type: 'wakeup'; session_id: string }
   | { type: 'auto_turn'; session_id: string }
   | { type: 'model_changed'; session_id: string; from_model: string; to_model: string; downgrade: boolean }
+  | { type: 'model_tier_changed'; session_id: string; from_tier: string; to_tier: string; model: string; effort: string; automatic_continuation: boolean }
   | { type: 'pong' };
 
 type MessageHandler = (msg: WSMessage) => void;

@@ -162,7 +162,7 @@ async def get_messages(session_id: str, limit: int = 500, user: dict = Depends(r
 
 @router.patch("/api/sessions/{session_id}")
 async def update_session(session_id: str, req: dict, user: dict = Depends(require_auth)):
-    """Update session fields (title, starred)."""
+    """Update user-owned session fields and model-routing pin."""
     deps = get_deps()
     session = await deps.db.get_session(session_id)
     if not session:
@@ -172,6 +172,26 @@ async def update_session(session_id: str, req: dict, user: dict = Depends(requir
         fields["title"] = req["title"]
     if "starred" in req:
         fields["starred"] = 1 if req["starred"] else 0
+    if "model_pinned" in req:
+        fields["model_pinned"] = 1 if req["model_pinned"] else 0
+    if "model_tier" in req:
+        if session.get("backend") != "codex":
+            raise HTTPException(
+                status_code=400,
+                detail="model_tier is available only for Codex sessions",
+            )
+        tier = deps.engine.config.codex.tier(str(req["model_tier"]))
+        if tier is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown Codex model tier {req['model_tier']!r}",
+            )
+        fields.update({
+            "model": tier.model,
+            "model_tier": tier.id,
+            "reasoning_effort": tier.effort,
+            "model_pinned": 1,
+        })
     if not fields:
         raise HTTPException(status_code=400, detail="No valid fields to update")
     await deps.db.update_session_fields(session_id, fields)

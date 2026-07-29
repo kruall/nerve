@@ -112,6 +112,7 @@ def build_system_prompt(
     timezone_name: str = "America/New_York",
     skill_summaries: list[dict] | None = None,
     excluded_tools: "set[str] | None" = None,
+    model_routing_policy: str | None = None,
 ) -> str:
     """Build the full system prompt for the agent.
 
@@ -157,6 +158,9 @@ def build_system_prompt(
 You have access to the following custom tools:
 {_format_tool_list(excluded_tools)}"""
     parts.append(context)
+
+    if model_routing_policy:
+        parts.append(model_routing_policy)
 
     if discord_bound is None:
         discord_bound = source == "discord"
