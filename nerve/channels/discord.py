@@ -391,6 +391,7 @@ class DiscordChannel(BaseChannel):
                     batch_window_seconds=(
                         self.config.audit_batch_window_seconds
                     ),
+                    is_session_running=self.router.engine.is_session_running,
                 )
                 await self._session_mirror.start()
             except asyncio.CancelledError:

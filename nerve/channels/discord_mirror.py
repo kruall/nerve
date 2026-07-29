@@ -13,6 +13,7 @@ import contextlib
 import hashlib
 import json
 import logging
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -104,6 +105,7 @@ class DiscordSessionMirror:
         forum_id: int,
         batch_window_seconds: float = _DEFAULT_BATCH_WINDOW_SECONDS,
         stream: StreamBroadcaster = broadcaster,
+        is_session_running: Callable[[str], bool] | None = None,
     ):
         self.client = client
         self.db = db
@@ -111,6 +113,7 @@ class DiscordSessionMirror:
         self.forum_id = forum_id
         self.batch_window_seconds = max(0.0, batch_window_seconds)
         self.stream = stream
+        self.is_session_running = is_session_running
         self._forum: Any | None = None
         self._worker_task: asyncio.Task[None] | None = None
         self._reconcile_task: asyncio.Task[None] | None = None
@@ -191,7 +194,11 @@ class DiscordSessionMirror:
         """Capture one live event and enqueue a batched projection update."""
         event_type = str(event.get("type") or "")
         if session_id == "__global__":
-            if event_type in {
+            if event_type == "session_running":
+                target_session_id = str(event.get("session_id") or "")
+                if target_session_id:
+                    self._mark_dirty(target_session_id, immediate=True)
+            elif event_type in {
                 "notification",
                 "notification_answered",
                 "notification_expired",
@@ -617,6 +624,12 @@ class DiscordSessionMirror:
             state_key = "stopped"
         elif await self.db.has_pending_session_interaction(str(session["id"])):
             state_key = "waiting"
+        elif self.is_session_running is not None:
+            state_key = (
+                "active"
+                if self.is_session_running(str(session["id"]))
+                else "idle"
+            )
         elif status == "idle":
             state_key = "idle"
         else:

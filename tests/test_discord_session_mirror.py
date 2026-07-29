@@ -594,6 +594,7 @@ async def test_mirror_includes_and_tags_system_sessions(db, session_id, source):
 @pytest.mark.asyncio
 async def test_mirror_moves_session_between_lifecycle_tags(db):
     session_id = "session-tags"
+    running = {session_id: True}
     await db.create_session(
         session_id,
         title="Tagged session",
@@ -610,6 +611,7 @@ async def test_mirror_moves_session_between_lifecycle_tags(db):
         guild_id=100,
         forum_id=forum.id,
         stream=StreamBroadcaster(),
+        is_session_running=lambda sid: running.get(sid, False),
     )
     mirror._forum = forum
 
@@ -639,14 +641,14 @@ async def test_mirror_moves_session_between_lifecycle_tags(db):
         "active",
     }
 
-    await db.update_session_fields(session_id, {"status": "idle"})
+    running[session_id] = False
     await mirror._sync_session(session_id)
     assert {tag.name for tag in thread.applied_tags} == {
         "session",
         "idle",
     }
 
-    await db.update_session_fields(session_id, {"status": "active"})
+    running[session_id] = True
     await mirror._sync_session(session_id)
     assert {tag.name for tag in thread.applied_tags} == {
         "session",
@@ -823,6 +825,31 @@ async def test_global_notification_events_refresh_the_owning_session():
         "type": "notification_answered",
         "session_id": "session-1",
         "notification_id": "question-1",
+    })
+
+    mirror._mark_dirty.assert_called_once_with(
+        "session-1",
+        immediate=True,
+    )
+    assert "__global__" not in mirror._live_blocks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_running", [True, False])
+async def test_global_running_events_refresh_the_owning_session(is_running):
+    mirror = DiscordSessionMirror(
+        client=_Client(),
+        db=AsyncMock(),
+        guild_id=100,
+        forum_id=200,
+        stream=StreamBroadcaster(),
+    )
+    mirror._mark_dirty = MagicMock()
+
+    await mirror._on_stream_event("__global__", {
+        "type": "session_running",
+        "session_id": "session-1",
+        "is_running": is_running,
     })
 
     mirror._mark_dirty.assert_called_once_with(
