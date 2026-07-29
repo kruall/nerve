@@ -526,10 +526,16 @@ class ChannelRouter:
             target = ctx["target"]
 
         formatted = chan_obj.format_response(text)
+        metadata: dict[str, Any] = {}
+        if channel == "discord":
+            model = self.engine.get_current_model(session_id)
+            if isinstance(model, str) and model:
+                metadata["model"] = model
         await chan_obj.send(OutboundMessage(
             target=target,
             text=formatted,
             session_id=session_id,
+            metadata=metadata,
         ))
         return True
 

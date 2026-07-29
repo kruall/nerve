@@ -575,6 +575,15 @@ def _make_model_engine(configured: str | None = "claude-fable-5") -> AgentEngine
     return engine
 
 
+def test_current_model_prefers_observed_model_over_bound_client_model():
+    engine = _make_model_engine("claude-fable-5")
+    assert engine.get_current_model("s1") == "claude-fable-5"
+
+    engine._observed_models["s1"] = "claude-opus-4-8-20260115"
+    assert engine.get_current_model("s1") == "claude-opus-4-8-20260115"
+    assert engine.get_current_model("missing") is None
+
+
 def _assistant(model: str, parent_tool_use_id: str | None = None) -> AssistantMessage:
     return AssistantMessage(
         content=[], model=model, parent_tool_use_id=parent_tool_use_id,

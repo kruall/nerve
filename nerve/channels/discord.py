@@ -1049,11 +1049,21 @@ class DiscordChannel(BaseChannel):
 
     async def send(self, message: OutboundMessage) -> None:
         channel = await self._resolve_messageable(message.target)
+        model = message.metadata.get("model")
         for chunk in split_discord_message(message.text):
-            await channel.send(
-                chunk,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+            if isinstance(model, str) and model:
+                await channel.send(
+                    embed=discord.Embed(
+                        title=f"Model: {model}",
+                        description=chunk,
+                    ),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            else:
+                await channel.send(
+                    chunk,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
 
     async def deliver_approval(self, row: dict[str, Any]) -> str:
         """Deliver an actionable notification to the pinned audit thread."""

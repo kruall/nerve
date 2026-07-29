@@ -776,6 +776,27 @@ async def test_send_splits_long_messages_and_disables_mentions():
 
 
 @pytest.mark.asyncio
+async def test_send_uses_model_embed_header_when_model_is_known():
+    channel = _channel()
+    target = SimpleNamespace(send=AsyncMock())
+    channel._client = MagicMock()
+    channel._client.get_channel.return_value = target
+
+    await channel.send(OutboundMessage(
+        target=str(TEXT_CHANNEL),
+        text="response",
+        metadata={"model": "gpt-5.6-luna"},
+    ))
+
+    target.send.assert_awaited_once()
+    kwargs = target.send.await_args.kwargs
+    assert "content" not in kwargs
+    assert kwargs["embed"].title == "Model: gpt-5.6-luna"
+    assert kwargs["embed"].description == "response"
+    assert "allowed_mentions" in kwargs
+
+
+@pytest.mark.asyncio
 async def test_send_typing_uses_messageable_typing_api():
     channel = _channel()
     target = SimpleNamespace(send=AsyncMock(), typing=AsyncMock())

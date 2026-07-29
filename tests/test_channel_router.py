@@ -175,6 +175,25 @@ async def test_discord_text_delivery_uses_durable_binding_after_router_restart(
 
 
 @pytest.mark.asyncio
+async def test_discord_text_delivery_includes_current_model_metadata(db):
+    await db.create_session("discord-session", source="discord")
+    await db.bind_discord_session(
+        "discord-session", guild_id="100", thread_id="200",
+    )
+    engine = MagicMock()
+    engine.db = db
+    engine.get_current_model.return_value = "gpt-5.6-terra"
+    router = ChannelRouter(engine)
+    channel = _DiscordStubChannel()
+    router.register(channel)
+
+    assert await router.send_text(
+        "discord-session", "modelled reply", channel="discord",
+    ) is True
+    assert channel.sent[0].metadata == {"model": "gpt-5.6-terra"}
+
+
+@pytest.mark.asyncio
 async def test_discord_text_delivery_refuses_session_without_binding(db):
     await db.create_session("web-session", source="web")
     engine = MagicMock()

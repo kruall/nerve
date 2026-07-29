@@ -1093,6 +1093,19 @@ adjacent tier is a better fit:
             )
         return policy
 
+    def get_current_model(self, session_id: str) -> str | None:
+        """Return the model currently serving a session, when known.
+
+        ``_observed_models`` is preferred because a provider may silently
+        serve a fallback model different from the configured/requested one.
+        The bound client model is the fallback before the first serving-model
+        observation arrives.
+        """
+        return (
+            self._observed_models.get(session_id)
+            or self._session_models.get(session_id)
+        )
+
     # ------------------------------------------------------------------ #
     #  SDK client lifecycle                                                #
     # ------------------------------------------------------------------ #
