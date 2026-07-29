@@ -650,6 +650,18 @@ async def test_send_splits_long_messages_and_disables_mentions():
 
 
 @pytest.mark.asyncio
+async def test_send_typing_uses_messageable_typing_api():
+    channel = _channel()
+    target = SimpleNamespace(send=AsyncMock(), typing=AsyncMock())
+    channel._client = MagicMock()
+    channel._client.get_channel.return_value = target
+
+    await channel.send_typing(str(YDB_THREAD))
+
+    target.typing.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
 async def test_first_start_primes_channel_without_replaying_old_messages():
     channel = _channel()
     target = _HistoryChannel(TEXT_CHANNEL, [], last_message_id=777)

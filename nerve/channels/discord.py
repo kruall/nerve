@@ -929,7 +929,7 @@ class DiscordChannel(BaseChannel):
 
     async def send_typing(self, target: str) -> None:
         channel = await self._resolve_messageable(target)
-        await channel.trigger_typing()
+        await channel.typing()
 
     @staticmethod
     def _safe_label(value: Any) -> str:
