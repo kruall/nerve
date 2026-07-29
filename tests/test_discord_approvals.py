@@ -160,7 +160,10 @@ async def test_delivery_posts_persistent_view_and_saves_coordinates():
         "nerve:approval:approval-1:approve",
         "nerve:approval:approval-1:revise",
         "nerve:approval:approval-1:decline",
+        "nerve:approval:approval-1:show_plan",
     ]
+    assert "Details" not in thread.send.await_args.args[0]
+    assert "Show plan" in thread.send.await_args.args[0]
     encoded = inbox.db.update_notification.await_args.kwargs["metadata"]
     assert json.loads(encoded)["discord_approval"] == {
         "thread_id": str(THREAD_ID),
@@ -169,7 +172,7 @@ async def test_delivery_posts_persistent_view_and_saves_coordinates():
 
 
 @pytest.mark.asyncio
-async def test_long_approval_posts_full_details_before_action_card():
+async def test_long_plan_posts_only_compact_action_card():
     thread = _thread()
     action_message = MagicMock(spec=discord.Message)
     action_message.id = MESSAGE_ID
@@ -189,12 +192,10 @@ async def test_long_approval_posts_full_details_before_action_card():
     await inbox.deliver(row)
 
     calls = thread.send.await_args_list
-    assert len(calls) >= 3
-    assert all("view" not in call.kwargs for call in calls[:-1])
-    assert isinstance(calls[-1].kwargs["view"], ApprovalView)
-    assert "Full details are in the messages immediately above" in (
-        calls[-1].args[0]
-    )
+    assert len(calls) == 1
+    assert isinstance(calls[0].kwargs["view"], ApprovalView)
+    assert "step" not in calls[0].args[0]
+    assert "Show plan" in calls[0].args[0]
 
 
 @pytest.mark.asyncio
@@ -202,6 +203,8 @@ async def test_restart_restores_pending_view_by_message_id():
     inbox = _inbox(thread=_thread())
     inbox.db.list_notifications.return_value = [{
         "id": "approval-1",
+        "body": "Plan body",
+        "target_kind": "plan",
         "options": json.dumps(["approve", "decline"]),
         "metadata": json.dumps({
             "option_labels": {"approve": "Approve", "decline": "Decline"},
@@ -216,7 +219,38 @@ async def test_restart_restores_pending_view_by_message_id():
 
     view = inbox.client.add_view.call_args.args[0]
     assert isinstance(view, ApprovalView)
+    assert view.children[-1].custom_id == (
+        "nerve:approval:approval-1:show_plan"
+    )
     assert inbox.client.add_view.call_args.kwargs["message_id"] == MESSAGE_ID
+
+
+@pytest.mark.asyncio
+async def test_show_plan_button_sends_ephemeral_chunks():
+    thread = _thread()
+    inbox = _inbox(thread=thread)
+    inbox.db.get_notification.return_value = {
+        "title": "Review long plan",
+        "body": "step\n" * 900,
+    }
+    view = ApprovalView(
+        inbox,
+        "approval-1",
+        ["approve"],
+        {"approve": "Approve"},
+        show_plan=True,
+    )
+    interaction = _interaction()
+
+    await view.children[-1].callback(interaction)
+
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    calls = interaction.followup.send.await_args_list
+    assert len(calls) >= 3
+    assert all(call.kwargs["ephemeral"] is True for call in calls)
+    assert all(len(call.args[0]) <= 2000 for call in calls)
+    assert "Review long plan" in calls[0].args[0]
+    thread.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio

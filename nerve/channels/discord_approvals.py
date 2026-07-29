@@ -193,6 +193,7 @@ class ApprovalButton(discord.ui.Button["ApprovalView"]):
             emoji=_BUTTON_EMOJIS.get(decision),
             custom_id=f"nerve:approval:{notification_id}:{decision}",
             disabled=disabled,
+            row=0,
         )
         self.notification_id = notification_id
         self.decision = decision
@@ -239,6 +240,57 @@ class ApprovalButton(discord.ui.Button["ApprovalView"]):
             )
 
 
+class ApprovalPlanButton(discord.ui.Button["ApprovalView"]):
+    """Show the full plan privately without expanding the public card."""
+
+    def __init__(
+        self,
+        notification_id: str,
+        *,
+        disabled: bool = False,
+    ) -> None:
+        super().__init__(
+            style=discord.ButtonStyle.secondary,
+            label="Show plan",
+            emoji="📄",
+            custom_id=f"nerve:approval:{notification_id}:show_plan",
+            disabled=disabled,
+            row=1,
+        )
+        self.notification_id = notification_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if view is None:
+            return
+        if not view.inbox.interaction_allowed(interaction):
+            await interaction.response.send_message(
+                "You are not allowed to view Nerve approval details.",
+                ephemeral=True,
+            )
+            return
+
+        row = await view.inbox.db.get_notification(self.notification_id)
+        body = str((row or {}).get("body") or "").strip()
+        if not body:
+            await interaction.response.send_message(
+                "Plan details are unavailable.", ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        title = str(
+            (row or {}).get("title") or "Plan details"
+        ).strip()
+        chunks = _split_message(f"**{title}**\n\n{body}")
+        for chunk in chunks:
+            await interaction.followup.send(
+                chunk,
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+
+
 class ApprovalView(discord.ui.View):
     """Persistent view reconstructed from a notification row."""
 
@@ -250,6 +302,7 @@ class ApprovalView(discord.ui.View):
         labels: dict[str, str],
         *,
         disabled: bool = False,
+        show_plan: bool = False,
     ) -> None:
         super().__init__(timeout=None)
         self.inbox = inbox
@@ -261,6 +314,11 @@ class ApprovalView(discord.ui.View):
                 notification_id,
                 value,
                 _safe_label(value, labels),
+                disabled=disabled,
+            ))
+        if show_plan:
+            self.add_item(ApprovalPlanButton(
+                notification_id,
                 disabled=disabled,
             ))
 
@@ -368,7 +426,14 @@ class DiscordApprovalInbox:
         labels = _option_labels(row)
         if not options:
             raise ValueError("Discord approval has no options")
-        view = ApprovalView(self, row["id"], options, labels)
+        show_plan = self._has_plan_details(row)
+        view = ApprovalView(
+            self,
+            row["id"],
+            options,
+            labels,
+            show_plan=show_plan,
+        )
         content = self._render_card(row)
         if len(content) > _MAX_ACTION_CARD_LENGTH:
             for chunk in _split_message(content):
@@ -424,6 +489,7 @@ class DiscordApprovalInbox:
                     row["id"],
                     options,
                     _option_labels(row),
+                    show_plan=self._has_plan_details(row),
                 ),
                 message_id=message_id,
             )
@@ -482,10 +548,18 @@ class DiscordApprovalInbox:
                     options,
                     labels,
                     disabled=True,
+                    show_plan=self._has_plan_details(row or {}),
                 ),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return True
+
+    @staticmethod
+    def _has_plan_details(row: dict[str, Any]) -> bool:
+        return (
+            str(row.get("target_kind") or "").strip() == "plan"
+            and bool(str(row.get("body") or "").strip())
+        )
 
     @staticmethod
     def _render_card(row: dict[str, Any]) -> str:
@@ -496,7 +570,11 @@ class DiscordApprovalInbox:
         target_kind = str(row.get("target_kind") or "").strip()
         target_id = str(row.get("target_id") or "").strip()
         parts = [f"{prefix}**{title}**"]
-        if body:
+        if body and target_kind == "plan":
+            parts.append(
+                "Use **Show plan** to view the full plan privately."
+            )
+        elif body:
             parts.append(body)
         if target_kind or target_id:
             parts.append(f"`{target_kind}:{target_id}`")
