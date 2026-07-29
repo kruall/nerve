@@ -1374,6 +1374,38 @@ async def test_slow_backlog_does_not_delay_discord_readiness():
 
 
 @pytest.mark.asyncio
+async def test_slow_command_sync_does_not_delay_discord_readiness():
+    channel = _channel()
+    command_release = asyncio.Event()
+
+    async def slow_command_sync():
+        await command_release.wait()
+
+    channel._sync_application_commands = AsyncMock(side_effect=slow_command_sync)
+    channel._sync_backlog = AsyncMock()
+    guild = MagicMock()
+    guild.get_channel.side_effect = lambda channel_id: (
+        SimpleNamespace(id=channel_id)
+        if channel_id in {TEXT_CHANNEL, YDB_FORUM}
+        else None
+    )
+    channel._client = MagicMock()
+    channel._client.user = SimpleNamespace(id=DOGGY)
+    channel._client.get_guild.return_value = guild
+
+    await channel._on_ready()
+
+    assert channel._ready.is_set()
+    assert channel._startup_error is None
+    assert channel._post_ready_task is not None
+    assert not channel._post_ready_task.done()
+
+    command_release.set()
+    await channel._post_ready_task
+    channel._sync_application_commands.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_ready_fails_when_bot_cannot_access_configured_forum():
     channel = _channel()
     guild = MagicMock()

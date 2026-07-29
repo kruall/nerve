@@ -546,13 +546,6 @@ class DiscordChannel(BaseChannel):
                     "Discord bot cannot access configured channel(s): "
                     + ", ".join(str(value) for value in sorted(missing))
                 )
-            try:
-                await self._sync_application_commands()
-            except Exception:
-                logger.exception(
-                    "Discord slash-command sync failed; continuing without "
-                    "updated application commands"
-                )
             if (
                 self._post_ready_task is None
                 or self._post_ready_task.done()
@@ -568,6 +561,16 @@ class DiscordChannel(BaseChannel):
 
     async def _run_post_ready(self, guild: discord.Guild) -> None:
         """Start optional integrations and catch up without blocking startup."""
+        try:
+            await self._sync_application_commands()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Discord slash-command sync failed; continuing without "
+                "updated application commands"
+            )
+
         if self.config.audit_forum_id:
             try:
                 await self._ensure_system_audit(guild)
