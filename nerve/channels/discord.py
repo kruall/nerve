@@ -1055,7 +1055,7 @@ class DiscordChannel(BaseChannel):
         if isinstance(model, str) and model:
             header = f"-# {model}"
             if isinstance(reasoning_effort, str) and reasoning_effort:
-                header += f" · reasoning effort: {reasoning_effort}"
+                header += f" · {reasoning_effort}"
             chunks = split_discord_message(
                 message.text,
                 limit=max(1, _MAX_MESSAGE_LENGTH - len(header) - 1),
