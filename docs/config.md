@@ -253,17 +253,23 @@ the agent. Mirror threads can contain the same sensitive tool inputs and
 outputs as the Nerve session UI, so restrict the audit forum's Discord
 permissions to the intended reviewers.
 
-The audit forum also contains one pinned `Approvals` thread. Plan proposals
-and protected mechanical actions are delivered there even when `discord` is
-not listed under `notifications.channels`. Approval cards use persistent
-buttons that are restored after a Nerve restart. Approve executes directly;
-Decline and Request changes open a Discord modal for written feedback. Only
-users listed in `discord.allowed_author_ids` can act on these controls.
+The audit forum also contains three pinned notification inbox threads:
+`Notifications`, `Questions`, and `Approvals`. All three notification kinds
+are delivered to their Discord inbox whenever `discord.audit_forum_id` is
+configured, even when `discord` is not listed under
+`notifications.channels`.
+
+Informational notifications have a persistent **Dismiss** control. Questions
+render suggested-answer buttons plus **Write answer**, which opens a Discord
+modal for free-form input. Approval cards keep their dispatcher-specific
+controls: Approve executes directly, while Decline and Request changes open a
+modal for written feedback. Pending controls are restored after a Nerve
+restart. Only users listed in `discord.allowed_author_ids` can use them.
 
 Enable the **Message Content Intent** for the bot in Discord's Developer
 Portal. Grant only the channel permissions required by the deployment:
 View Channels, Read Message History, Send Messages, Create Public Threads,
-and Send Messages in Threads. Pinning the approval inbox and assigning
+and Send Messages in Threads. Pinning the notification inboxes and assigning
 forum tags additionally require Manage Threads; creating, updating, or
 deleting the forum's available tags requires Manage Channels. Administrator
 is not required.

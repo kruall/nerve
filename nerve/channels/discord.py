@@ -85,6 +85,7 @@ class DiscordChannel(BaseChannel):
         self._post_ready_task: asyncio.Task[None] | None = None
         self._session_mirror: Any | None = None
         self._approval_inbox: Any | None = None
+        self._notification_inbox: Any | None = None
         self._notification_service: Any | None = None
         self._ready = asyncio.Event()
         self._startup_error: Exception | None = None
@@ -280,6 +281,7 @@ class DiscordChannel(BaseChannel):
         mirror = self._session_mirror
         self._session_mirror = None
         self._approval_inbox = None
+        self._notification_inbox = None
 
         if mirror is not None:
             await mirror.stop()
@@ -381,6 +383,34 @@ class DiscordChannel(BaseChannel):
                 logger.exception(
                     "Discord approval inbox failed to start; "
                     "continuing without Discord approval delivery"
+                )
+
+        if (
+            self.config.audit_forum_id
+            and self._notification_service is not None
+            and self._notification_inbox is None
+        ):
+            try:
+                from nerve.channels.discord_notifications import (
+                    DiscordNotificationInbox,
+                )
+
+                self._notification_inbox = DiscordNotificationInbox(
+                    client=self._client,
+                    db=self.db,
+                    notification_service=self._notification_service,
+                    guild_id=self.config.guild_id,
+                    forum_id=self.config.audit_forum_id,
+                    allowed_author_ids=self._allowed_authors,
+                )
+                await self._notification_inbox.start(guild)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._notification_inbox = None
+                logger.exception(
+                    "Discord notification inbox failed to start; "
+                    "continuing without Discord notify/question delivery"
                 )
 
         try:
@@ -787,6 +817,15 @@ class DiscordChannel(BaseChannel):
         inbox = self._approval_inbox
         if inbox is None:
             raise RuntimeError("Discord approval inbox is not available")
+        return await inbox.deliver(row)
+
+    async def deliver_notification(self, row: dict[str, Any]) -> str:
+        """Deliver any notification kind to its pinned audit-forum inbox."""
+        if row.get("type") == "approval":
+            return await self.deliver_approval(row)
+        inbox = self._notification_inbox
+        if inbox is None:
+            raise RuntimeError("Discord notification inbox is not available")
         return await inbox.deliver(row)
 
     async def send_typing(self, target: str) -> None:

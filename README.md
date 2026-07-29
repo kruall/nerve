@@ -134,6 +134,8 @@ allowlist.
 - One persistent Nerve session per conversation or project-forum thread
 - Separate forum channels can represent separate task projects
 - Durable cursors replay messages missed during a Nerve restart
+- Pinned audit-forum inboxes collect notifications, questions, and approvals
+  with persistent Discord controls
 - Outbound-only Gateway connection; no public Nerve endpoint required
 
 ### ⏰ Cron Jobs

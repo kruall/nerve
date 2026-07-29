@@ -331,7 +331,7 @@ async def test_approval_fanout_always_includes_discord_inbox(db, tmp_path):
     cfg.notifications = NotificationsConfig(channels=["web"])
     engine = MagicMock()
     discord_channel = MagicMock()
-    discord_channel.deliver_approval = AsyncMock(return_value="300")
+    discord_channel.deliver_notification = AsyncMock(return_value="300")
     engine.router.get_channel.return_value = discord_channel
     service = NotificationService(cfg, db, engine)
     service._deliver_web = AsyncMock()
@@ -348,7 +348,7 @@ async def test_approval_fanout_always_includes_discord_inbox(db, tmp_path):
         ],
     )
 
-    discord_channel.deliver_approval.assert_awaited_once()
+    discord_channel.deliver_notification.assert_awaited_once()
     row = await db.get_notification(result["notification_id"])
     assert set(json.loads(row["channels_delivered"])) == {"web", "discord"}
 

@@ -2,8 +2,8 @@
 
 Coordinates between MCP tools (agent-side), channels (delivery), and the
 answer routing mechanism (user-side). Supports fire-and-forget notifications,
-async questions with multi-channel delivery (web UI + Telegram), a pinned
-Discord approval inbox, and
+async questions with multi-channel delivery, pinned Discord notification
+inboxes, and
 ``approval``-kind notifications that route to a server-side dispatcher when
 the user picks an inline option (see ``nerve.notifications.handlers``).
 """
@@ -887,7 +887,7 @@ class NotificationService:
             channels or self.config.notifications.channels
         )
         if (
-            notif_type == "approval"
+            notif_type in {"notify", "question", "approval"}
             and self.config.discord.enabled
             and self.config.discord.audit_forum_id
             and "discord" not in target_channels
@@ -939,16 +939,16 @@ class NotificationService:
         )
 
     async def _deliver_discord(self, notification_id: str) -> None:
-        """Send an approval to Discord's pinned audit-forum inbox."""
+        """Send a notification to its pinned Discord audit-forum inbox."""
         channel = self.engine.router.get_channel("discord")
-        if channel is None or not hasattr(channel, "deliver_approval"):
+        if channel is None or not hasattr(channel, "deliver_notification"):
             raise RuntimeError("Discord channel is unavailable")
         row = await self.db.get_notification(notification_id)
         if row is None:
             raise RuntimeError(
                 f"Notification disappeared before delivery: {notification_id}"
             )
-        await channel.deliver_approval(row)
+        await channel.deliver_notification(row)
 
     async def _deliver_web(
         self,
