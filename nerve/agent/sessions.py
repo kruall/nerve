@@ -799,13 +799,21 @@ class SessionManager:
                 # for as long as it has the thread open.
                 continue
 
-            if session.get("sdk_session_id"):
+            pending_run = await self.db.get_session_run_recovery(sid)
+            if session.get("sdk_session_id") or pending_run:
                 await self.transition(sid, SessionStatus.IDLE, {
-                    "reason": "orphan_recovery",
+                    "reason": (
+                        "orphan_recovery_pending_run"
+                        if pending_run
+                        else "orphan_recovery"
+                    ),
                 })
                 logger.info(
-                    "Orphan recovery: %s -> idle (resumable, sdk=%s)",
-                    sid, session["sdk_session_id"][:12],
+                    "Orphan recovery: %s -> idle (resumable, sdk=%s, "
+                    "pending_run=%s)",
+                    sid,
+                    (session.get("sdk_session_id") or "")[:12],
+                    bool(pending_run),
                 )
             else:
                 # Memorize before marking as stopped (non-resumable, context will be lost)

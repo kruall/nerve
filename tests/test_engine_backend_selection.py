@@ -244,11 +244,9 @@ class TestResumeDroppedEnginePath:
         assert client.resume_dropped is True
 
         session = await db.get_session("s-drop")
-        # The stale id must be GONE (mark_active must not re-persist it);
-        # the fresh id lands at turn end via TurnCompleted.
-        assert session.get("sdk_session_id") in (None, ""), session.get(
-            "sdk_session_id",
-        )
+        # The stale id must be gone, while the fresh id is checkpointed
+        # immediately so a daemon crash before TurnCompleted is resumable.
+        assert session.get("sdk_session_id") == "fresh-thread-9"
         assert session.get("backend") == "codex"
 
 

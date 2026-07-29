@@ -65,7 +65,14 @@ Claude Agent SDK wrapper providing:
 - **Session forking** — branch conversations via SDK `fork_session=True`, exposed through REST API and WebSocket
 - **Session stop** — uses SDK `client.interrupt()` for clean stop, falls back to `task.cancel()`
 - **Persistent channel mappings** — channel-to-session mapping stored in `channel_sessions` table (survives restarts)
-- **Orphan recovery** — on startup, sessions marked `active` in DB but with no live client are transitioned to `idle` (resumable) or `stopped`
+- **Interrupted-turn recovery** — every in-flight engine turn has a durable
+  checkpoint containing its source, original request, and bounded outbound
+  channel context. On startup, after channels are ready, Nerve resumes the
+  native conversation and injects a continuation turn; a second restart during
+  recovery retries from the same checkpoint.
+- **Orphan recovery** — on startup, sessions marked `active` in DB but with no
+  live client are transitioned to `idle` when they have either a native session
+  ID or an interrupted-turn checkpoint, otherwise to `stopped`
 - **Automatic cleanup** — periodic task (every 6h) archives stale sessions (default 30 days) and enforces max session count (default 500)
 - **Per-run cron sessions** — each cron run gets a unique session ID (`cron:{job_id}:{timestamp}`) to prevent unbounded message accumulation
 - AI-generated session titles via lightweight Haiku API call
@@ -125,7 +132,9 @@ Dual-layer memory:
 - **Session rotation** — Main session rotates daily; conversations are indexed into memU on close
 - **Session resume** — SDK session IDs stored as dedicated DB columns; sessions resume with full context via `--resume` flag
 - **Session forking** — Fork conversations from any point; new session branches via SDK `fork_session=True`
-- **Crash recovery** — On startup, sessions marked `active` in DB with no live client are recovered: those with `sdk_session_id` become `idle` (resumable), others become `stopped`
+- **Crash recovery** — On startup, an interrupted-turn checkpoint triggers an
+  automatic continuation after channels are ready. Other orphaned `active`
+  sessions become `idle` when a native session ID exists, otherwise `stopped`.
 
 ### Skills (`nerve/skills/`)
 Filesystem-based skill system (Claude SDK compatible):
@@ -244,6 +253,8 @@ SQLite with WAL mode (schema version derived from the migration head):
 - `messages` — Conversation messages with tool call data and ordered `blocks` JSON column (preserves interleaving of text/thinking/tool_call blocks across page reloads)
 - `session_events` — Append-only lifecycle audit log (created, started, idle, stopped, archived, error)
 - `channel_sessions` — Persistent channel-to-session mapping (survives restarts)
+- `session_run_recovery` — One durable checkpoint per in-flight Nerve-owned
+  turn; deleted after a definitive outcome
 - `discord_session_mirrors` — Durable Nerve-session to Discord audit-thread mapping, including live-message checkpoints
 - `discord_session_mirror_items` — Per-batch Discord message IDs and content hashes for idempotent reconciliation
 - `discord_thread_contexts` — Restart-safe rolling summaries, recent allowed-author messages, and delivery checkpoints for project-forum threads

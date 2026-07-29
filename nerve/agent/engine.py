@@ -219,6 +219,12 @@ class AgentEngine:
         # the UI live instead of buffering invisibly (and then desyncing
         # the next receive_response()). See _idle_stream_watcher.
         self._idle_watchers: dict[str, asyncio.Task] = {}
+        # Durable restart recovery is armed for every in-flight run.  The
+        # database owns the checkpoints; this set only prevents duplicate
+        # dispatch inside one process.
+        self._restart_recovery_tasks: set[asyncio.Task] = set()
+        self._restart_recovery_sessions: set[str] = set()
+        self._shutting_down = False
         # Per-session background-task registry driven by the CLI's
         # task_started / task_updated / task_notification system messages:
         # session_id -> task_id -> {task_id, label, tool, status}.
@@ -606,12 +612,30 @@ class AgentEngine:
         except Exception as e:
             logger.warning("Client disconnect failed: %s", e)
 
+    def begin_shutdown(self) -> None:
+        """Tell active turns that cancellation means restart, not user stop."""
+        self._shutting_down = True
+
     async def shutdown(self) -> None:
         """Disconnect all persistent clients and mark sessions as idle.
 
         No memorization here — the periodic sweep handles that.
         Sessions are marked idle so they can be resumed on next startup.
         """
+        self.begin_shutdown()
+
+        # Stop turns before killing their clients. Their CancelledError path
+        # captures the native thread id and deliberately leaves the durable
+        # recovery checkpoint intact.
+        running_tasks = {
+            task for task in self.sessions._running_tasks.values()
+            if not task.done()
+        }
+        for task in running_tasks:
+            task.cancel()
+        if running_tasks:
+            await asyncio.gather(*running_tasks, return_exceptions=True)
+
         for sid in list(self._idle_watchers):
             self._stop_idle_watcher(sid)
 
@@ -629,6 +653,8 @@ class AgentEngine:
 
         self.sessions._clients.clear()
         self.sessions._client_locks.clear()
+        getattr(self, "_restart_recovery_tasks", set()).clear()
+        getattr(self, "_restart_recovery_sessions", set()).clear()
 
         # Cancel queued background memorizations — the periodic sweep
         # re-indexes anything they would have covered (the watermark is
@@ -1225,13 +1251,26 @@ class AgentEngine:
             client = await backend.create_client(spec)
             if getattr(client, "resume_dropped", False):
                 # The backend had to discard the stale native id (codex
-                # resume-miss recovery) — clear the persisted column AND
-                # the local variable (mark_active below would otherwise
-                # re-persist the stale id); the fresh id lands at turn end.
+                # resume-miss recovery) — never re-persist the stale id.
                 await self.db.update_session_fields(
                     session_id, {"sdk_session_id": None},
                 )
                 sdk_resume_id = None
+
+            # Codex knows its thread id as soon as thread/start or
+            # thread/resume returns. Persist it before the first turn starts:
+            # a daemon crash before TurnCompleted must still have a native
+            # conversation to resume. Claude fills this property after its
+            # first SDK message, so its shutdown path captures it later.
+            native_session_id = getattr(client, "native_session_id", None)
+            if native_session_id:
+                sdk_resume_id = str(native_session_id)
+                await self.db.update_session_fields(
+                    session_id, {"sdk_session_id": sdk_resume_id},
+                )
+                await self.db.bind_native_thread(
+                    backend.name, sdk_resume_id, session_id,
+                )
             self.sessions.set_client(session_id, client)
             self._session_backends[session_id] = backend.name
 
@@ -1354,6 +1393,104 @@ class AgentEngine:
 
     def is_session_running(self, session_id: str) -> bool:
         return self.sessions.is_running(session_id)
+
+    @staticmethod
+    def _restart_recovery_prompt(user_message: str) -> str:
+        """Build the internal continuation turn for one interrupted run."""
+        original = user_message.strip()
+        if not original:
+            original = "(The original turn had no text; inspect the session and workspace state.)"
+        return (
+            "[Nerve restart recovery]\n"
+            "The Nerve process stopped while you were handling the request below. "
+            "Continue the interrupted work from the current conversation and "
+            "workspace state. Inspect what already completed before acting, do "
+            "not repeat external or destructive actions, and finish the task "
+            "normally.\n\n"
+            "Original request:\n"
+            f"{original}"
+        )
+
+    async def recover_interrupted_runs(self) -> int:
+        """Dispatch durable in-flight turns left by a prior process.
+
+        Called by the gateway only after outbound channels and the Codex MCP
+        loopback listener are ready. The checkpoint is retained until the
+        resumed turn reaches a definitive outcome, so another restart during
+        recovery simply tries again.
+        """
+        rows = await self.db.list_session_run_recoveries()
+        scheduled = 0
+        for row in rows:
+            session_id = str(row["session_id"])
+            if (
+                session_id in self._restart_recovery_sessions
+                or self.sessions.is_running(session_id)
+            ):
+                continue
+            session = await self.db.get_session(session_id)
+            if (
+                not session
+                or session.get("status") == SessionStatus.ARCHIVED.value
+                or session.get("source") == "external"
+            ):
+                await self.db.clear_session_run_recovery(session_id)
+                continue
+
+            context = row.get("channel_context")
+            if isinstance(context, dict):
+                self.router.restore_message_context(session_id, context)
+
+            await self.db.mark_session_run_recovering(session_id)
+            source = str(row.get("source") or session.get("source") or "web")
+            channel = row.get("channel")
+            prompt = self._restart_recovery_prompt(
+                str(row.get("user_message") or ""),
+            )
+
+            async def _resume(
+                sid: str = session_id,
+                resume_prompt: str = prompt,
+                resume_source: str = source,
+                resume_channel: str | None = channel,
+            ) -> None:
+                await self.run(
+                    session_id=sid,
+                    user_message=resume_prompt,
+                    source=resume_source,
+                    channel=resume_channel,
+                    internal=True,
+                    _restart_recovery=True,
+                )
+
+            task = asyncio.create_task(
+                _resume(),
+                name=f"restart-recovery:{session_id}",
+            )
+            self._restart_recovery_tasks.add(task)
+            self._restart_recovery_sessions.add(session_id)
+            self.register_task(session_id, task)
+
+            def _done(
+                finished: asyncio.Task, sid: str = session_id,
+            ) -> None:
+                self._restart_recovery_tasks.discard(finished)
+                self._restart_recovery_sessions.discard(sid)
+                if not finished.cancelled() and finished.exception() is not None:
+                    logger.error(
+                        "Restart recovery failed for session %s: %s",
+                        sid, finished.exception(),
+                    )
+
+            task.add_done_callback(_done)
+            scheduled += 1
+
+        if scheduled:
+            logger.warning(
+                "Scheduled restart recovery for %d interrupted session(s)",
+                scheduled,
+            )
+        return scheduled
 
     async def get_client_connected_at_async(self, session_id: str) -> str | None:
         """Async version: get connected_at from DB."""
@@ -2149,6 +2286,7 @@ class AgentEngine:
         images: list[dict[str, Any]] | None = None,
         image_refs: list[dict[str, Any]] | None = None,
         raise_on_error: bool = False,
+        _restart_recovery: bool = False,
     ) -> str:
         """Run the agent for a user message and return the final text response.
 
@@ -2191,15 +2329,41 @@ class AgentEngine:
                     "session_id": session_id,
                     "is_running": True,
                 })
+                completed = False
                 try:
-                    return await self._run_inner(
+                    await self.sessions.get_or_create(
+                        session_id, source=source,
+                    )
+                    if not _restart_recovery:
+                        channel_context = (
+                            self._router.get_message_context(session_id)
+                            if self._router is not None
+                            else None
+                        )
+                        await self.db.set_session_run_recovery(
+                            session_id,
+                            source=source,
+                            channel=channel,
+                            user_message=user_message,
+                            channel_context=channel_context,
+                        )
+                    result = await self._run_inner(
                         session_id, user_message, source, channel, model,
                         effort_override=effort_override,
                         raise_on_error=raise_on_error,
                         internal=internal, images=images,
                         image_refs=image_refs,
                     )
+                    completed = True
+                    return result
                 finally:
+                    # A successful/user-stopped/handled-error turn has a
+                    # definitive outcome. Cancellation caused by daemon
+                    # shutdown is the one path that deliberately retains the
+                    # checkpoint for the next process.
+                    if completed or not self._shutting_down:
+                        with contextlib.suppress(Exception):
+                            await self.db.clear_session_run_recovery(session_id)
                     self.sessions.mark_not_running(session_id)
                     self._active_channel.pop(session_id, None)
                     # Backstop: if _run_inner exited without broadcasting
@@ -2272,6 +2436,19 @@ class AgentEngine:
         # input, not remain bound to the background trigger.
         if channel is not None:
             self._active_channel[session_id] = channel
+        router = getattr(self, "_router", None)
+        channel_context = (
+            router.get_message_context(session_id)
+            if router is not None
+            else None
+        )
+        with contextlib.suppress(Exception):
+            await self.db.append_session_run_recovery_input(
+                session_id,
+                user_message=user_message,
+                channel=channel,
+                channel_context=channel_context,
+            )
 
         try:
             await self._store_user_message(
@@ -2291,6 +2468,25 @@ class AgentEngine:
                 session_id,
             )
         return True
+
+    async def _persist_live_native_session_id(
+        self, session_id: str, st: _TurnState,
+    ) -> None:
+        """Best-effort early native-id capture for an interrupted turn."""
+        if not st.sdk_session_id:
+            client = self.sessions.get_client(session_id)
+            if client is not None:
+                with contextlib.suppress(Exception):
+                    st.sdk_session_id = client.native_session_id
+        if not st.sdk_session_id:
+            return
+        await self.db.update_session_fields(
+            session_id, {"sdk_session_id": st.sdk_session_id},
+        )
+        backend = self._backend_for_live_session(session_id)
+        await self.db.bind_native_thread(
+            backend.name, st.sdk_session_id, session_id,
+        )
 
     async def _store_user_message(
         self,
@@ -2555,6 +2751,15 @@ class AgentEngine:
                     break  # success — exit retry loop
 
         except asyncio.CancelledError:
+            if self._shutting_down:
+                await self._persist_live_native_session_id(session_id, st)
+                logger.warning(
+                    "Session %s interrupted by daemon shutdown; restart "
+                    "checkpoint retained",
+                    session_id,
+                )
+                raise
+
             logger.info("Session %s cancelled by user", session_id)
             partial = st.full_response_text + (
                 "\n\n[Stopped by user]"
@@ -2569,15 +2774,7 @@ class AgentEngine:
             # normal source (TurnCompleted) never arrives on an
             # interrupted turn, so fall back to the live client's early-
             # captured id.
-            if not st.sdk_session_id:
-                _live = self.sessions.get_client(session_id)
-                if _live is not None:
-                    with contextlib.suppress(Exception):
-                        st.sdk_session_id = _live.native_session_id
-            if st.sdk_session_id:
-                await self.db.update_session_fields(
-                    session_id, {"sdk_session_id": st.sdk_session_id},
-                )
+            await self._persist_live_native_session_id(session_id, st)
             await self.sessions.mark_stopped(session_id)
             self._stop_idle_watcher(session_id)
             unregister_handler(session_id)
@@ -2607,6 +2804,15 @@ class AgentEngine:
             return partial
 
         except Exception as e:
+            if self._shutting_down:
+                await self._persist_live_native_session_id(session_id, st)
+                logger.warning(
+                    "Session %s runtime ended during daemon shutdown; restart "
+                    "checkpoint retained: %s",
+                    session_id, e,
+                )
+                raise
+
             error_msg = f"Agent error: {e}"
             run_error = e
             logger.error(error_msg, exc_info=True)

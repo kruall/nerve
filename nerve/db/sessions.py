@@ -108,6 +108,10 @@ class SessionStore:
 
     async def delete_session(self, session_id: str) -> None:
         async with self._atomic():
+            await self.db.execute(
+                "DELETE FROM session_run_recovery WHERE session_id = ?",
+                (session_id,),
+            )
             await self.db.execute("DELETE FROM session_file_snapshots WHERE session_id = ?", (session_id,))
             await self.db.execute("DELETE FROM session_events WHERE session_id = ?", (session_id,))
             await self.db.execute("DELETE FROM session_usage WHERE session_id = ?", (session_id,))
@@ -269,6 +273,118 @@ class SessionStore:
                 except (json.JSONDecodeError, TypeError):
                     pass
         return rows
+
+    # --- Restart recovery checkpoints (V43) ---
+
+    async def set_session_run_recovery(
+        self,
+        session_id: str,
+        *,
+        source: str,
+        channel: str | None,
+        user_message: str,
+        channel_context: dict | None,
+    ) -> None:
+        """Checkpoint one in-flight engine turn."""
+        now = datetime.now(timezone.utc).isoformat()
+        await self._write(
+            """INSERT INTO session_run_recovery
+                   (session_id, source, channel, user_message, channel_context,
+                    started_at, recovery_attempts, last_recovery_at)
+               VALUES (?, ?, ?, ?, ?, ?, 0, NULL)
+               ON CONFLICT(session_id) DO UPDATE SET
+                   source = excluded.source,
+                   channel = excluded.channel,
+                   user_message = excluded.user_message,
+                   channel_context = excluded.channel_context,
+                   started_at = excluded.started_at,
+                   recovery_attempts = 0,
+                   last_recovery_at = NULL""",
+            (
+                session_id,
+                source,
+                channel,
+                user_message,
+                json.dumps(channel_context) if channel_context else None,
+                now,
+            ),
+        )
+
+    async def list_session_run_recoveries(self) -> list[dict]:
+        """Return interrupted turns, oldest first."""
+        async with self.db.execute(
+            "SELECT * FROM session_run_recovery ORDER BY started_at, session_id"
+        ) as cursor:
+            rows = [dict(row) async for row in cursor]
+        for row in rows:
+            raw_context = row.get("channel_context")
+            if raw_context:
+                try:
+                    row["channel_context"] = json.loads(raw_context)
+                except (json.JSONDecodeError, TypeError):
+                    row["channel_context"] = None
+        return rows
+
+    async def get_session_run_recovery(
+        self, session_id: str,
+    ) -> dict | None:
+        async with self.db.execute(
+            "SELECT * FROM session_run_recovery WHERE session_id = ?",
+            (session_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        raw_context = result.get("channel_context")
+        if raw_context:
+            try:
+                result["channel_context"] = json.loads(raw_context)
+            except (json.JSONDecodeError, TypeError):
+                result["channel_context"] = None
+        return result
+
+    async def mark_session_run_recovering(self, session_id: str) -> None:
+        """Record a startup recovery attempt without consuming its checkpoint."""
+        now = datetime.now(timezone.utc).isoformat()
+        await self._write(
+            """UPDATE session_run_recovery
+               SET recovery_attempts = recovery_attempts + 1,
+                   last_recovery_at = ?
+               WHERE session_id = ?""",
+            (now, session_id),
+        )
+
+    async def append_session_run_recovery_input(
+        self,
+        session_id: str,
+        *,
+        user_message: str,
+        channel: str | None,
+        channel_context: dict | None,
+    ) -> None:
+        """Include accepted steering input in the current checkpoint."""
+        suffix = f"\n\n[Steered follow-up]\n{user_message}"
+        await self._write(
+            """UPDATE session_run_recovery
+               SET user_message = user_message || ?,
+                   channel = COALESCE(?, channel),
+                   channel_context = COALESCE(?, channel_context)
+               WHERE session_id = ?""",
+            (
+                suffix,
+                channel,
+                json.dumps(channel_context) if channel_context else None,
+                session_id,
+            ),
+        )
+
+    async def clear_session_run_recovery(self, session_id: str) -> None:
+        """Delete a checkpoint after a definitive turn outcome."""
+        await self._write(
+            "DELETE FROM session_run_recovery WHERE session_id = ?",
+            (session_id,),
+        )
 
     # --- Channel session mapping (V3) ---
 

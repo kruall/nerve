@@ -271,6 +271,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Cron service failed to start: %s", e)
 
+    # Outbound channels and the Codex MCP loopback are now ready. Resume
+    # turns whose durable checkpoint survived the previous process before
+    # normal background maintenance begins.
+    try:
+        await _engine.recover_interrupted_runs()
+    except Exception:
+        logger.exception("Interrupted-session recovery failed to start")
+
     # Periodic session cleanup. Default cadence is every 6 hours (unchanged);
     # it tightens to hourly only when the opt-in interactive idle auto-close
     # (sessions.interactive_archive_after_hours > 0) is enabled and needs finer resolution.
@@ -509,6 +517,11 @@ async def lifespan(app: FastAPI):
         logger.error("Failed to send startup notification: %s", e)
 
     yield
+
+    # Everything below tears down dependencies used by active turns. From
+    # this point cancellation or transport failure means daemon shutdown,
+    # never an explicit user stop, so their durable checkpoints must survive.
+    _engine.begin_shutdown()
 
     # Stop the loopback listener before the manager so no new requests
     # arrive while the MCP task group is shutting down.

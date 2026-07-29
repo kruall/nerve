@@ -94,6 +94,25 @@ class ChannelRouter:
         context = self._message_context.get(session_id)
         return dict(context) if context is not None else None
 
+    def restore_message_context(
+        self, session_id: str, context: dict[str, Any],
+    ) -> bool:
+        """Restore bounded outbound context from a restart checkpoint."""
+        channel_name = context.get("channel_name")
+        target = context.get("target")
+        if (
+            not isinstance(channel_name, str)
+            or channel_name not in self._channels
+            or not isinstance(target, (str, int))
+        ):
+            return False
+        self._message_context[session_id] = {
+            "channel_name": channel_name,
+            "target": str(target),
+            "message_id": context.get("message_id"),
+        }
+        return True
+
     @property
     def channels(self) -> dict[str, BaseChannel]:
         """All registered channels (read-only view)."""
