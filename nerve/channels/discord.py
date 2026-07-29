@@ -18,6 +18,7 @@ from collections import OrderedDict
 from typing import Any, TYPE_CHECKING
 
 import discord
+from discord import app_commands
 
 from nerve.channels.base import (
     BaseChannel,
@@ -45,6 +46,9 @@ _MAX_THREAD_NAME_LENGTH = 100
 _MAX_REPLY_CONTEXT_LENGTH = 500
 _RECENT_MESSAGE_IDS = 4096
 _THREAD_NAME_PREFIX = "Nerve · "
+_AUTO_MODEL_TIER = "auto"
+
+
 def split_discord_message(text: str, limit: int = _MAX_MESSAGE_LENGTH) -> list[str]:
     """Split text into non-empty Discord-sized messages."""
     remaining = text.strip()
@@ -79,10 +83,12 @@ class DiscordChannel(BaseChannel):
         context_summarizer: ContextSummarizer | None = None,
         skill_manager: SkillManager | None = None,
     ):
+        self._nerve_config = config
         self.config = config.discord
         self.router = router
         self.db = db
         self._client: discord.Client | None = None
+        self._command_tree: app_commands.CommandTree | None = None
         self._client_task: asyncio.Task[None] | None = None
         self._post_ready_task: asyncio.Task[None] | None = None
         self._session_mirror: Any | None = None
@@ -217,6 +223,10 @@ class DiscordChannel(BaseChannel):
             raise ValueError(
                 "discord.presence_refresh_interval_seconds must be at least 60"
             )
+        if len(self._nerve_config.codex.model_tiers) > 24:
+            raise ValueError(
+                "Discord supports at most 24 codex.model_tiers plus Auto"
+            )
 
     def _load_token(self) -> str:
         if self.config.bot_token:
@@ -250,6 +260,32 @@ class DiscordChannel(BaseChannel):
         intents.guild_messages = True
         intents.message_content = True
         client = discord.Client(intents=intents)
+        tree = app_commands.CommandTree(client)
+        self._command_tree = tree
+        guild = discord.Object(id=self.config.guild_id)
+
+        @tree.command(
+            name="model",
+            description="Выбрать модель для текущей Nerve-сессии",
+            guild=guild,
+        )
+        @app_commands.describe(
+            tier="Auto включает маршрутизацию; остальные варианты фиксируют tier",
+        )
+        @app_commands.choices(tier=[
+            app_commands.Choice(
+                name="Auto — адаптивный выбор", value=_AUTO_MODEL_TIER,
+            ),
+            *[
+                app_commands.Choice(name=tier.id, value=tier.id)
+                for tier in self._nerve_config.codex.model_tiers
+            ],
+        ])
+        async def model_command(
+            interaction: discord.Interaction,
+            tier: app_commands.Choice[str],
+        ) -> None:
+            await self._handle_model_command(interaction, tier.value)
 
         @client.event
         async def on_ready() -> None:
@@ -260,6 +296,112 @@ class DiscordChannel(BaseChannel):
             await self._on_message(message)
 
         return client
+
+    async def _sync_application_commands(self) -> None:
+        """Synchronize Nerve's guild-only commands without global propagation."""
+        if self._command_tree is None:
+            return
+        guild = discord.Object(id=self.config.guild_id)
+        commands = await self._command_tree.sync(guild=guild)
+        logger.info(
+            "Synced %d Discord application command(s) to guild %s",
+            len(commands), self.config.guild_id,
+        )
+
+    async def _respond_to_interaction(
+        self,
+        interaction: discord.Interaction,
+        text: str,
+    ) -> None:
+        """Send one private interaction response, including test doubles."""
+        await interaction.response.send_message(text, ephemeral=True)
+
+    async def _handle_model_command(
+        self,
+        interaction: discord.Interaction,
+        tier_id: str,
+    ) -> None:
+        """Apply a user-selected Codex tier to this Discord thread's session."""
+        guild_id = int(getattr(interaction, "guild_id", 0) or 0)
+        channel_id = int(getattr(interaction, "channel_id", 0) or 0)
+        user_id = int(getattr(getattr(interaction, "user", None), "id", 0) or 0)
+        if guild_id != self.config.guild_id:
+            await self._respond_to_interaction(
+                interaction, "Эта команда доступна только в настроенном сервере Nerve.",
+            )
+            return
+        if user_id not in self._allowed_authors:
+            await self._respond_to_interaction(
+                interaction, "У вас нет доступа к настройке модели Nerve.",
+            )
+            return
+        if not channel_id:
+            await self._respond_to_interaction(
+                interaction, "Откройте команду внутри форумной темы Nerve.",
+            )
+            return
+
+        mapping = await self.db.get_channel_session(
+            f"discord:{guild_id}:{channel_id}",
+        )
+        session_id = (mapping or {}).get("session_id")
+        if not session_id:
+            await self._respond_to_interaction(
+                interaction,
+                "В этой теме ещё нет Nerve-сессии. Сначала отправьте сообщение боту.",
+            )
+            return
+        binding = await self.db.get_discord_session_binding(session_id)
+        if (
+            binding is None
+            or str(binding["guild_id"]) != str(guild_id)
+            or str(binding["thread_id"]) != str(channel_id)
+        ):
+            await self._respond_to_interaction(
+                interaction, "Эта тема не привязана к текущей Nerve-сессии.",
+            )
+            return
+        session = await self.db.get_session(session_id)
+        if session is None:
+            await self._respond_to_interaction(
+                interaction, "Nerve-сессия для этой темы больше не существует.",
+            )
+            return
+        if session.get("backend") != "codex":
+            await self._respond_to_interaction(
+                interaction, "Выбор tier доступен только для Codex-сессий.",
+            )
+            return
+        if self.router.engine.sessions.is_running(session_id):
+            await self._respond_to_interaction(
+                interaction,
+                "Дождитесь завершения текущего хода, затем выберите модель.",
+            )
+            return
+
+        if tier_id == _AUTO_MODEL_TIER:
+            await self.db.update_session_fields(session_id, {"model_pinned": 0})
+            await self._respond_to_interaction(
+                interaction,
+                "Модель: Auto. Для следующих ходов включён адаптивный routing.",
+            )
+            return
+
+        tier = self._nerve_config.codex.tier(tier_id)
+        if tier is None:
+            await self._respond_to_interaction(
+                interaction, "Неизвестный tier модели.",
+            )
+            return
+        await self.db.update_session_fields(session_id, {
+            "model": tier.model,
+            "model_tier": tier.id,
+            "reasoning_effort": tier.effort,
+            "model_pinned": 1,
+        })
+        await self._respond_to_interaction(
+            interaction, f"Модель: {tier.id}. Tier закреплён для следующих ходов.",
+        )
 
     async def start(self) -> None:
         if self._client_task is not None:
@@ -378,6 +520,13 @@ class DiscordChannel(BaseChannel):
                 raise ValueError(
                     "Discord bot cannot access configured channel(s): "
                     + ", ".join(str(value) for value in sorted(missing))
+                )
+            try:
+                await self._sync_application_commands()
+            except Exception:
+                logger.exception(
+                    "Discord slash-command sync failed; continuing without "
+                    "updated application commands"
                 )
             if (
                 self._post_ready_task is None

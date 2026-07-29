@@ -76,9 +76,22 @@ def _channel() -> DiscordChannel:
     db.get_discord_thread_context = AsyncMock(return_value=None)
     db.upsert_discord_thread_context = AsyncMock()
     db.mark_discord_thread_context_delivered = AsyncMock()
-    channel = DiscordChannel(cfg, MagicMock(), db)
+    router = MagicMock()
+    router.engine.sessions.is_running.return_value = False
+    channel = DiscordChannel(cfg, router, db)
     channel._bot_user_id = DOGGY
     return channel
+
+
+def _interaction(
+    *, guild_id: int = GUILD, channel_id: int = YDB_THREAD, user_id: int = USER,
+):
+    interaction = MagicMock(spec=discord.Interaction)
+    interaction.guild_id = guild_id
+    interaction.channel_id = channel_id
+    interaction.user = SimpleNamespace(id=user_id)
+    interaction.response.send_message = AsyncMock()
+    return interaction
 
 
 def _persistent_context_store(
@@ -113,6 +126,96 @@ def _persistent_context_store(
         mark_delivered
     )
     return states
+
+
+def test_model_command_is_registered_for_configured_guild_only():
+    channel = _channel()
+    client = channel._build_client()
+
+    assert client.intents.guilds is True
+    assert channel._command_tree is not None
+    commands = channel._command_tree.get_commands(
+        guild=discord.Object(id=GUILD),
+    )
+    assert [command.name for command in commands] == ["model"]
+    command = commands[0]
+    tier = command.parameters[0]
+    assert [choice.value for choice in tier.choices] == [
+        "auto", "luna-high", "terra-high", "sol-medium", "sol-xhigh",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_model_command_pins_selected_tier_for_bound_codex_session():
+    channel = _channel()
+    interaction = _interaction()
+    channel.db.get_channel_session = AsyncMock(
+        return_value={"session_id": "session-1"},
+    )
+    channel.db.get_discord_session_binding = AsyncMock(return_value={
+        "guild_id": str(GUILD), "thread_id": str(YDB_THREAD),
+    })
+    channel.db.get_session = AsyncMock(return_value={"backend": "codex"})
+    channel.db.update_session_fields = AsyncMock()
+
+    await channel._handle_model_command(interaction, "sol-medium")
+
+    channel.db.update_session_fields.assert_awaited_once_with("session-1", {
+        "model": "gpt-5.6-sol",
+        "model_tier": "sol-medium",
+        "reasoning_effort": "medium",
+        "model_pinned": 1,
+    })
+    interaction.response.send_message.assert_awaited_once_with(
+        "Модель: sol-medium. Tier закреплён для следующих ходов.",
+        ephemeral=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_model_command_auto_unpins_bound_codex_session():
+    channel = _channel()
+    interaction = _interaction()
+    channel.db.get_channel_session = AsyncMock(
+        return_value={"session_id": "session-1"},
+    )
+    channel.db.get_discord_session_binding = AsyncMock(return_value={
+        "guild_id": str(GUILD), "thread_id": str(YDB_THREAD),
+    })
+    channel.db.get_session = AsyncMock(return_value={"backend": "codex"})
+    channel.db.update_session_fields = AsyncMock()
+
+    await channel._handle_model_command(interaction, "auto")
+
+    channel.db.update_session_fields.assert_awaited_once_with(
+        "session-1", {"model_pinned": 0},
+    )
+    interaction.response.send_message.assert_awaited_once_with(
+        "Модель: Auto. Для следующих ходов включён адаптивный routing.",
+        ephemeral=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_model_command_rejects_running_session_without_changing_it():
+    channel = _channel()
+    interaction = _interaction()
+    channel.db.get_channel_session = AsyncMock(
+        return_value={"session_id": "session-1"},
+    )
+    channel.db.get_discord_session_binding = AsyncMock(return_value={
+        "guild_id": str(GUILD), "thread_id": str(YDB_THREAD),
+    })
+    channel.db.get_session = AsyncMock(return_value={"backend": "codex"})
+    channel.router.engine.sessions.is_running.return_value = True
+
+    await channel._handle_model_command(interaction, "sol-medium")
+
+    channel.db.update_session_fields.assert_not_called()
+    interaction.response.send_message.assert_awaited_once_with(
+        "Дождитесь завершения текущего хода, затем выберите модель.",
+        ephemeral=True,
+    )
 
 
 def _message(

@@ -354,6 +354,9 @@ Enable the **Message Content Intent** for the bot in Discord's Developer
 Portal. Grant only the channel permissions required by the deployment:
 View Channels, Read Message History, Send Messages, Create Public Threads,
 Send Messages in Threads, and Attach Files when the skill forum is enabled.
+Authorize the Discord application with the `applications.commands` OAuth2
+scope: Nerve synchronizes its slash commands only to `discord.guild_id`, so
+they are available without waiting for global-command propagation.
 Pinning the approval inbox and assigning
 forum tags additionally require Manage Threads; creating, updating, or
 deleting the forum's available tags requires Manage Channels. Administrator
@@ -372,6 +375,16 @@ discord:
   allowed_author_ids: [123456789012345681]
   require_mention: true
 ```
+
+### Discord slash commands
+
+`/model` is available only in the configured guild. Its `tier` argument is a
+Discord choice list containing `Auto` and the configured `codex.model_tiers`.
+Run it inside a Nerve-managed Discord conversation or project-forum thread:
+choosing a tier pins the model for subsequent Codex turns, while `Auto` removes
+the pin and resumes adaptive routing. The command is restricted to
+`discord.allowed_author_ids` and refuses to change a session while it is
+running.
 
 ### Discord forum-tag tools
 
