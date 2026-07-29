@@ -228,6 +228,7 @@ async def lifespan(app: FastAPI):
                 _engine.router,
                 db,
                 context_summarizer=_engine.summarize_text,
+                skill_manager=_engine._skill_manager,
             )
             candidate.set_notification_service(notification_service)
             _engine.register_channel(candidate)

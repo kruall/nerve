@@ -285,6 +285,7 @@ class DiscordConfig:
     guild_id: int = 0
     channel_ids: list[int] = field(default_factory=list)
     task_forums: dict[str, int] = field(default_factory=dict)
+    skills_forum_id: int = 0
     audit_forum_id: int = 0
     audit_batch_window_seconds: float = 60.0
     presence_enabled: bool = False
@@ -308,6 +309,7 @@ class DiscordConfig:
                 for project, channel_id in raw_forums.items()
                 if str(project).strip()
             },
+            skills_forum_id=int(d.get("skills_forum_id", 0) or 0),
             audit_forum_id=int(d.get("audit_forum_id", 0) or 0),
             audit_batch_window_seconds=float(
                 d.get("audit_batch_window_seconds", 60.0)

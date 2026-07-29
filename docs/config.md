@@ -188,15 +188,16 @@ WebSocket. It does not require an inbound listener or a public Nerve endpoint.
 | `discord.guild_id` | int | `0` | The only server the Nerve instance accepts |
 | `discord.channel_ids` | list[int] | `[]` | Ordinary text channels where a mention starts a conversation thread |
 | `discord.task_forums` | map[string, int] | `{}` | Project name to Discord forum-channel ID |
+| `discord.skills_forum_id` | int | `0` | Shared forum where Nerve publishes one managed thread per local skill |
 | `discord.audit_forum_id` | int | `0` | Outbound-only forum where Nerve mirrors one thread per session |
 | `discord.audit_batch_window_seconds` | float | `60` | Window used to combine adjacent audit activity before updating Discord; terminal events flush immediately |
 | `discord.presence_enabled` | bool | `false` | Show a compact operational summary in the Discord bot activity |
 | `discord.presence_refresh_interval_seconds` | float | `300` | Refresh interval for Codex quota shown in the bot activity; minimum 60 seconds |
 | `discord.allowed_author_ids` | list[int] | `[]` | Human and peer-bot IDs allowed to invoke Nerve |
-| `discord.require_mention` | bool | `true` | Require a direct mention or a reply to the bot in ordinary channels and project-forum threads |
+| `discord.require_mention` | bool | `true` | Require a direct mention or bot reply in ordinary channels plus project/skill-forum threads |
 
 The adapter is fail-closed: enabling it without a guild, at least one inbound
-channel/project forum or an outbound audit forum, and a token fails startup.
+channel/project/skill forum or an outbound audit forum, and a token fails startup.
 An author allowlist is additionally required whenever inbound targets are
 configured. A forum post is a thread, so the forum's parent ID belongs in
 `task_forums`. In an ordinary text channel, a direct mention starts a Discord
@@ -239,6 +240,30 @@ The session stream and final answer remain internal. An agent publishes a
 deliberate Discord-visible reply only through the session-bound `discord_send`
 MCP tool. The tool cannot select a destination: it sends only to the
 conversation or project-forum thread that drove the active Discord turn.
+
+When `discord.skills_forum_id` is configured, Nerve reconciles the forum with
+the local `workspace/skills/` registry after every restart and after skill
+creation, update, or filesystem re-discovery. Each local skill gets one thread
+named after its stable skill ID. The starter post and every changed revision
+carry an exact `SKILL.md` file attachment plus a SHA-256 marker, so restarts do
+not duplicate an already published revision. Revision messages remain in the
+thread as a handoff history; the local workspace file remains the source of
+truth.
+
+Managed threads created by another Nerve agent are also recognized from their
+starter marker, even when that skill is not installed locally. This allows
+several allowlisted agents to share the forum without requiring identical
+skill registries. Messages in a managed skill thread use the same invocation
+policy as project-forum messages: a direct bot mention or reply is required
+when `discord.require_mention` is true, and allowed non-invoking messages are
+retained as bounded context. Agent prompts identify the bound skill and direct
+local modifications through `skill_get` and `skill_update`; a remote-only skill
+is never imported merely because its thread exists.
+
+Skill instructions and attachments are visible to every Discord member who can
+read the configured forum. Do not publish secrets in skills, and use Discord
+forum permissions appropriate for the agents and people who should receive
+them.
 
 When `discord.audit_forum_id` is configured, Nerve creates one outbound-only
 forum thread for every session created while the mirror is enabled, regardless
@@ -307,7 +332,8 @@ definition through the approval-gated forum-tag tools with `project: AUDIT`.
 Enable the **Message Content Intent** for the bot in Discord's Developer
 Portal. Grant only the channel permissions required by the deployment:
 View Channels, Read Message History, Send Messages, Create Public Threads,
-and Send Messages in Threads. Pinning the approval inbox and assigning
+Send Messages in Threads, and Attach Files when the skill forum is enabled.
+Pinning the approval inbox and assigning
 forum tags additionally require Manage Threads; creating, updating, or
 deleting the forum's available tags requires Manage Channels. Administrator
 is not required.

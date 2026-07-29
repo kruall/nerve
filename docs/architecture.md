@@ -148,6 +148,7 @@ Filesystem-based skill system (Claude SDK compatible):
 - SQLite index for metadata + usage statistics (`skills`, `skill_usage` tables)
 - Progressive disclosure: name+description in system prompt, full content loaded on demand via `skill_get` tool
 - Agent can create/update skills dynamically via `skill_create`/`skill_update` MCP tools
+- Optional Discord skill forum projects exact SKILL.md revisions into one discussion thread per stable skill ID for cross-agent handoff
 - Automated extraction: `skill-extractor` cron identifies repeated workflows and proposes new skills via task+plan system
 - Automated revision: `skill-reviser` cron reviews existing skills for accuracy, completeness, and quality
 - Plan approval handler creates/updates skills directly when approving skill-extractor/skill-reviser proposals

@@ -18,6 +18,8 @@ TEXT_CHANNEL = 200
 CONVERSATION_THREAD = 201
 YDB_FORUM = 300
 YDB_THREAD = 301
+SKILLS_FORUM = 320
+SKILL_THREAD = 321
 AUDIT_FORUM = 350
 USER = 400
 PEER_BOT = 401
@@ -213,6 +215,28 @@ def test_project_forum_thread_accepts_reply_to_bot_without_mention():
     )) is True
 
 
+def test_managed_skill_thread_accepts_mention_and_rejects_unmentioned_message():
+    channel = _channel()
+    channel.config.skills_forum_id = SKILLS_FORUM
+    channel._thread_context.project_forum_ids.add(SKILLS_FORUM)
+    channel._skill_forum = SimpleNamespace(
+        skill_id_for_thread=lambda thread_id: (
+            "nerve-dev" if thread_id == SKILL_THREAD else ""
+        ),
+    )
+
+    assert channel._accepts(_message(
+        channel_id=SKILL_THREAD,
+        parent_id=SKILLS_FORUM,
+    )) is True
+    assert channel._accepts(_message(
+        channel_id=SKILL_THREAD,
+        parent_id=SKILLS_FORUM,
+        content="discussion without invocation",
+        mentions=[],
+    )) is False
+
+
 def test_project_forum_thread_rejects_reply_to_other_author_without_mention():
     assert _channel()._accepts(_message(
         channel_id=YDB_THREAD,
@@ -260,6 +284,23 @@ def test_mention_is_removed_from_agent_prompt():
     assert _channel()._message_text(
         _message(content=f"hello <@!{DOGGY}> there"),
     ) == "hello  there"
+
+
+def test_attachment_coordinates_are_added_to_agent_visible_message_text():
+    channel = _channel()
+    message = _message(content="")
+    message.attachments = [
+        SimpleNamespace(
+            filename="nerve-dev-SKILL.md",
+            size=1234,
+            url="https://cdn.discord.test/skill",
+        ),
+    ]
+
+    assert channel._message_text(message) == (
+        "[Discord attachment: nerve-dev-SKILL.md; 1234 bytes; "
+        "https://cdn.discord.test/skill]"
+    )
 
 
 @pytest.mark.asyncio
@@ -356,6 +397,39 @@ async def test_concurrent_gateway_and_backlog_delivery_is_dispatched_once():
     await first
 
     channel.router.handle_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_skill_thread_created_by_peer_is_registered_before_acceptance():
+    channel = _channel()
+    channel.config.skills_forum_id = SKILLS_FORUM
+    channel._thread_context.project_forum_ids.add(SKILLS_FORUM)
+    known: dict[int, str] = {}
+
+    async def register(thread):
+        known[int(thread.id)] = "shared-skill"
+        return "shared-skill"
+
+    channel._skill_forum = SimpleNamespace(
+        register_thread=AsyncMock(side_effect=register),
+        skill_id_for_thread=lambda thread_id: known.get(thread_id, ""),
+    )
+    channel._skill_manager = SimpleNamespace(
+        get_skill=AsyncMock(return_value=None),
+    )
+    channel.router.handle_message = AsyncMock()
+    message = _message(
+        channel_id=SKILL_THREAD,
+        parent_id=SKILLS_FORUM,
+    )
+
+    await channel._ingest(message)
+
+    channel._skill_forum.register_thread.assert_awaited_once_with(
+        message.channel,
+    )
+    inbound = channel.router.handle_message.await_args.args[0]
+    assert inbound.metadata["discord_skill_id"] == "shared-skill"
 
 
 @pytest.mark.asyncio
@@ -562,6 +636,58 @@ async def test_dispatch_maps_forum_thread_to_project():
     assert inbound.metadata["discord_parent_channel_id"] == YDB_FORUM
     assert inbound.metadata["discord_project"] == "YDB"
     assert "проекта YDB" in inbound.text
+
+
+@pytest.mark.asyncio
+async def test_dispatch_binds_managed_skill_thread_and_local_source_of_truth():
+    channel = _channel()
+    channel.router.handle_message = AsyncMock()
+    channel.config.skills_forum_id = SKILLS_FORUM
+    channel._skill_forum = SimpleNamespace(
+        skill_id_for_thread=lambda thread_id: (
+            "nerve-dev" if thread_id == SKILL_THREAD else ""
+        ),
+    )
+    channel._skill_manager = SimpleNamespace(
+        get_skill=AsyncMock(return_value=SimpleNamespace(id="nerve-dev")),
+    )
+
+    await channel._dispatch(_message(
+        channel_id=SKILL_THREAD,
+        parent_id=SKILLS_FORUM,
+    ))
+
+    inbound = channel.router.handle_message.await_args.args[0]
+    assert inbound.channel_key == f"discord:{GUILD}:{SKILL_THREAD}"
+    assert inbound.session_title == "Discord · SKILL · nerve-dev"
+    assert inbound.metadata["discord_project"] == ""
+    assert inbound.metadata["discord_skill_id"] == "nerve-dev"
+    assert "skill_get" in inbound.text
+    assert "skill_update" in inbound.text
+    assert "Локальный файл — источник истины" in inbound.text
+
+
+@pytest.mark.asyncio
+async def test_dispatch_marks_remote_only_skill_without_auto_import():
+    channel = _channel()
+    channel.router.handle_message = AsyncMock()
+    channel.config.skills_forum_id = SKILLS_FORUM
+    channel._skill_forum = SimpleNamespace(
+        skill_id_for_thread=lambda _thread_id: "remote-skill",
+    )
+    channel._skill_manager = SimpleNamespace(
+        get_skill=AsyncMock(return_value=None),
+    )
+
+    await channel._dispatch(_message(
+        channel_id=SKILL_THREAD,
+        parent_id=SKILLS_FORUM,
+    ))
+
+    inbound = channel.router.handle_message.await_args.args[0]
+    assert inbound.metadata["discord_skill_id"] == "remote-skill"
+    assert "нет в локальном workspace" in inbound.text
+    assert "Не импортируй его без явной просьбы" in inbound.text
 
 
 @pytest.mark.asyncio
@@ -775,6 +901,59 @@ async def test_new_forum_thread_created_while_offline_is_replayed():
     )
 
 
+@pytest.mark.asyncio
+async def test_new_managed_skill_thread_created_while_offline_is_replayed():
+    channel = _channel()
+    channel._text_channels.clear()
+    channel._project_forums.clear()
+    channel.config.skills_forum_id = SKILLS_FORUM
+    channel._thread_context.project_forum_ids = {SKILLS_FORUM}
+    known = {SKILL_THREAD: "shared-skill"}
+    channel._skill_forum = SimpleNamespace(
+        register_thread=AsyncMock(return_value="shared-skill"),
+        skill_id_for_thread=lambda thread_id: known.get(thread_id, ""),
+    )
+    channel._skill_manager = SimpleNamespace(
+        get_skill=AsyncMock(return_value=None),
+    )
+    thread = _HistoryChannel(
+        SKILL_THREAD,
+        [],
+        last_message_id=778,
+        parent_id=SKILLS_FORUM,
+        name="shared-skill",
+    )
+    missed = _message(
+        channel_id=SKILL_THREAD,
+        parent_id=SKILLS_FORUM,
+        content=f"<@{DOGGY}> import this skill",
+    )
+    missed.id = 778
+    missed.channel = thread
+    thread.messages = [missed]
+    forum = _ForumChannel([], last_message_id=SKILL_THREAD)
+    forum.id = SKILLS_FORUM
+    guild = MagicMock()
+    guild.active_threads = AsyncMock(return_value=[thread])
+    guild.get_channel.return_value = forum
+    channel.db.get_sync_cursor = AsyncMock(side_effect=[
+        str(SKILL_THREAD - 1),
+        None,
+        None,
+    ])
+    channel.router.handle_message = AsyncMock()
+
+    await channel._sync_backlog(guild)
+
+    channel.router.handle_message.assert_awaited_once()
+    inbound = channel.router.handle_message.await_args.args[0]
+    assert inbound.metadata["discord_skill_id"] == "shared-skill"
+    assert channel.db.set_sync_cursor.await_args_list[-1].args == (
+        f"discord-forum:{GUILD}:{SKILLS_FORUM}",
+        str(SKILL_THREAD),
+    )
+
+
 def test_split_prefers_newline_and_never_returns_empty_chunks():
     chunks = split_discord_message("alpha\nbeta gamma", limit=10)
     assert chunks == ["alpha", "beta gamma"]
@@ -810,6 +989,31 @@ async def test_ready_validates_bot_guild_and_configured_channels():
     assert channel._bot_user_id == DOGGY
     assert channel._post_ready_task is not None
     await channel._post_ready_task
+    channel._sync_backlog.assert_awaited_once_with(guild)
+
+
+@pytest.mark.asyncio
+async def test_post_ready_starts_configured_skill_forum_projection():
+    channel = _channel()
+    channel.config.skills_forum_id = SKILLS_FORUM
+    channel._skill_manager = MagicMock()
+    channel._client = MagicMock()
+    channel._sync_backlog = AsyncMock()
+    guild = MagicMock()
+
+    with patch(
+        "nerve.channels.discord_skills.DiscordSkillForum",
+    ) as projection_cls:
+        projection_cls.return_value.start = AsyncMock()
+        await channel._run_post_ready(guild)
+
+    projection_cls.assert_called_once_with(
+        client=channel._client,
+        skill_manager=channel._skill_manager,
+        guild_id=GUILD,
+        forum_id=SKILLS_FORUM,
+    )
+    projection_cls.return_value.start.assert_awaited_once_with(guild)
     channel._sync_backlog.assert_awaited_once_with(guild)
 
 
@@ -1023,6 +1227,30 @@ def test_validation_allows_outbound_only_audit_forum():
         "audit_forum_id": 350,
     }})
     DiscordChannel(cfg, MagicMock(), MagicMock())._validate_config()
+
+
+def test_validation_allows_skill_forum_as_only_inbound_target():
+    cfg = NerveConfig.from_dict({"discord": {
+        "enabled": True,
+        "bot_token": "synthetic-token",
+        "guild_id": GUILD,
+        "skills_forum_id": SKILLS_FORUM,
+        "allowed_author_ids": [USER],
+    }})
+    DiscordChannel(cfg, MagicMock(), MagicMock())._validate_config()
+
+
+def test_validation_rejects_skill_forum_reused_as_project_forum():
+    cfg = NerveConfig.from_dict({"discord": {
+        "enabled": True,
+        "bot_token": "synthetic-token",
+        "guild_id": GUILD,
+        "task_forums": {"YDB": SKILLS_FORUM},
+        "skills_forum_id": SKILLS_FORUM,
+        "allowed_author_ids": [USER],
+    }})
+    with pytest.raises(ValueError, match="skills_forum_id"):
+        DiscordChannel(cfg, MagicMock(), MagicMock())._validate_config()
 
 
 def test_validation_rejects_negative_audit_batch_window():

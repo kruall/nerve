@@ -244,6 +244,7 @@ class TestDiscordConfig:
         assert cfg.guild_id == 0
         assert cfg.channel_ids == []
         assert cfg.task_forums == {}
+        assert cfg.skills_forum_id == 0
         assert cfg.audit_forum_id == 0
         assert cfg.audit_batch_window_seconds == 60.0
         assert cfg.presence_enabled is False
@@ -256,6 +257,7 @@ class TestDiscordConfig:
             "guild_id": "100",
             "channel_ids": ["200"],
             "task_forums": {"YDB": "300"},
+            "skills_forum_id": "325",
             "audit_forum_id": "350",
             "audit_batch_window_seconds": "90",
             "presence_enabled": True,
@@ -265,6 +267,7 @@ class TestDiscordConfig:
         assert cfg.guild_id == 100
         assert cfg.channel_ids == [200]
         assert cfg.task_forums == {"YDB": 300}
+        assert cfg.skills_forum_id == 325
         assert cfg.audit_forum_id == 350
         assert cfg.audit_batch_window_seconds == 90.0
         assert cfg.presence_enabled is True
@@ -279,6 +282,7 @@ class TestDiscordConfig:
                 "guild_id": 100,
                 "channel_ids": [200],
                 "task_forums": {"YDB": 300},
+                "skills_forum_id": 325,
                 "audit_forum_id": 350,
                 "audit_batch_window_seconds": 60,
                 "presence_enabled": True,

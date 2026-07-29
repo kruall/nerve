@@ -90,6 +90,11 @@ discord:
   # Each project uses a separate Discord forum channel.
   # task_forums:
   #   YDB: 123456789012345680
+  # Optional shared skill forum. Nerve creates one thread per local skill,
+  # attaches exact SKILL.md snapshots after creation and updates, and accepts
+  # mention/reply-driven discussion in managed skill threads. Threads and
+  # attachments are visible to every Discord member who can access the forum.
+  # skills_forum_id: 123456789012345683
   # Optional outbound-only forum. Nerve creates one thread per session and
   # mirrors visible messages, tool activity, lifecycle events, and errors.
   # Historical sessions are not backfilled until they become active; existing

@@ -22,13 +22,15 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import yaml
 
 from nerve.db import Database
 
 logger = logging.getLogger(__name__)
+
+SkillChangeListener = Callable[[str, str | None], Awaitable[None]]
 
 
 @dataclass
@@ -106,6 +108,33 @@ class SkillManager:
         self.skills_dir = workspace / "skills"
         self.db = db
         self._cache: dict[str, SkillMeta] = {}
+        self._change_listeners: set[SkillChangeListener] = set()
+
+    def add_change_listener(self, listener: SkillChangeListener) -> None:
+        """Subscribe to create, update, delete, toggle, and discovery events."""
+        self._change_listeners.add(listener)
+
+    def remove_change_listener(self, listener: SkillChangeListener) -> None:
+        """Remove a previously registered change listener."""
+        self._change_listeners.discard(listener)
+
+    async def _notify_change(
+        self,
+        action: str,
+        skill_id: str | None = None,
+    ) -> None:
+        """Notify optional projections without making them a write dependency."""
+        for listener in tuple(self._change_listeners):
+            try:
+                await listener(action, skill_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Skill change listener failed for %s %s",
+                    action,
+                    skill_id or "",
+                )
 
     async def discover(self) -> list[SkillMeta]:
         """Scan skills_dir for SKILL.md files, parse frontmatter, sync to DB.
@@ -215,6 +244,7 @@ class SkillManager:
                 await self.db.delete_skill_row(db_skill["id"])
 
         logger.info("Discovered %d skills", len(discovered))
+        await self._notify_change("sync")
         return discovered
 
     async def get_skill(self, skill_id: str) -> SkillContent | None:
@@ -289,6 +319,7 @@ class SkillManager:
             version=version,
         )
         self._cache[skill_id] = meta
+        await self._notify_change("create", skill_id)
         return meta
 
     async def update_skill(self, skill_id: str, content: str) -> SkillMeta | None:
@@ -321,6 +352,7 @@ class SkillManager:
             has_assets=(skill_dir / "assets").is_dir(),
         )
         self._cache[skill_id] = meta
+        await self._notify_change("update", skill_id)
         return meta
 
     async def delete_skill(self, skill_id: str) -> bool:
@@ -330,6 +362,7 @@ class SkillManager:
             await asyncio.to_thread(shutil.rmtree, skill_dir)
         await self.db.delete_skill_row(skill_id)
         self._cache.pop(skill_id, None)
+        await self._notify_change("delete", skill_id)
         return True
 
     async def toggle_skill(self, skill_id: str, enabled: bool) -> bool:
@@ -340,6 +373,7 @@ class SkillManager:
         await self.db.update_skill_enabled(skill_id, enabled)
         if skill_id in self._cache:
             self._cache[skill_id].enabled = enabled
+        await self._notify_change("toggle", skill_id)
         return True
 
     async def list_references(self, skill_id: str) -> list[str]:

@@ -35,6 +35,7 @@ from nerve.config import NerveConfig
 if TYPE_CHECKING:
     from nerve.channels.router import ChannelRouter
     from nerve.db import Database
+    from nerve.skills.manager import SkillManager
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,7 @@ class DiscordChannel(BaseChannel):
         db: Database,
         *,
         context_summarizer: ContextSummarizer | None = None,
+        skill_manager: SkillManager | None = None,
     ):
         self.config = config.discord
         self.router = router
@@ -88,6 +90,8 @@ class DiscordChannel(BaseChannel):
         self._approval_inbox: Any | None = None
         self._notification_inbox: Any | None = None
         self._system_audit: Any | None = None
+        self._skill_forum: Any | None = None
+        self._skill_manager = skill_manager
         self._system_audit_lock = asyncio.Lock()
         self._notification_service: Any | None = None
         self._ready = asyncio.Event()
@@ -104,7 +108,14 @@ class DiscordChannel(BaseChannel):
         self._thread_context = DiscordThreadContext(
             db=db,
             guild_id=self.config.guild_id,
-            project_forum_ids=set(self._project_forums),
+            project_forum_ids=(
+                set(self._project_forums)
+                | (
+                    {self.config.skills_forum_id}
+                    if self.config.skills_forum_id
+                    else set()
+                )
+            ),
             allowed_author_ids=self._allowed_authors,
             bot_user_id=lambda: self._bot_user_id,
             message_text=self._message_text,
@@ -141,9 +152,15 @@ class DiscordChannel(BaseChannel):
         missing: list[str] = []
         if not self.config.guild_id:
             missing.append("guild_id")
-        has_inbound_targets = bool(self._text_channels or self._project_forums)
+        has_inbound_targets = bool(
+            self._text_channels
+            or self._project_forums
+            or self.config.skills_forum_id
+        )
         if not has_inbound_targets and not self.config.audit_forum_id:
-            missing.append("channel_ids, task_forums, or audit_forum_id")
+            missing.append(
+                "channel_ids, task_forums, skills_forum_id, or audit_forum_id"
+            )
         if has_inbound_targets and not self._allowed_authors:
             missing.append("allowed_author_ids")
         if not (self.config.bot_token or self.config.bot_token_file):
@@ -157,18 +174,40 @@ class DiscordChannel(BaseChannel):
             raise ValueError(
                 "discord.task_forums must use a different channel for each project"
             )
+        if (
+            self.config.skills_forum_id
+            and self.config.skills_forum_id in set(forum_ids)
+        ):
+            raise ValueError(
+                "discord.skills_forum_id must differ from task_forums"
+            )
         overlap = self._text_channels & set(self._project_forums)
         if overlap:
             raise ValueError(
                 "Discord channel IDs cannot be both text channels and project forums"
             )
         if (
-            self.config.audit_forum_id
-            and self.config.audit_forum_id
-            in (self._text_channels | set(self._project_forums))
+            self.config.skills_forum_id
+            and self.config.skills_forum_id in self._text_channels
         ):
             raise ValueError(
-                "discord.audit_forum_id must be an outbound-only forum"
+                "discord.skills_forum_id cannot also be a text channel"
+            )
+        if (
+            self.config.audit_forum_id
+            and self.config.audit_forum_id in (
+                self._text_channels
+                | set(self._project_forums)
+                | (
+                    {self.config.skills_forum_id}
+                    if self.config.skills_forum_id
+                    else set()
+                )
+            )
+        ):
+            raise ValueError(
+                "discord.audit_forum_id must be an outbound-only forum and "
+                "differ from every inbound target"
             )
         if self.config.audit_batch_window_seconds < 0:
             raise ValueError(
@@ -248,9 +287,12 @@ class DiscordChannel(BaseChannel):
                 raise self._startup_error
             logger.info(
                 "Discord channel connected to one guild with %d text channel(s) "
-                "and %d project forum(s)",
+                "and %d project forum(s)%s",
                 len(self._text_channels),
                 len(self._project_forums),
+                " plus the skill forum"
+                if self.config.skills_forum_id
+                else "",
             )
             return
 
@@ -292,9 +334,13 @@ class DiscordChannel(BaseChannel):
         self._approval_inbox = None
         self._notification_inbox = None
         self._system_audit = None
+        skill_forum = self._skill_forum
+        self._skill_forum = None
 
         if mirror is not None:
             await mirror.stop()
+        if skill_forum is not None:
+            await skill_forum.stop()
         if presence is not None:
             await presence.stop()
         if client is not None and not client.is_closed():
@@ -319,6 +365,8 @@ class DiscordChannel(BaseChannel):
                 )
 
             configured = self._text_channels | set(self._project_forums)
+            if self.config.skills_forum_id:
+                configured.add(self.config.skills_forum_id)
             if self.config.audit_forum_id:
                 configured.add(self.config.audit_forum_id)
             missing = [
@@ -346,6 +394,30 @@ class DiscordChannel(BaseChannel):
 
     async def _run_post_ready(self, guild: discord.Guild) -> None:
         """Start optional integrations and catch up without blocking startup."""
+        if (
+            self.config.skills_forum_id
+            and self._skill_manager is not None
+            and self._skill_forum is None
+        ):
+            try:
+                from nerve.channels.discord_skills import DiscordSkillForum
+
+                self._skill_forum = DiscordSkillForum(
+                    client=self._client,
+                    skill_manager=self._skill_manager,
+                    guild_id=self.config.guild_id,
+                    forum_id=self.config.skills_forum_id,
+                )
+                await self._skill_forum.start(guild)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._skill_forum = None
+                logger.exception(
+                    "Discord skill forum failed to start; "
+                    "continuing without skill threads"
+                )
+
         if self.config.audit_forum_id:
             try:
                 await self._ensure_system_audit(guild)
@@ -540,6 +612,12 @@ class DiscordChannel(BaseChannel):
                 self._recent_message_ids.popitem(last=False)
 
         try:
+            if (
+                self._skill_forum is not None
+                and getattr(message.channel, "parent_id", None)
+                == self.config.skills_forum_id
+            ):
+                await self._skill_forum.register_thread(message.channel)
             accepted = self._accepts(message)
             context_block = ""
             context_message = self._thread_context.accepts_message(message)
@@ -590,13 +668,21 @@ class DiscordChannel(BaseChannel):
             if (
                 getattr(thread, "parent_id", None) in self._text_channels
                 or getattr(thread, "parent_id", None) in self._project_forums
+                or (
+                    self.config.skills_forum_id
+                    and getattr(thread, "parent_id", None)
+                    == self.config.skills_forum_id
+                )
             )
         }
         for thread in active_threads.values():
             if getattr(thread, "parent_id", None) in self._text_channels:
                 await self._sync_target(thread, process_existing=False)
 
-        for forum_id in sorted(self._project_forums):
+        forum_ids = set(self._project_forums)
+        if self.config.skills_forum_id:
+            forum_ids.add(self.config.skills_forum_id)
+        for forum_id in sorted(forum_ids):
             forum = guild.get_channel(forum_id)
             if forum is None:
                 continue
@@ -695,6 +781,12 @@ class DiscordChannel(BaseChannel):
             return "conversation_thread"
         if parent_id in self._project_forums:
             return "project_forum_thread"
+        if (
+            parent_id == self.config.skills_forum_id
+            and self._skill_forum is not None
+            and self._skill_forum.skill_id_for_thread(channel_id)
+        ):
+            return "skill_forum_thread"
         return ""
 
     def _has_direct_mention(self, message: discord.Message) -> bool:
@@ -781,7 +873,23 @@ class DiscordChannel(BaseChannel):
         if self._bot_user_id:
             mention = re.compile(rf"<@!?{self._bot_user_id}>")
             text = mention.sub("", text)
-        return text.strip()
+        attachment_lines: list[str] = []
+        for attachment in list(
+            getattr(message, "attachments", []) or []
+        ):
+            filename = " ".join(
+                str(getattr(attachment, "filename", "") or "").split()
+            )[:200]
+            url = str(getattr(attachment, "url", "") or "")[:2048]
+            size = int(getattr(attachment, "size", 0) or 0)
+            if filename and url:
+                attachment_lines.append(
+                    f"[Discord attachment: {filename}; "
+                    f"{size} bytes; {url}]"
+                )
+        return "\n".join(
+            part for part in (text.strip(), *attachment_lines) if part
+        )
 
     def _conversation_thread_name(self, message: discord.Message) -> str:
         subject = " ".join(self._message_text(message).split())
@@ -836,6 +944,9 @@ class DiscordChannel(BaseChannel):
         channel_id = int(target.id)
         parent_id = getattr(target, "parent_id", None)
         project = self._project_forums.get(parent_id, "")
+        skill_id = ""
+        if self._skill_forum is not None:
+            skill_id = self._skill_forum.skill_id_for_thread(channel_id)
         author_name = self._safe_label(
             getattr(message.author, "display_name", "")
         )
@@ -845,6 +956,8 @@ class DiscordChannel(BaseChannel):
         author = author_name or str(message.author.id)
         if project:
             location = f"форумной темы проекта {project}"
+        elif skill_id:
+            location = f"форумной темы скилла `{skill_id}`"
         elif parent_id in self._text_channels:
             location = "диалогового треда обычного канала"
         else:
@@ -859,6 +972,29 @@ class DiscordChannel(BaseChannel):
             f"[Это сообщение Discord из {location}; ответ увидят участники "
             f"канала.{response_hint} Автор: {author}.]\n\n"
         )
+        if skill_id:
+            local_skill = (
+                await self._skill_manager.get_skill(skill_id)
+                if self._skill_manager is not None
+                else None
+            )
+            if local_skill is not None:
+                skill_context = (
+                    f"[Тред привязан к локальному скиллу `{skill_id}`. "
+                    "Перед изменением загрузи его через skill_get; изменения "
+                    "вноси через skill_update полным содержимым SKILL.md. "
+                    "Локальный файл — источник истины, Discord — поверхность "
+                    "обсуждения и обмена снимками.]"
+                )
+            else:
+                skill_context = (
+                    f"[Тред представляет скилл `{skill_id}`, которого сейчас "
+                    "нет в локальном workspace этого агента. Точные снимки "
+                    "SKILL.md прикреплены к сообщениям треда. Не импортируй "
+                    "его без явной просьбы; при запросе на передачу создай "
+                    "локальный скилл из последнего снимка.]"
+                )
+            context += skill_context + "\n\n"
         text = self._message_text(message)
         reply_context = self._reply_context(message)
         text = "\n\n".join(
@@ -868,9 +1004,13 @@ class DiscordChannel(BaseChannel):
             f"Discord · {project} · {channel_name or channel_id}"
             if project
             else (
-                f"Discord · thread · {channel_name or channel_id}"
-                if parent_id in self._text_channels
-                else f"Discord · {channel_name or channel_id}"
+                f"Discord · SKILL · {skill_id}"
+                if skill_id
+                else (
+                    f"Discord · thread · {channel_name or channel_id}"
+                    if parent_id in self._text_channels
+                    else f"Discord · {channel_name or channel_id}"
+                )
             )
         )
         await self.router.handle_message(InboundMessage(
@@ -886,6 +1026,7 @@ class DiscordChannel(BaseChannel):
                 "discord_parent_channel_id": parent_id,
                 "discord_origin_channel_id": int(message.channel.id),
                 "discord_project": project,
+                "discord_skill_id": skill_id,
                 "discord_author_id": int(message.author.id),
                 "discord_author_name": author_name,
             },
