@@ -34,11 +34,11 @@ _BATCH_SEPARATOR = "\n\n"
 _COMPACT_BATCH_SEPARATOR = "\n"
 _COMPACT_EVENT_TYPES = {"created", "idle", "started", "stopped", "wakeup"}
 _AUDIT_TAG_NAMES = {
-    "waiting": "ожидаю",
-    "system": "системные",
-    "session": "сессия",
-    "active": "активная",
-    "stopped": "остановленная",
+    "waiting": "waiting",
+    "system": "system",
+    "session": "session",
+    "active": "active",
+    "stopped": "stopped",
 }
 _SYSTEM_SESSION_SOURCES = frozenset({"cron", "hook", "system"})
 _STOPPED_SESSION_STATUSES = frozenset({"archived", "error", "stopped"})

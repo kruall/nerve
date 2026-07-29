@@ -18,11 +18,11 @@ class _Tag:
 
 def _audit_tags() -> list[_Tag]:
     return [
-        _Tag(300, "ожидаю"),
-        _Tag(301, "системные"),
-        _Tag(302, "сессия"),
-        _Tag(303, "активная"),
-        _Tag(304, "остановленная"),
+        _Tag(300, "waiting"),
+        _Tag(301, "system"),
+        _Tag(302, "session"),
+        _Tag(303, "active"),
+        _Tag(304, "stopped"),
     ]
 
 
@@ -580,8 +580,8 @@ async def test_mirror_includes_and_tags_system_sessions(db, session_id, source):
     assert len(forum.created) == 1
     thread = forum.created[0][2].thread
     assert {tag.name for tag in thread.applied_tags} == {
-        "системные",
-        "активная",
+        "system",
+        "active",
     }
     assert await db.get_discord_session_mirror(session_id) is not None
     eligible = await db.list_discord_mirror_sessions(
@@ -615,8 +615,8 @@ async def test_mirror_moves_session_between_waiting_active_and_stopped_tags(db):
     await mirror._sync_session(session_id)
     thread = forum.created[0][2].thread
     assert {tag.name for tag in thread.applied_tags} == {
-        "сессия",
-        "активная",
+        "session",
+        "active",
     }
 
     await db.create_notification(
@@ -627,22 +627,22 @@ async def test_mirror_moves_session_between_waiting_active_and_stopped_tags(db):
     )
     await mirror._sync_session(session_id)
     assert {tag.name for tag in thread.applied_tags} == {
-        "сессия",
-        "ожидаю",
+        "session",
+        "waiting",
     }
 
     await db.answer_notification("question-1", "continue", "web")
     await mirror._sync_session(session_id)
     assert {tag.name for tag in thread.applied_tags} == {
-        "сессия",
-        "активная",
+        "session",
+        "active",
     }
 
     await db.update_session_fields(session_id, {"status": "stopped"})
     await mirror._sync_session(session_id)
     assert {tag.name for tag in thread.applied_tags} == {
-        "сессия",
-        "остановленная",
+        "session",
+        "stopped",
     }
 
 
@@ -677,8 +677,8 @@ async def test_mirror_tag_policy_preserves_unmanaged_thread_tags(db):
 
     assert {tag.name for tag in thread.applied_tags} == {
         "important",
-        "сессия",
-        "ожидаю",
+        "session",
+        "waiting",
     }
 
 

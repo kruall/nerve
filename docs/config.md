@@ -245,9 +245,9 @@ mirrored.
 The mirror manages two tags on each audit thread when the audit forum contains
 one unique tag with each of these exact names:
 
-- type: `системные` for cron, hook, and system sessions; otherwise `сессия`;
-- state: `ожидаю` while a question or approval owned by the session is pending,
-  `остановленная` for stopped, errored, or archived sessions, and `активная`
+- type: `system` for cron, hook, and system sessions; otherwise `session`;
+- state: `waiting` while a question or approval owned by the session is pending,
+  `stopped` for stopped, errored, or archived sessions, and `active`
   otherwise.
 
 The mirror applies and replaces these existing tags directly as a bounded,

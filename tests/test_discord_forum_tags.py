@@ -218,7 +218,7 @@ async def test_audit_forum_tag_definition_changes_still_require_approval(
         {
             "operation": "create_tag",
             "project": "AUDIT",
-            "name": "ожидаю",
+            "name": "waiting",
             "emoji_name": "⏳",
         },
     )
@@ -243,7 +243,7 @@ def test_approved_audit_tag_definition_change_uses_audit_forum(
         "project": "AUDIT",
         "forum_id": str(AUDIT_FORUM_ID),
         "tag": {
-            "name": "ожидаю",
+            "name": "waiting",
             "moderated": False,
             "emoji_id": None,
             "emoji_name": "⏳",
