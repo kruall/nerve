@@ -183,6 +183,7 @@ async def test_discord_text_delivery_includes_current_model_metadata(db):
     engine = MagicMock()
     engine.db = db
     engine.get_current_model.return_value = "gpt-5.6-terra"
+    engine.get_current_reasoning_effort.return_value = "high"
     router = ChannelRouter(engine)
     channel = _DiscordStubChannel()
     router.register(channel)
@@ -190,7 +191,10 @@ async def test_discord_text_delivery_includes_current_model_metadata(db):
     assert await router.send_text(
         "discord-session", "modelled reply", channel="discord",
     ) is True
-    assert channel.sent[0].metadata == {"model": "gpt-5.6-terra"}
+    assert channel.sent[0].metadata == {
+        "model": "gpt-5.6-terra",
+        "reasoning_effort": "high",
+    }
 
 
 @pytest.mark.asyncio

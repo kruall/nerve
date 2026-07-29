@@ -785,12 +785,17 @@ async def test_send_uses_model_subtext_header_when_model_is_known():
     await channel.send(OutboundMessage(
         target=str(TEXT_CHANNEL),
         text="response",
-        metadata={"model": "gpt-5.6-luna"},
+        metadata={
+            "model": "gpt-5.6-luna",
+            "reasoning_effort": "high",
+        },
     ))
 
     target.send.assert_awaited_once()
     call = target.send.await_args
-    assert call.args[0] == "-# gpt-5.6-luna\nresponse"
+    assert call.args[0] == (
+        "-# gpt-5.6-luna · reasoning effort: high\nresponse"
+    )
     assert "embed" not in call.kwargs
     assert "allowed_mentions" in call.kwargs
 

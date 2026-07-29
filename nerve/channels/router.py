@@ -529,8 +529,13 @@ class ChannelRouter:
         metadata: dict[str, Any] = {}
         if channel == "discord":
             model = self.engine.get_current_model(session_id)
+            reasoning_effort = self.engine.get_current_reasoning_effort(
+                session_id,
+            )
             if isinstance(model, str) and model:
                 metadata["model"] = model
+            if isinstance(reasoning_effort, str) and reasoning_effort:
+                metadata["reasoning_effort"] = reasoning_effort
         await chan_obj.send(OutboundMessage(
             target=target,
             text=formatted,

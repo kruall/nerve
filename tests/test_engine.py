@@ -570,6 +570,7 @@ def _make_model_engine(configured: str | None = "claude-fable-5") -> AgentEngine
     """Minimal AgentEngine stub for serving-model tracking tests."""
     engine = AgentEngine.__new__(AgentEngine)
     engine._session_models = {"s1": configured} if configured else {}
+    engine._session_efforts = {"s1": "high"} if configured else {}
     engine._observed_models = {}
     engine._workflows = {}
     return engine
@@ -582,6 +583,8 @@ def test_current_model_prefers_observed_model_over_bound_client_model():
     engine._observed_models["s1"] = "claude-opus-4-8-20260115"
     assert engine.get_current_model("s1") == "claude-opus-4-8-20260115"
     assert engine.get_current_model("missing") is None
+    assert engine.get_current_reasoning_effort("s1") == "high"
+    assert engine.get_current_reasoning_effort("missing") is None
 
 
 def _assistant(model: str, parent_tool_use_id: str | None = None) -> AssistantMessage:

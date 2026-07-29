@@ -1050,9 +1050,12 @@ class DiscordChannel(BaseChannel):
     async def send(self, message: OutboundMessage) -> None:
         channel = await self._resolve_messageable(message.target)
         model = message.metadata.get("model")
+        reasoning_effort = message.metadata.get("reasoning_effort")
         chunks: list[str]
         if isinstance(model, str) and model:
             header = f"-# {model}"
+            if isinstance(reasoning_effort, str) and reasoning_effort:
+                header += f" · reasoning effort: {reasoning_effort}"
             chunks = split_discord_message(
                 message.text,
                 limit=max(1, _MAX_MESSAGE_LENGTH - len(header) - 1),

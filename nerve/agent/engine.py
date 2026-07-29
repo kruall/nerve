@@ -1106,6 +1106,10 @@ adjacent tier is a better fit:
             or self._session_models.get(session_id)
         )
 
+    def get_current_reasoning_effort(self, session_id: str) -> str | None:
+        """Return the reasoning effort bound to the serving client."""
+        return self._session_efforts.get(session_id)
+
     # ------------------------------------------------------------------ #
     #  SDK client lifecycle                                                #
     # ------------------------------------------------------------------ #
