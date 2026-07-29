@@ -16,12 +16,15 @@ from nerve.agent.tools.registry import ToolContext, ToolResult, ToolSpec
 from nerve.agent.tools.schemas import (
     DISCORD_FORUM_TAG_ACTION_SCHEMA,
     DISCORD_FORUM_TAGS_SCHEMA,
+    DISCORD_PROJECT_TASK_STATUS_SCHEMA,
 )
 from nerve.discord_tags import (
     DISCORD_FORUM_TAG_METADATA_KEY,
     DISCORD_FORUM_TAG_TARGET_KIND,
     DiscordForumTagError,
     DiscordForumTagManager,
+    DiscordProjectTaskStatusError,
+    transition_project_task_status,
 )
 
 
@@ -130,6 +133,43 @@ async def discord_forum_tag_action_handler(
     )
 
 
+async def discord_project_task_status_handler(
+    ctx: ToolContext,
+    args: dict,
+) -> ToolResult:
+    """Advance one Discord project task through the agreed state machine."""
+    if ctx.config is None:
+        return ToolResult.text(
+            "discord_project_task_status: Nerve config is unavailable.",
+            is_error=True,
+        )
+    thread_id = str(args.get("thread_id") or _current_discord_target(ctx)).strip()
+    if not thread_id:
+        return ToolResult.text(
+            "discord_project_task_status: this tool requires a Discord project thread.",
+            is_error=True,
+        )
+    try:
+        result = await asyncio.to_thread(
+            transition_project_task_status,
+            ctx.config,
+            thread_id=thread_id,
+            target_status=str(args.get("status") or ""),
+            audit_reason=f"Nerve project task lifecycle {ctx.session_id[:32]}",
+        )
+    except DiscordProjectTaskStatusError as exc:
+        return ToolResult.text(
+            f"discord_project_task_status: {exc}",
+            is_error=True,
+        )
+    except DiscordForumTagError as exc:
+        return ToolResult.text(
+            f"discord_project_task_status: {exc}",
+            is_error=True,
+        )
+    return ToolResult.text(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 DISCORD_FORUM_TAGS_SPEC = ToolSpec(
     name="discord_forum_tags",
     description=(
@@ -140,6 +180,18 @@ DISCORD_FORUM_TAGS_SPEC = ToolSpec(
     ),
     input_schema=DISCORD_FORUM_TAGS_SCHEMA,
     handler=discord_forum_tags_handler,
+)
+
+DISCORD_PROJECT_TASK_STATUS_SPEC = ToolSpec(
+    name="discord_project_task_status",
+    description=(
+        "Move a Discord project task through its configured lifecycle. "
+        "Discord tags are the only task state; this applies one validated "
+        "transition, preserves unrelated tags, and fails closed if status tags "
+        "are missing or ambiguous."
+    ),
+    input_schema=DISCORD_PROJECT_TASK_STATUS_SCHEMA,
+    handler=discord_project_task_status_handler,
 )
 
 DISCORD_FORUM_TAG_ACTION_SPEC = ToolSpec(
@@ -158,5 +210,6 @@ DISCORD_FORUM_TAG_ACTION_SPEC = ToolSpec(
 
 DISCORD_SPECS = [
     DISCORD_FORUM_TAGS_SPEC,
+    DISCORD_PROJECT_TASK_STATUS_SPEC,
     DISCORD_FORUM_TAG_ACTION_SPEC,
 ]

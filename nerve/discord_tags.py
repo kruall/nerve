@@ -29,6 +29,31 @@ DISCORD_FORUM_TAG_TARGET_KIND = "discord-forum-tag"
 DISCORD_FORUM_TAG_METADATA_KEY = "discord_forum_tag_action"
 DISCORD_AUDIT_FORUM_PROJECT = "AUDIT"
 
+# Project forums use one of these tags as the durable task state.  An
+# untagged project thread is a newly-created task that has not yet passed
+# triage; it is intentionally represented as ``new-task`` rather than by a
+# synthetic Discord tag.
+PROJECT_TASK_NEW = "new-task"
+PROJECT_TASK_STATUSES = frozenset({
+    "backlog",
+    "ready-for-agent",
+    "in-progress",
+    "ready-for-user",
+    "completed",
+    "blocked",
+    "cancelled",
+})
+_PROJECT_TASK_TRANSITIONS = {
+    PROJECT_TASK_NEW: frozenset({"ready-for-agent", "blocked", "cancelled"}),
+    "backlog": frozenset({"ready-for-agent", "blocked", "cancelled"}),
+    "ready-for-agent": frozenset({"in-progress"}),
+    "in-progress": frozenset({"ready-for-user", "blocked", "cancelled"}),
+    "ready-for-user": frozenset({"completed", "blocked", "cancelled"}),
+    "blocked": frozenset({"ready-for-agent"}),
+    "completed": frozenset(),
+    "cancelled": frozenset(),
+}
+
 _API_BASE = "https://discord.com/api/v10"
 _FORUM_CHANNEL_TYPES = frozenset({15, 16})
 _THREAD_CHANNEL_TYPES = frozenset({10, 11, 12})
@@ -50,6 +75,10 @@ _TAG_FIELDS = ("id", "name", "moderated", "emoji_id", "emoji_name")
 
 class DiscordForumTagError(ValueError):
     """A safe, user-facing failure from Discord forum-tag management."""
+
+
+class DiscordProjectTaskStatusError(DiscordForumTagError):
+    """A safe failure while moving a project task through its lifecycle."""
 
 
 class _DiscordRequestThrottle:
@@ -798,6 +827,114 @@ class DiscordForumTagManager:
             {"available_tags": payload_tags},
             audit_reason=audit_reason,
         )
+
+
+def transition_project_task_status(
+    config: NerveConfig,
+    *,
+    thread_id: Any,
+    target_status: str,
+    audit_reason: str,
+) -> dict[str, Any]:
+    """Apply one validated lifecycle transition to a project-thread tag.
+
+    The status exists only in Discord: no local task row mirrors or guesses
+    it. The operation re-fetches both the thread and its configured forum,
+    keeps non-status tags intact, and fails closed if the managed tag set is
+    missing, ambiguous, or already inconsistent.
+    """
+    target = str(target_status or "").strip().casefold()
+    if target not in PROJECT_TASK_STATUSES:
+        valid = ", ".join(sorted(PROJECT_TASK_STATUSES))
+        raise DiscordProjectTaskStatusError(
+            f"Unknown project task status {target_status!r}; expected one of: {valid}"
+        )
+
+    manager = DiscordForumTagManager(config)
+    with _DISCORD_MUTATION_LOCK:
+        project, forum_id, thread = manager.fetch_thread(thread_id)
+        if project == DISCORD_AUDIT_FORUM_PROJECT:
+            raise DiscordProjectTaskStatusError(
+                "Task lifecycle statuses apply only to configured project forums"
+            )
+        _, resolved_forum_id, forum = manager.fetch_forum(project)
+        if resolved_forum_id != forum_id:
+            raise DiscordProjectTaskStatusError(
+                "Thread moved outside its configured project forum"
+            )
+
+        available = _forum_tags(forum)
+        by_name: dict[str, list[dict[str, Any]]] = {}
+        for tag in available:
+            by_name.setdefault(str(tag.get("name") or "").casefold(), []).append(tag)
+        missing_or_ambiguous = [
+            status
+            for status in sorted(PROJECT_TASK_STATUSES)
+            if len(by_name.get(status, [])) != 1
+        ]
+        if missing_or_ambiguous:
+            raise DiscordProjectTaskStatusError(
+                "Project forum must contain exactly one tag for every task status; "
+                "invalid: " + ", ".join(missing_or_ambiguous)
+            )
+
+        status_tag_ids = {
+            str(by_name[status][0]["id"]): status
+            for status in PROJECT_TASK_STATUSES
+        }
+        current_ids = list(dict.fromkeys(
+            str(_snowflake(value, "applied tag id"))
+            for value in thread.get("applied_tags", []) or []
+        ))
+        current_statuses = [
+            status_tag_ids[tag_id]
+            for tag_id in current_ids
+            if tag_id in status_tag_ids
+        ]
+        if len(current_statuses) > 1:
+            raise DiscordProjectTaskStatusError(
+                "Project thread has more than one task-status tag: "
+                + ", ".join(sorted(current_statuses))
+            )
+        current = current_statuses[0] if current_statuses else PROJECT_TASK_NEW
+        if current == target:
+            return {
+                "status": "already_applied",
+                "project": project,
+                "thread_id": str(_snowflake(thread.get("id"), "thread id")),
+                "previous_status": current,
+                "current_status": target,
+            }
+        if target not in _PROJECT_TASK_TRANSITIONS[current]:
+            allowed = ", ".join(sorted(_PROJECT_TASK_TRANSITIONS[current])) or "(none)"
+            raise DiscordProjectTaskStatusError(
+                f"Invalid project task transition {current} -> {target}; "
+                f"allowed next statuses: {allowed}"
+            )
+
+        desired_ids = [
+            tag_id for tag_id in current_ids if tag_id not in status_tag_ids
+        ]
+        desired_ids.append(str(by_name[target][0]["id"]))
+        if len(desired_ids) > 5:
+            raise DiscordProjectTaskStatusError(
+                "Discord threads support at most 5 applied tags"
+            )
+        _discord_request(
+            manager.config,
+            "PATCH",
+            _snowflake(thread.get("id"), "thread id"),
+            {"applied_tags": desired_ids},
+            audit_reason=audit_reason,
+        )
+        return {
+            "status": "executed",
+            "project": project,
+            "thread_id": str(_snowflake(thread.get("id"), "thread id")),
+            "previous_status": current,
+            "current_status": target,
+            "applied_tag_ids": desired_ids,
+        }
 
 
 def dispatch_discord_forum_tag_action(

@@ -47,6 +47,18 @@ _MAX_REPLY_CONTEXT_LENGTH = 500
 _RECENT_MESSAGE_IDS = 4096
 _THREAD_NAME_PREFIX = "Nerve · "
 _AUTO_MODEL_TIER = "auto"
+_PROJECT_TASK_LIFECYCLE_CONTEXT = """[Discord project-task lifecycle]
+Discord forum tags are the sole source of task state; do not use Plane or
+Backlog.md. An untagged thread is `new-task`. When the task state actually
+changes, call `mcp__nerve__discord_project_task_status` exactly once with the
+next allowed status:
+`new-task` -> `ready-for-agent` / `blocked` / `cancelled`;
+`ready-for-agent` -> `in-progress`;
+`in-progress` -> `ready-for-user` / `blocked` / `cancelled`;
+`ready-for-user` -> `completed` / `blocked` / `cancelled`;
+`blocked` -> `ready-for-agent`.
+Do not infer task completion from a transient session ending.]
+"""
 
 
 def split_discord_message(text: str, limit: int = _MAX_MESSAGE_LENGTH) -> list[str]:
@@ -1213,12 +1225,16 @@ class DiscordChannel(BaseChannel):
             if self._project_prompts is not None
             else ""
         )
+        task_lifecycle_context = (
+            _PROJECT_TASK_LIFECYCLE_CONTEXT if project else ""
+        )
         text = self._message_text(message)
         reply_context = self._reply_context(message)
         text = "\n\n".join(
             part
             for part in (
                 project_prompt,
+                task_lifecycle_context,
                 context_block,
                 reply_context,
                 text,

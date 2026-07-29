@@ -752,6 +752,8 @@ async def test_dispatch_maps_forum_thread_to_project():
     assert inbound.metadata["discord_parent_channel_id"] == YDB_FORUM
     assert inbound.metadata["discord_project"] == "YDB"
     assert "проекта YDB" in inbound.text
+    assert "Discord forum tags are the sole source of task state" in inbound.text
+    assert "mcp__nerve__discord_project_task_status" in inbound.text
 
 
 @pytest.mark.asyncio

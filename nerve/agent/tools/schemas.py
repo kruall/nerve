@@ -887,6 +887,37 @@ DISCORD_FORUM_TAGS_SCHEMA = {
     "required": [],
 }
 
+DISCORD_PROJECT_TASK_STATUS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "ready-for-agent",
+                "in-progress",
+                "ready-for-user",
+                "completed",
+                "blocked",
+                "cancelled",
+            ],
+            "description": (
+                "Next lifecycle status for the current Discord project task. "
+                "Transitions are validated against the project-task workflow."
+            ),
+        },
+        "thread_id": {
+            "type": "string",
+            "description": (
+                "Project task thread to update. Defaults to the current Discord "
+                "thread; use another thread only when its lifecycle is explicitly "
+                "being handled."
+            ),
+            "default": "",
+        },
+    },
+    "required": ["status"],
+}
+
 DISCORD_FORUM_TAG_ACTION_SCHEMA = {
     "type": "object",
     "properties": {
