@@ -151,10 +151,22 @@ class ChannelRouter:
                 msg.channel_key, session_id,
             )
         else:
+            session_args: dict[str, Any] = {
+                "source": msg.channel_name,
+                "title": msg.session_title,
+            }
+            initial_tier = (msg.metadata or {}).get("initial_model_tier")
+            if isinstance(initial_tier, str) and initial_tier:
+                session_args.update({
+                    "model": msg.metadata.get("initial_model"),
+                    "model_tier": initial_tier,
+                    "reasoning_effort": msg.metadata.get(
+                        "initial_reasoning_effort",
+                    ),
+                })
             session_id = await self.engine.sessions.get_active_session(
                 msg.channel_key,
-                source=msg.channel_name,
-                title=msg.session_title,
+                **session_args,
             )
 
         # Discord explicit output is session-bound rather than turn-bound.

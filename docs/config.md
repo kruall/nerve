@@ -209,6 +209,7 @@ WebSocket. It does not require an inbound listener or a public Nerve endpoint.
 | `discord.guild_id` | int | `0` | The only server the Nerve instance accepts |
 | `discord.channel_ids` | list[int] | `[]` | Ordinary text channels where a mention starts a conversation thread |
 | `discord.task_forums` | map[string, int] | `{}` | Project name to Discord forum-channel ID |
+| `discord.project_model_tiers` | map[string, string] | `{}` | Initial Codex tier for sessions created in each project forum; keys must exist in `task_forums` |
 | `discord.skills_forum_id` | int | `0` | Shared forum where Nerve publishes one managed thread per local skill |
 | `discord.audit_forum_id` | int | `0` | Outbound-only forum where Nerve mirrors one thread per session |
 | `discord.audit_batch_window_seconds` | float | `60` | Window used to combine adjacent audit activity before updating Discord; terminal events flush immediately |
@@ -370,6 +371,10 @@ discord:
   channel_ids: [123456789012345679]
   task_forums:
     YDB: 123456789012345680
+    NERVE: 123456789012345681
+  project_model_tiers:
+    YDB: sol-medium
+    NERVE: terra-high
   audit_forum_id: 123456789012345682
   audit_batch_window_seconds: 60
   allowed_author_ids: [123456789012345681]
@@ -377,6 +382,15 @@ discord:
 ```
 
 ### Discord slash commands
+
+When `agent.backend: codex`, `discord.project_model_tiers` can override
+`codex.default_tier` for a newly created session in a project forum. Each value
+must be an ID from `codex.model_tiers`, and each key must also appear in
+`discord.task_forums`. Nerve persists the resolved model, tier, and reasoning
+effort on creation, so later messages, restarts, and resumed sessions keep that
+initial choice. The setting does not affect existing sessions, ordinary Discord
+threads, Web, Telegram, or cron sessions. A later `/model` selection remains
+authoritative for its session.
 
 `/model` is available only in the configured guild. Its `tier` argument is a
 Discord choice list containing `Auto` and the configured `codex.model_tiers`.

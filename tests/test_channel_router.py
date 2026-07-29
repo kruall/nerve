@@ -11,6 +11,7 @@ from nerve.channels.base import (
     InboundMessage,
 )
 from nerve.channels.router import ChannelRouter
+from nerve.agent.sessions import SessionManager
 
 
 class _StubChannel(BaseChannel):
@@ -251,6 +252,38 @@ async def test_discord_inbound_persists_binding_before_running():
         thread_id="200",
     )
     engine.run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_discord_inbound_uses_project_initial_model_profile_on_creation(db):
+    engine = MagicMock()
+    engine.db = db
+    engine.sessions = SessionManager(db, default_backend="codex")
+    engine.run = AsyncMock(return_value="")
+    engine.register_task = MagicMock()
+    router = ChannelRouter(engine)
+    router.BATCH_DEBOUNCE = 0
+    router.register(_DiscordStubChannel(automatic_responses=False))
+
+    await router.handle_message(InboundMessage(
+        channel_name="discord",
+        channel_key="discord:100:200",
+        sender_id="200",
+        text="hello",
+        metadata={
+            "message_id": "message-1",
+            "discord_guild_id": "100",
+            "initial_model": "gpt-5.6-sol",
+            "initial_model_tier": "sol-xhigh",
+            "initial_reasoning_effort": "xhigh",
+        },
+    ))
+
+    mapping = await db.get_channel_session("discord:100:200")
+    session = await db.get_session(mapping["session_id"])
+    assert session["model"] == "gpt-5.6-sol"
+    assert session["model_tier"] == "sol-xhigh"
+    assert session["reasoning_effort"] == "xhigh"
 
 
 @pytest.mark.asyncio

@@ -277,6 +277,9 @@ class SessionManager:
         channel_key: str,
         source: str = "web",
         title: str | None = None,
+        model: str | None = None,
+        model_tier: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> str:
         """Get or create the active session for a channel.
 
@@ -303,7 +306,12 @@ class SessionManager:
             # Create a fresh session
             session_id = self._generate_session_id()
             await self._create_session(
-                session_id, title=title, source=source,
+                session_id,
+                title=title,
+                source=source,
+                model=model,
+                model_tier=model_tier,
+                reasoning_effort=reasoning_effort,
             )
             await self.db.set_channel_session(channel_key, session_id)
             return session_id
