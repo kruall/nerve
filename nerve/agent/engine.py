@@ -2334,10 +2334,16 @@ class AgentEngine:
                     "is_running": True,
                 })
                 completed = False
+                typing_task = None
                 try:
                     await self.sessions.get_or_create(
                         session_id, source=source,
                     )
+                    if self._router is not None:
+                        typing_task = await self._router.start_session_typing(
+                            session_id,
+                            channel,
+                        )
                     if not _restart_recovery:
                         channel_context = (
                             self._router.get_message_context(session_id)
@@ -2368,6 +2374,9 @@ class AgentEngine:
                     if completed or not self._shutting_down:
                         with contextlib.suppress(Exception):
                             await self.db.clear_session_run_recovery(session_id)
+                    if self._router is not None:
+                        with contextlib.suppress(Exception):
+                            await self._router.stop_session_typing(typing_task)
                     self.sessions.mark_not_running(session_id)
                     self._active_channel.pop(session_id, None)
                     # Backstop: if _run_inner exited without broadcasting

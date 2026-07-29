@@ -258,7 +258,6 @@ class ChannelRouter:
                 channel, msg.sender_id, session_id,
             )
         images = msg.metadata.get("images") if msg.metadata else None
-        typing_task = await self._start_typing(channel, msg.sender_id)
 
         task = asyncio.create_task(
             self.engine.run(
@@ -277,7 +276,6 @@ class ChannelRouter:
                 return task.result()
             return ""
         finally:
-            await self._stop_typing(typing_task)
             if channel.automatic_responses:
                 await self._teardown_streaming(
                     channel.name, msg.sender_id, session_id,
@@ -315,7 +313,6 @@ class ChannelRouter:
         if channel.automatic_responses:
             await self._setup_streaming(channel, sender_id, session_id)
 
-        typing_task = await self._start_typing(channel, sender_id)
         task = asyncio.create_task(
             self.engine.run(
                 session_id=session_id,
@@ -333,18 +330,58 @@ class ChannelRouter:
                 return task.result()
             return ""
         finally:
-            await self._stop_typing(typing_task)
             if channel.automatic_responses:
                 await self._teardown_streaming(
                     channel.name, sender_id, session_id,
                 )
 
-    async def _start_typing(
+    async def start_session_typing(
         self,
-        channel: BaseChannel,
-        target: str,
+        session_id: str,
+        channel_name: str | None,
     ) -> asyncio.Task[None] | None:
-        """Start and periodically refresh a channel's typing indicator."""
+        """Start typing for any engine run bound to a visible channel.
+
+        Discord sessions resolve their immutable thread binding from the
+        database, so restart recovery and wakeups get the same indicator as
+        ordinary inbound turns. Other channels use the current in-memory
+        message context.
+        """
+        channel: BaseChannel | None = None
+        target: str | None = None
+        try:
+            if channel_name in (None, "discord"):
+                binding = await self.engine.db.get_discord_session_binding(
+                    session_id,
+                )
+                if binding:
+                    channel = self._channels.get("discord")
+                    target = str(binding["thread_id"])
+                elif channel_name == "discord":
+                    return None
+
+            if channel is None:
+                context = self._message_context.get(session_id)
+                resolved_name = channel_name or (
+                    str(context.get("channel_name")) if context else ""
+                )
+                channel = self._channels.get(resolved_name)
+                if (
+                    context
+                    and context.get("channel_name") == resolved_name
+                    and context.get("target") is not None
+                ):
+                    target = str(context["target"])
+        except Exception as exc:
+            logger.debug(
+                "Typing target resolution failed for session %s: %s",
+                session_id,
+                exc,
+            )
+            return None
+
+        if channel is None or target is None:
+            return None
         if ChannelCapability.TYPING_INDICATOR not in channel.capabilities:
             return None
         await self._send_typing(channel, target)
@@ -375,7 +412,7 @@ class ChannelRouter:
             )
 
     @staticmethod
-    async def _stop_typing(task: asyncio.Task[None] | None) -> None:
+    async def stop_session_typing(task: asyncio.Task[None] | None) -> None:
         if task is None:
             return
         task.cancel()

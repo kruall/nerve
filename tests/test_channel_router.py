@@ -47,6 +47,10 @@ class _TypingChannel(_StubChannel):
         self.typing_refreshed = asyncio.Event()
 
     @property
+    def name(self) -> str:
+        return "discord"
+
+    @property
     def capabilities(self) -> ChannelCapability:
         return (
             ChannelCapability.SEND_TEXT
@@ -253,60 +257,56 @@ async def test_run_without_automatic_responses_does_not_register_adapter():
 
 
 @pytest.mark.asyncio
-async def test_run_refreshes_typing_until_engine_finishes():
-    finish_run = asyncio.Event()
-
-    async def run_agent(**_kwargs):
-        await finish_run.wait()
-        return "done"
-
+@pytest.mark.parametrize("channel_name", [None, "discord"])
+async def test_session_typing_uses_durable_discord_binding_until_stopped(
+    channel_name: str | None,
+):
     engine = MagicMock()
-    engine.run = AsyncMock(side_effect=run_agent)
-    engine.register_task = MagicMock()
+    engine.db.get_discord_session_binding = AsyncMock(return_value={
+        "session_id": "shared",
+        "guild_id": "guild-1",
+        "thread_id": "thread-1",
+    })
     router = ChannelRouter(engine)
     router.TYPING_REFRESH_INTERVAL = 0.01
     channel = _TypingChannel()
-    message = InboundMessage(
-        channel_name="manual",
-        channel_key="manual:channel-1",
-        sender_id="channel-1",
-        text="hello",
-    )
+    router.register(channel)
 
-    run_task = asyncio.create_task(
-        router._run_single(channel, message, "shared"),
+    typing_task = await router.start_session_typing(
+        "shared",
+        channel_name=channel_name,
     )
     await asyncio.wait_for(channel.typing_refreshed.wait(), timeout=1)
-
-    finish_run.set()
-    assert await run_task == "done"
+    await router.stop_session_typing(typing_task)
     typing_count = len(channel.typing_targets)
     await asyncio.sleep(0.03)
 
+    engine.db.get_discord_session_binding.assert_awaited_once_with("shared")
     assert typing_count >= 2
     assert len(channel.typing_targets) == typing_count
-    assert set(channel.typing_targets) == {"channel-1"}
+    assert set(channel.typing_targets) == {"thread-1"}
 
 
 @pytest.mark.asyncio
-async def test_typing_failure_does_not_abort_agent_run():
+async def test_session_typing_failure_is_non_fatal():
     engine = MagicMock()
-    engine.run = AsyncMock(return_value="done")
-    engine.register_task = MagicMock()
+    engine.db.get_discord_session_binding = AsyncMock(return_value={
+        "session_id": "shared",
+        "guild_id": "guild-1",
+        "thread_id": "thread-1",
+    })
     router = ChannelRouter(engine)
     channel = _TypingChannel()
     channel.send_typing = AsyncMock(side_effect=RuntimeError("unavailable"))
-    message = InboundMessage(
-        channel_name="manual",
-        channel_key="manual:channel-1",
-        sender_id="channel-1",
-        text="hello",
+    router.register(channel)
+
+    typing_task = await router.start_session_typing(
+        "shared",
+        channel_name="discord",
     )
+    await router.stop_session_typing(typing_task)
 
-    response = await router._run_single(channel, message, "shared")
-
-    assert response == "done"
-    channel.send_typing.assert_awaited_once_with("channel-1")
+    channel.send_typing.assert_awaited_once_with("thread-1")
 
 
 @pytest.mark.asyncio

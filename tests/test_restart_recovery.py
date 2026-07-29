@@ -133,6 +133,9 @@ async def test_startup_recovery_restores_discord_target_and_dispatches_continuat
 async def test_successful_run_clears_restart_checkpoint(tmp_path, db):
     engine = _engine(tmp_path, db)
     engine._run_inner = AsyncMock(return_value="done")
+    typing_task = object()
+    engine.router.start_session_typing = AsyncMock(return_value=typing_task)
+    engine.router.stop_session_typing = AsyncMock()
 
     with patch("nerve.agent.engine.broadcaster") as bc:
         _stub_broadcaster(bc)
@@ -145,6 +148,61 @@ async def test_successful_run_clears_restart_checkpoint(tmp_path, db):
 
     assert result == "done"
     assert await db.get_session_run_recovery("recover-success") is None
+    engine.router.start_session_typing.assert_awaited_once_with(
+        "recover-success",
+        "discord",
+    )
+    engine.router.stop_session_typing.assert_awaited_once_with(typing_task)
+
+
+@pytest.mark.asyncio
+async def test_restart_recovery_run_starts_session_typing(tmp_path, db):
+    engine = _engine(tmp_path, db)
+    await db.create_session(
+        "recover-typing", source="discord", backend="codex",
+    )
+    await db.bind_discord_session(
+        "recover-typing",
+        guild_id="100",
+        thread_id="200",
+    )
+    typing_targets: list[str] = []
+    typing_refreshed = asyncio.Event()
+
+    async def _send_typing(target: str) -> None:
+        typing_targets.append(target)
+        if len(typing_targets) >= 2:
+            typing_refreshed.set()
+
+    async def _finish_after_refresh(*_args, **_kwargs) -> str:
+        await asyncio.wait_for(typing_refreshed.wait(), timeout=1)
+        return "resumed"
+
+    engine._run_inner = _finish_after_refresh
+    engine.router.TYPING_REFRESH_INTERVAL = 0.01
+    engine.router.register(SimpleNamespace(
+        name="discord",
+        capabilities=ChannelCapability.TYPING_INDICATOR,
+        send_typing=_send_typing,
+    ))
+
+    with patch("nerve.agent.engine.broadcaster") as bc:
+        _stub_broadcaster(bc)
+        result = await engine.run(
+            "recover-typing",
+            "continue after restart",
+            source="discord",
+            channel="discord",
+            internal=True,
+            _restart_recovery=True,
+        )
+
+    assert result == "resumed"
+    typing_count = len(typing_targets)
+    await asyncio.sleep(0.03)
+    assert typing_count >= 2
+    assert len(typing_targets) == typing_count
+    assert set(typing_targets) == {"200"}
 
 
 @pytest.mark.asyncio
