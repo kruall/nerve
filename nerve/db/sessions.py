@@ -386,6 +386,61 @@ class SessionStore:
             (session_id,),
         )
 
+    # --- Durable Discord delivery binding (V44) ---
+
+    async def get_discord_session_binding(
+        self, session_id: str,
+    ) -> dict | None:
+        """Return the immutable Discord target bound to ``session_id``."""
+        async with self.db.execute(
+            """SELECT session_id, guild_id, thread_id, created_at
+               FROM discord_session_bindings
+               WHERE session_id = ?""",
+            (session_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def bind_discord_session(
+        self,
+        session_id: str,
+        *,
+        guild_id: str | int,
+        thread_id: str | int,
+    ) -> dict:
+        """Bind a session to one Discord thread, refusing later retargeting.
+
+        The target is transport-owned input from the Discord gateway, never an
+        agent tool argument. ``INSERT OR IGNORE`` makes concurrent first
+        messages safe; the read-back comparison enforces immutability.
+        """
+        guild = str(guild_id).strip()
+        thread = str(thread_id).strip()
+        if not guild.isdigit() or not thread.isdigit():
+            raise ValueError(
+                "Discord session binding requires numeric guild and thread IDs"
+            )
+
+        await self._write(
+            """INSERT OR IGNORE INTO discord_session_bindings
+                   (session_id, guild_id, thread_id)
+               VALUES (?, ?, ?)""",
+            (session_id, guild, thread),
+        )
+        binding = await self.get_discord_session_binding(session_id)
+        if binding is None:
+            raise RuntimeError(
+                f"Discord session binding was not persisted for {session_id}"
+            )
+        if (
+            str(binding["guild_id"]) != guild
+            or str(binding["thread_id"]) != thread
+        ):
+            raise ValueError(
+                f"Session {session_id} is already bound to another Discord thread"
+            )
+        return binding
+
     # --- Channel session mapping (V3) ---
 
     async def get_channel_session(self, channel_key: str) -> dict | None:

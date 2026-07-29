@@ -405,7 +405,7 @@ async def send_sticker_handler(ctx: ToolContext, args: dict) -> ToolResult:
 
 
 async def discord_send_handler(ctx: ToolContext, args: dict) -> ToolResult:
-    """Publish an intentional message to the Discord chat driving this turn."""
+    """Publish intentional text to this session's bound Discord thread."""
     raw_message = args.get("message")
     if not isinstance(raw_message, str) or not raw_message.strip():
         return ToolResult.text(
@@ -415,12 +415,6 @@ async def discord_send_handler(ctx: ToolContext, args: dict) -> ToolResult:
     message = raw_message.strip()
     if ctx.engine is None:
         return ToolResult.text("discord_send: engine not available.", is_error=True)
-    if ctx.engine.get_active_channel(ctx.session_id) != "discord":
-        return ToolResult.text(
-            "discord_send is available only while a Discord message is driving "
-            "this session.",
-            is_error=True,
-        )
 
     try:
         delivered = await ctx.engine.router.send_text(
@@ -437,7 +431,8 @@ async def discord_send_handler(ctx: ToolContext, args: dict) -> ToolResult:
 
     if not delivered:
         return ToolResult.text(
-            "Cannot send Discord message: current chat context is unavailable.",
+            "Cannot send Discord message: this session has no available "
+            "Discord thread binding.",
             is_error=True,
         )
     return ToolResult.text("Discord message sent.")
@@ -574,10 +569,10 @@ SEND_STICKER_SPEC = ToolSpec(
 DISCORD_SEND_SPEC = ToolSpec(
     name="discord_send",
     description=(
-        "Send an intentional user-facing message to the current Discord chat. "
+        "Send an intentional user-facing message to this session's Discord thread. "
         "Discord session output is not published automatically, so use this for "
-        "every message that Discord participants should see. The destination is "
-        "bound to the Discord message driving the current turn and cannot be chosen."
+        "every message that Discord participants should see. The persisted "
+        "destination is fixed for the session and cannot be chosen by the caller."
     ),
     input_schema=DISCORD_SEND_SCHEMA,
     handler=discord_send_handler,

@@ -107,6 +107,7 @@ def build_system_prompt(
     workspace: Path,
     session_id: str = "",
     source: str = "web",
+    discord_bound: bool | None = None,
     recalled_memories: list[str] | None = None,
     timezone_name: str = "America/New_York",
     skill_summaries: list[dict] | None = None,
@@ -157,16 +158,20 @@ You have access to the following custom tools:
 {_format_tool_list(excluded_tools)}"""
     parts.append(context)
 
-    if source == "discord":
+    if discord_bound is None:
+        discord_bound = source == "discord"
+
+    if discord_bound:
         parts.append(
             """# Discord Output Contract
 
 The session stream and final answer are internal and are NOT delivered to
 Discord. To send any user-facing message, call
 `mcp__nerve__discord_send`; it is the only public output path for this Discord
-session. Send only deliberate messages meant for everyone in the current
-Discord chat. Never publish private reasoning, tool traces, credentials, or
-other internal session content."""
+session. Its destination is fixed to the session's Discord thread and remains
+available during scheduled wakeups and after process restarts. Send only
+deliberate messages meant for everyone in that thread. Never publish private
+reasoning, tool traces, credentials, or other internal session content."""
         )
 
     # Skills summary (progressive disclosure level 1: name + description only)

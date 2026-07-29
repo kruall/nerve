@@ -9,9 +9,9 @@ from nerve.agent.tools.registry import ToolContext
 
 
 @pytest.mark.asyncio
-async def test_discord_send_delivers_only_through_active_discord_session():
+async def test_discord_send_delivers_from_wakeup_via_session_binding():
     engine = MagicMock()
-    engine.get_active_channel.return_value = "discord"
+    engine.get_active_channel.return_value = None
     engine.router.send_text = AsyncMock(return_value=True)
 
     result = await discord_send_handler(
@@ -25,13 +25,13 @@ async def test_discord_send_delivers_only_through_active_discord_session():
         "Hello, Discord",
         channel="discord",
     )
+    engine.get_active_channel.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_discord_send_refuses_non_discord_session():
+async def test_discord_send_refuses_session_without_binding():
     engine = MagicMock()
-    engine.get_active_channel.return_value = "web"
-    engine.router.send_text = AsyncMock()
+    engine.router.send_text = AsyncMock(return_value=False)
 
     result = await discord_send_handler(
         ToolContext(session_id="shared", engine=engine),
@@ -39,7 +39,11 @@ async def test_discord_send_refuses_non_discord_session():
     )
 
     assert result.is_error is True
-    engine.router.send_text.assert_not_awaited()
+    engine.router.send_text.assert_awaited_once_with(
+        "shared",
+        "must not leak",
+        channel="discord",
+    )
 
 
 @pytest.mark.parametrize("message", ["  ", None, 42])
@@ -53,4 +57,4 @@ async def test_discord_send_refuses_invalid_message(message):
     )
 
     assert result.is_error is True
-    engine.get_active_channel.assert_not_called()
+    engine.router.send_text.assert_not_called()

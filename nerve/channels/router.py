@@ -157,6 +157,22 @@ class ChannelRouter:
                 title=msg.session_title,
             )
 
+        # Discord explicit output is session-bound rather than turn-bound.
+        # Persist the gateway-resolved target before starting or steering the
+        # turn so scheduled wakeups and post-restart continuations can deliver
+        # without accepting a caller-selected destination.
+        if msg.channel_name == "discord":
+            guild_id = (msg.metadata or {}).get("discord_guild_id")
+            if guild_id is None:
+                raise ValueError(
+                    "Discord inbound message is missing its guild binding"
+                )
+            await self.engine.db.bind_discord_session(
+                session_id,
+                guild_id=guild_id,
+                thread_id=msg.sender_id,
+            )
+
         # Store message context for reaction support
         msg_id = msg.metadata.get("message_id") if msg.metadata else None
         if msg_id is not None:
@@ -426,11 +442,11 @@ class ChannelRouter:
         text: str,
         channel: str | None = None,
     ) -> bool:
-        """Send intentional text to the current inbound chat.
+        """Send intentional text to the session's authorized channel target.
 
-        Both the active channel supplied by the caller and the cached inbound
-        context must match. This prevents a session-scoped tool from sending
-        to a stale chat or choosing an arbitrary target.
+        Discord uses an immutable database binding so a session can report
+        from a wakeup or after a restart. Other channels still require cached
+        context matching the active channel supplied by their caller.
         """
         if channel is None:
             return False
@@ -439,13 +455,22 @@ class ChannelRouter:
         if not chan_obj or ChannelCapability.SEND_TEXT not in chan_obj.capabilities:
             return False
 
-        ctx = self._message_context.get(session_id)
-        if not ctx or ctx.get("channel_name") != channel:
-            return False
+        if channel == "discord":
+            binding = await self.engine.db.get_discord_session_binding(
+                session_id,
+            )
+            if not binding:
+                return False
+            target = str(binding["thread_id"])
+        else:
+            ctx = self._message_context.get(session_id)
+            if not ctx or ctx.get("channel_name") != channel:
+                return False
+            target = ctx["target"]
 
         formatted = chan_obj.format_response(text)
         await chan_obj.send(OutboundMessage(
-            target=ctx["target"],
+            target=target,
             text=formatted,
             session_id=session_id,
         ))

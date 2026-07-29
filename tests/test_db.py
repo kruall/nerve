@@ -79,6 +79,15 @@ class TestSchemaMigration:
             "last_message_id", "last_delivered_message_id",
         }.issubset(columns)
 
+    async def test_discord_session_bindings_table_exists(self, db: Database):
+        async with db.db.execute(
+            "PRAGMA table_info(discord_session_bindings)"
+        ) as cur:
+            columns = {row[1] async for row in cur}
+        assert {
+            "session_id", "guild_id", "thread_id", "created_at",
+        }.issubset(columns)
+
 
 @pytest.mark.asyncio
 class TestDiscordThreadContext:
@@ -129,6 +138,57 @@ class TestSessionCRUD:
         session = await db.create_session("test-defaults")
         assert session["title"] == "test-defaults"  # title defaults to ID
         assert session["status"] == "created"
+
+    async def test_discord_binding_is_idempotent_and_immutable(
+        self, db: Database,
+    ):
+        await db.create_session("discord-bound", source="discord")
+
+        first = await db.bind_discord_session(
+            "discord-bound", guild_id=100, thread_id=200,
+        )
+        repeated = await db.bind_discord_session(
+            "discord-bound", guild_id="100", thread_id="200",
+        )
+
+        assert first["guild_id"] == "100"
+        assert first["thread_id"] == "200"
+        assert repeated == first
+
+        with pytest.raises(ValueError, match="already bound"):
+            await db.bind_discord_session(
+                "discord-bound", guild_id=100, thread_id=201,
+            )
+
+        assert await db.get_discord_session_binding("discord-bound") == first
+
+    async def test_v44_backfills_oldest_discord_mapping(self, db: Database):
+        from nerve.db.migrations import v044_discord_session_binding as v044
+
+        await db.create_session("legacy-discord", source="discord")
+        await db.set_channel_session(
+            "discord:100:200", "legacy-discord",
+        )
+        await db.set_channel_session(
+            "discord:100:201", "legacy-discord",
+        )
+        await db.db.execute(
+            """UPDATE channel_sessions
+               SET updated_at = CASE channel_key
+                   WHEN 'discord:100:200' THEN '2026-01-01T00:00:00+00:00'
+                   ELSE '2026-01-02T00:00:00+00:00'
+               END
+               WHERE session_id = 'legacy-discord'"""
+        )
+        await db.db.commit()
+
+        await v044.up(db.db)
+        await db.db.commit()
+
+        binding = await db.get_discord_session_binding("legacy-discord")
+        assert binding is not None
+        assert binding["guild_id"] == "100"
+        assert binding["thread_id"] == "200"
 
     async def test_create_session_with_parent(self, db: Database):
         await db.create_session("parent-1")

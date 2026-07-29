@@ -59,6 +59,12 @@ class _TypingChannel(_StubChannel):
             self.typing_refreshed.set()
 
 
+class _DiscordStubChannel(_StubChannel):
+    @property
+    def name(self) -> str:
+        return "discord"
+
+
 def test_unregister_removes_failed_channel():
     engine = MagicMock()
     router = ChannelRouter(engine)
@@ -135,6 +141,89 @@ async def test_explicit_text_delivery_refuses_stale_or_mismatched_context():
         "missing", "must not leak", channel="manual",
     ) is False
     assert channel.sent == []
+
+
+@pytest.mark.asyncio
+async def test_discord_text_delivery_uses_durable_binding_after_router_restart(
+    db,
+):
+    await db.create_session("discord-session", source="discord")
+    await db.bind_discord_session(
+        "discord-session", guild_id="100", thread_id="200",
+    )
+    engine = MagicMock()
+    engine.db = db
+    router = ChannelRouter(engine)
+    channel = _DiscordStubChannel()
+    router.register(channel)
+    router._message_context["discord-session"] = {
+        "channel_name": "web",
+        "target": "stale-web-client",
+        "message_id": "old-event",
+    }
+
+    assert await router.send_text(
+        "discord-session", "wakeup complete", channel="discord",
+    ) is True
+    assert len(channel.sent) == 1
+    assert channel.sent[0].target == "200"
+    assert channel.sent[0].text == "wakeup complete"
+
+
+@pytest.mark.asyncio
+async def test_discord_text_delivery_refuses_session_without_binding(db):
+    await db.create_session("web-session", source="web")
+    engine = MagicMock()
+    engine.db = db
+    router = ChannelRouter(engine)
+    channel = _DiscordStubChannel()
+    router.register(channel)
+    router._message_context["web-session"] = {
+        "channel_name": "discord",
+        "target": "stale-thread",
+        "message_id": "old-event",
+    }
+
+    assert await router.send_text(
+        "web-session", "must not leak", channel="discord",
+    ) is False
+    assert channel.sent == []
+
+
+@pytest.mark.asyncio
+async def test_discord_inbound_persists_binding_before_running():
+    engine = MagicMock()
+    engine.sessions.get_active_session = AsyncMock(
+        return_value="discord-session",
+    )
+    engine.db.bind_discord_session = AsyncMock(return_value={
+        "session_id": "discord-session",
+        "guild_id": "100",
+        "thread_id": "200",
+    })
+    engine.run = AsyncMock(return_value="")
+    engine.register_task = MagicMock()
+    router = ChannelRouter(engine)
+    router.BATCH_DEBOUNCE = 0
+    router.register(_DiscordStubChannel(automatic_responses=False))
+
+    await router.handle_message(InboundMessage(
+        channel_name="discord",
+        channel_key="discord:100:200",
+        sender_id="200",
+        text="hello",
+        metadata={
+            "message_id": "message-1",
+            "discord_guild_id": "100",
+        },
+    ))
+
+    engine.db.bind_discord_session.assert_awaited_once_with(
+        "discord-session",
+        guild_id="100",
+        thread_id="200",
+    )
+    engine.run.assert_awaited_once()
 
 
 @pytest.mark.asyncio

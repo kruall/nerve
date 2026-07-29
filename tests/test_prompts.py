@@ -61,6 +61,7 @@ def test_discord_prompt_requires_explicit_public_output(tmp_path: Path):
     assert "# Discord Output Contract" in prompt
     assert "mcp__nerve__discord_send" in prompt
     assert "NOT delivered to" in prompt
+    assert "scheduled wakeups" in prompt
 
 
 def test_non_discord_prompt_has_no_discord_output_contract(tmp_path: Path):
@@ -71,3 +72,17 @@ def test_non_discord_prompt_has_no_discord_output_contract(tmp_path: Path):
     )
 
     assert "# Discord Output Contract" not in prompt
+
+
+def test_wakeup_prompt_keeps_contract_for_bound_discord_session(
+    tmp_path: Path,
+):
+    prompt = build_system_prompt(
+        workspace=tmp_path,
+        session_id="discord-wakeup",
+        source="wakeup",
+        discord_bound=True,
+    )
+
+    assert "# Discord Output Contract" in prompt
+    assert "fixed to the session's Discord thread" in prompt
