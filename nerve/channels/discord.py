@@ -1238,23 +1238,35 @@ class DiscordChannel(BaseChannel):
                 )
             )
         )
+        metadata = {
+            "message_id": str(message.id),
+            "discord_guild_id": guild_id,
+            "discord_channel_id": channel_id,
+            "discord_parent_channel_id": parent_id,
+            "discord_origin_channel_id": int(message.channel.id),
+            "discord_project": project,
+            "discord_skill_id": skill_id,
+            "discord_author_id": int(message.author.id),
+            "discord_author_name": author_name,
+        }
+        if project and self._nerve_config.agent.backend == "codex":
+            tier = self._nerve_config.codex.tier(
+                self.config.project_model_tiers.get(project),
+            )
+            if tier is not None:
+                metadata.update({
+                    "initial_model": tier.model,
+                    "initial_model_tier": tier.id,
+                    "initial_reasoning_effort": tier.effort,
+                })
+
         await self.router.handle_message(InboundMessage(
             channel_name=self.name,
             channel_key=f"discord:{guild_id}:{channel_id}",
             sender_id=str(channel_id),
             text=context + text,
             session_title=title,
-            metadata={
-                "message_id": str(message.id),
-                "discord_guild_id": guild_id,
-                "discord_channel_id": channel_id,
-                "discord_parent_channel_id": parent_id,
-                "discord_origin_channel_id": int(message.channel.id),
-                "discord_project": project,
-                "discord_skill_id": skill_id,
-                "discord_author_id": int(message.author.id),
-                "discord_author_name": author_name,
-            },
+            metadata=metadata,
             steer_if_busy=True,
         ))
 

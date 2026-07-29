@@ -18,6 +18,8 @@ TEXT_CHANNEL = 200
 CONVERSATION_THREAD = 201
 YDB_FORUM = 300
 YDB_THREAD = 301
+NERVE_FORUM = 302
+NERVE_THREAD = 303
 SKILLS_FORUM = 320
 SKILL_THREAD = 321
 AUDIT_FORUM = 350
@@ -60,16 +62,27 @@ class _ForumChannel:
             yield thread
 
 
-def _channel() -> DiscordChannel:
-    cfg = NerveConfig.from_dict({"discord": {
+def _channel(
+    *,
+    task_forums: dict[str, int] | None = None,
+    project_model_tiers: dict[str, str] | None = None,
+    backend: str = "claude",
+) -> DiscordChannel:
+    discord_config = {
         "enabled": True,
         "bot_token": "synthetic-token",
         "guild_id": GUILD,
         "channel_ids": [TEXT_CHANNEL],
-        "task_forums": {"YDB": YDB_FORUM},
+        "task_forums": task_forums or {"YDB": YDB_FORUM},
         "allowed_author_ids": [USER, PEER_BOT],
         "require_mention": True,
-    }})
+    }
+    if project_model_tiers is not None:
+        discord_config["project_model_tiers"] = project_model_tiers
+    cfg = NerveConfig.from_dict({
+        "agent": {"backend": backend},
+        "discord": discord_config,
+    })
     db = MagicMock()
     db.get_sync_cursor = AsyncMock(return_value=None)
     db.set_sync_cursor = AsyncMock()
@@ -739,6 +752,70 @@ async def test_dispatch_maps_forum_thread_to_project():
     assert inbound.metadata["discord_parent_channel_id"] == YDB_FORUM
     assert inbound.metadata["discord_project"] == "YDB"
     assert "проекта YDB" in inbound.text
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sets_initial_tier_for_codex_project_session():
+    channel = _channel(
+        backend="codex",
+        project_model_tiers={"YDB": "sol-xhigh"},
+    )
+    channel.router.handle_message = AsyncMock()
+
+    await channel._dispatch(_message(
+        channel_id=YDB_THREAD,
+        parent_id=YDB_FORUM,
+    ))
+
+    inbound = channel.router.handle_message.await_args.args[0]
+    assert inbound.metadata["initial_model"] == "gpt-5.6-sol"
+    assert inbound.metadata["initial_model_tier"] == "sol-xhigh"
+    assert inbound.metadata["initial_reasoning_effort"] == "xhigh"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_uses_independent_initial_tier_for_each_project_forum():
+    channel = _channel(
+        backend="codex",
+        task_forums={"YDB": YDB_FORUM, "NERVE": NERVE_FORUM},
+        project_model_tiers={"YDB": "sol-medium", "NERVE": "terra-high"},
+    )
+    channel.router.handle_message = AsyncMock()
+
+    await channel._dispatch(_message(
+        channel_id=YDB_THREAD,
+        parent_id=YDB_FORUM,
+    ))
+    ydb_inbound = channel.router.handle_message.await_args.args[0]
+    assert ydb_inbound.metadata["initial_model"] == "gpt-5.6-sol"
+    assert ydb_inbound.metadata["initial_model_tier"] == "sol-medium"
+    assert ydb_inbound.metadata["initial_reasoning_effort"] == "medium"
+
+    await channel._dispatch(_message(
+        channel_id=NERVE_THREAD,
+        parent_id=NERVE_FORUM,
+    ))
+
+    inbound = channel.router.handle_message.await_args.args[0]
+    assert inbound.metadata["initial_model"] == "gpt-5.6-terra"
+    assert inbound.metadata["initial_model_tier"] == "terra-high"
+    assert inbound.metadata["initial_reasoning_effort"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_ignores_project_tier_for_non_codex_session():
+    channel = _channel(project_model_tiers={"YDB": "sol-xhigh"})
+    channel.router.handle_message = AsyncMock()
+
+    await channel._dispatch(_message(
+        channel_id=YDB_THREAD,
+        parent_id=YDB_FORUM,
+    ))
+
+    inbound = channel.router.handle_message.await_args.args[0]
+    assert "initial_model" not in inbound.metadata
+    assert "initial_model_tier" not in inbound.metadata
+    assert "initial_reasoning_effort" not in inbound.metadata
 
 
 @pytest.mark.asyncio

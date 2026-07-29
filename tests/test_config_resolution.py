@@ -244,6 +244,7 @@ class TestDiscordConfig:
         assert cfg.guild_id == 0
         assert cfg.channel_ids == []
         assert cfg.task_forums == {}
+        assert cfg.project_model_tiers == {}
         assert cfg.skills_forum_id == 0
         assert cfg.audit_forum_id == 0
         assert cfg.audit_batch_window_seconds == 60.0
@@ -257,6 +258,7 @@ class TestDiscordConfig:
             "guild_id": "100",
             "channel_ids": ["200"],
             "task_forums": {"YDB": "300"},
+            "project_model_tiers": {"YDB": "sol-xhigh"},
             "skills_forum_id": "325",
             "audit_forum_id": "350",
             "audit_batch_window_seconds": "90",
@@ -267,12 +269,17 @@ class TestDiscordConfig:
         assert cfg.guild_id == 100
         assert cfg.channel_ids == [200]
         assert cfg.task_forums == {"YDB": 300}
+        assert cfg.project_model_tiers == {"YDB": "sol-xhigh"}
         assert cfg.skills_forum_id == 325
         assert cfg.audit_forum_id == 350
         assert cfg.audit_batch_window_seconds == 90.0
         assert cfg.presence_enabled is True
         assert cfg.presence_refresh_interval_seconds == 600.0
         assert cfg.allowed_author_ids == [400, 500]
+
+    def test_non_mapping_project_model_tiers_are_ignored(self):
+        cfg = DiscordConfig.from_dict({"project_model_tiers": "sol-xhigh"})
+        assert cfg.project_model_tiers == {}
 
     def test_known_keys_pass_validation(self):
         merged = {
@@ -282,6 +289,7 @@ class TestDiscordConfig:
                 "guild_id": 100,
                 "channel_ids": [200],
                 "task_forums": {"YDB": 300},
+                "project_model_tiers": {"YDB": "sol-xhigh"},
                 "skills_forum_id": 325,
                 "audit_forum_id": 350,
                 "audit_batch_window_seconds": 60,
@@ -292,6 +300,19 @@ class TestDiscordConfig:
             },
         }
         assert validate_config_keys(merged) == []
+
+    def test_project_model_tiers_require_configured_project_and_known_tier(self):
+        with pytest.raises(ValueError, match="not configured"):
+            NerveConfig.from_dict({"discord": {
+                "task_forums": {"YDB": 300},
+                "project_model_tiers": {"NERVE": "sol-xhigh"},
+            }})
+
+        with pytest.raises(ValueError, match="unknown Codex tiers"):
+            NerveConfig.from_dict({"discord": {
+                "task_forums": {"YDB": 300},
+                "project_model_tiers": {"YDB": "not-a-tier"},
+            }})
 
 
 class TestAppendTelegramAllowedUser:

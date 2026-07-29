@@ -127,6 +127,31 @@ class TestChannelMapping:
         assert session["source"] == "telegram"
         assert session["title"] == "Telegram · test"
 
+    async def test_auto_session_persists_initial_model_profile_only_on_create(
+        self, db: Database,
+    ):
+        sm = SessionManager(db, default_backend="codex")
+        sid = await sm.get_active_session(
+            "discord:100:200",
+            source="discord",
+            model="gpt-5.6-terra",
+            model_tier="terra-high",
+            reasoning_effort="high",
+        )
+        same = await sm.get_active_session(
+            "discord:100:200",
+            source="discord",
+            model="gpt-5.6-sol",
+            model_tier="sol-xhigh",
+            reasoning_effort="xhigh",
+        )
+
+        assert same == sid
+        session = await db.get_session(sid)
+        assert session["model"] == "gpt-5.6-terra"
+        assert session["model_tier"] == "terra-high"
+        assert session["reasoning_effort"] == "high"
+
     async def test_reused_session_backfills_default_id_title(
         self, sm: SessionManager, db: Database,
     ):

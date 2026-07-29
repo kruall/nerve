@@ -107,10 +107,17 @@ discord:
   # Each project uses a separate Discord forum channel.
   # task_forums:
   #   YDB: 123456789012345680
+  #   NERVE: 123456789012345681
   # Nerve creates a pinned "Project prompt" thread in every configured project
   # forum. Split the working instructions across as many allowed-author messages
   # as needed; Nerve joins them chronologically and reflects edits or deletions
   # when adding the combined prompt to other forum threads.
+  # Optional initial Codex tier for sessions created in each project forum.
+  # Keys must also be present in task_forums; the global codex.default_tier
+  # remains the fallback. Existing sessions keep their stored tier.
+  # project_model_tiers:
+  #   YDB: sol-medium
+  #   NERVE: terra-high
   # Optional shared skill forum. Nerve creates one thread per local skill,
   # attaches exact SKILL.md snapshots after creation and updates, and accepts
   # mention/reply-driven discussion in managed skill threads. Threads and
