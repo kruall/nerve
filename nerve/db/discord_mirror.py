@@ -195,8 +195,6 @@ class DiscordMirrorStore:
                 FROM sessions s
                 LEFT JOIN discord_session_mirrors m ON m.session_id = s.id
                 WHERE ({where})
-                  AND s.id NOT LIKE 'cron:%'
-                  AND lower(COALESCE(s.source, '')) NOT IN ('cron', 'system')
                 ORDER BY s.created_at ASC, s.id ASC
                 LIMIT ? OFFSET ?""",
             params,

@@ -96,6 +96,8 @@ discord:
   # mirror threads are reconciled after every restart. The same forum also
   # contains pinned "Notifications", "Questions", and "Approvals" inbox
   # threads with persistent controls.
+  # When the forum contains the five managed tags documented in docs/config.md,
+  # each mirror thread automatically receives one type and one state tag.
   # audit_forum_id: 123456789012345682
   # Collect session activity before updating Discord. Terminal events flush
   # immediately. Set to 0 only when immediate audit updates are required.

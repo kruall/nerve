@@ -10,6 +10,22 @@ from nerve.agent.streaming import StreamBroadcaster
 from nerve.channels.discord_mirror import DiscordSessionMirror
 
 
+class _Tag:
+    def __init__(self, tag_id: int, name: str):
+        self.id = tag_id
+        self.name = name
+
+
+def _audit_tags() -> list[_Tag]:
+    return [
+        _Tag(300, "ожидаю"),
+        _Tag(301, "системные"),
+        _Tag(302, "сессия"),
+        _Tag(303, "активная"),
+        _Tag(304, "остановленная"),
+    ]
+
+
 class _Message:
     def __init__(self, message_id: int, content: str):
         self.id = message_id
@@ -27,10 +43,18 @@ class _Message:
 
 
 class _Thread:
-    def __init__(self, thread_id: int, starter_id: int, starter: str):
+    def __init__(
+        self,
+        thread_id: int,
+        starter_id: int,
+        starter: str,
+        applied_tags: list[_Tag] | None = None,
+    ):
         self.id = thread_id
         self._next_id = starter_id + 1
         self.bulk_delete_calls = 0
+        self.applied_tags = list(applied_tags or [])
+        self.tag_edit_count = 0
         self.messages = {
             starter_id: _Message(starter_id, starter),
         }
@@ -49,18 +73,29 @@ class _Thread:
         for message in messages:
             self.messages[message.id].deleted = True
 
+    async def edit(self, *, applied_tags, **kwargs):
+        self.applied_tags = list(applied_tags)
+        self.tag_edit_count += 1
+        return self
+
 
 class _Forum:
-    def __init__(self, client):
+    def __init__(self, client, *, available_tags: list[_Tag] | None = None):
         self.id = 200
         self.guild = SimpleNamespace(id=100)
         self.client = client
         self.created = []
+        self.available_tags = list(available_tags or [])
 
     async def create_thread(self, *, name, content, **kwargs):
         thread_id = 1000 + len(self.created)
         starter_id = 2000 + len(self.created)
-        thread = _Thread(thread_id, starter_id, content)
+        thread = _Thread(
+            thread_id,
+            starter_id,
+            content,
+            applied_tags=kwargs.get("applied_tags"),
+        )
         self.client.channels[thread_id] = thread
         result = SimpleNamespace(
             thread=thread,
@@ -524,12 +559,12 @@ async def test_reconcile_skips_old_unmapped_sessions_but_keeps_mapped_ones(db):
         ("internal-run", "system"),
     ],
 )
-async def test_mirror_skips_system_sessions(db, session_id, source):
+async def test_mirror_includes_and_tags_system_sessions(db, session_id, source):
     await db.create_session(session_id, title="System run", source=source)
     await db.add_message(session_id, "user", "internal trigger")
 
     client = _Client()
-    forum = _Forum(client)
+    forum = _Forum(client, available_tags=_audit_tags())
     client.channels[forum.id] = forum
     mirror = DiscordSessionMirror(
         client=client,
@@ -542,12 +577,109 @@ async def test_mirror_skips_system_sessions(db, session_id, source):
 
     await mirror._sync_session(session_id)
 
-    assert forum.created == []
-    assert await db.get_discord_session_mirror(session_id) is None
+    assert len(forum.created) == 1
+    thread = forum.created[0][2].thread
+    assert {tag.name for tag in thread.applied_tags} == {
+        "системные",
+        "активная",
+    }
+    assert await db.get_discord_session_mirror(session_id) is not None
     eligible = await db.list_discord_mirror_sessions(
         active_after="2000-01-01T00:00:00+00:00",
     )
-    assert session_id not in {session["id"] for session in eligible}
+    assert session_id in {session["id"] for session in eligible}
+
+
+@pytest.mark.asyncio
+async def test_mirror_moves_session_between_waiting_active_and_stopped_tags(db):
+    session_id = "session-tags"
+    await db.create_session(
+        session_id,
+        title="Tagged session",
+        source="discord",
+        status="active",
+    )
+
+    client = _Client()
+    forum = _Forum(client, available_tags=_audit_tags())
+    client.channels[forum.id] = forum
+    mirror = DiscordSessionMirror(
+        client=client,
+        db=db,
+        guild_id=100,
+        forum_id=forum.id,
+        stream=StreamBroadcaster(),
+    )
+    mirror._forum = forum
+
+    await mirror._sync_session(session_id)
+    thread = forum.created[0][2].thread
+    assert {tag.name for tag in thread.applied_tags} == {
+        "сессия",
+        "активная",
+    }
+
+    await db.create_notification(
+        "question-1",
+        session_id,
+        "question",
+        "Need input",
+    )
+    await mirror._sync_session(session_id)
+    assert {tag.name for tag in thread.applied_tags} == {
+        "сессия",
+        "ожидаю",
+    }
+
+    await db.answer_notification("question-1", "continue", "web")
+    await mirror._sync_session(session_id)
+    assert {tag.name for tag in thread.applied_tags} == {
+        "сессия",
+        "активная",
+    }
+
+    await db.update_session_fields(session_id, {"status": "stopped"})
+    await mirror._sync_session(session_id)
+    assert {tag.name for tag in thread.applied_tags} == {
+        "сессия",
+        "остановленная",
+    }
+
+
+@pytest.mark.asyncio
+async def test_mirror_tag_policy_preserves_unmanaged_thread_tags(db):
+    session_id = "session-extra-tag"
+    await db.create_session(session_id, source="web", status="active")
+    extra = _Tag(399, "important")
+    client = _Client()
+    forum = _Forum(client, available_tags=[*_audit_tags(), extra])
+    client.channels[forum.id] = forum
+    mirror = DiscordSessionMirror(
+        client=client,
+        db=db,
+        guild_id=100,
+        forum_id=forum.id,
+        stream=StreamBroadcaster(),
+    )
+    mirror._forum = forum
+
+    await mirror._sync_session(session_id)
+    thread = forum.created[0][2].thread
+    thread.applied_tags.append(extra)
+    await db.create_notification(
+        "approval-1",
+        session_id,
+        "approval",
+        "Approve action",
+    )
+
+    await mirror._sync_session(session_id)
+
+    assert {tag.name for tag in thread.applied_tags} == {
+        "important",
+        "сессия",
+        "ожидаю",
+    }
 
 
 def test_tool_calls_are_compact_and_grouped_like_telegram():
@@ -659,3 +791,27 @@ async def test_ui_only_live_events_are_ignored():
 
     assert "session-1" not in mirror._live_blocks
     mirror._mark_dirty.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_global_notification_events_refresh_the_owning_session():
+    mirror = DiscordSessionMirror(
+        client=_Client(),
+        db=AsyncMock(),
+        guild_id=100,
+        forum_id=200,
+        stream=StreamBroadcaster(),
+    )
+    mirror._mark_dirty = MagicMock()
+
+    await mirror._on_stream_event("__global__", {
+        "type": "notification_answered",
+        "session_id": "session-1",
+        "notification_id": "question-1",
+    })
+
+    mirror._mark_dirty.assert_called_once_with(
+        "session-1",
+        immediate=True,
+    )
+    assert "__global__" not in mirror._live_blocks

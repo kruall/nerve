@@ -1,4 +1,4 @@
-"""Discord project-forum management tools.
+"""Discord project/audit-forum management tools.
 
 ``discord_forum_tags`` is read-only. ``discord_forum_tag_action`` never
 mutates Discord directly: it prepares a fully described action and files an
@@ -133,9 +133,10 @@ async def discord_forum_tag_action_handler(
 DISCORD_FORUM_TAGS_SPEC = ToolSpec(
     name="discord_forum_tags",
     description=(
-        "Read configured Discord project-forum tags and, optionally, the tags "
-        "applied to a forum thread. This is read-only and needs no approval. "
-        "When called from a Discord forum thread, project/thread can be inferred."
+        "Read configured Discord project/audit-forum tags and, optionally, "
+        "the tags applied to a forum thread. This is read-only and needs no "
+        "approval. Use project=AUDIT for discord.audit_forum_id. When called "
+        "from a Discord forum thread, project/thread can be inferred."
     ),
     input_schema=DISCORD_FORUM_TAGS_SCHEMA,
     handler=discord_forum_tags_handler,
@@ -145,10 +146,11 @@ DISCORD_FORUM_TAG_ACTION_SPEC = ToolSpec(
     name="discord_forum_tag_action",
     description=(
         "Request creation, update, deletion, assignment, removal, or replacement "
-        "of Discord project-forum tags. This tool NEVER mutates Discord directly: "
-        "every call creates a mandatory approval, and a server-side dispatcher "
-        "executes only after the user selects Approve. Use discord_forum_tags "
-        "first when tag IDs are unknown."
+        "of Discord project/audit-forum tags. Use project=AUDIT for "
+        "discord.audit_forum_id. This tool NEVER mutates Discord directly: every "
+        "call creates a mandatory approval, and a server-side dispatcher executes "
+        "only after the user selects Approve. Use discord_forum_tags first when "
+        "tag IDs are unknown."
     ),
     input_schema=DISCORD_FORUM_TAG_ACTION_SCHEMA,
     handler=discord_forum_tag_action_handler,

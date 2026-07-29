@@ -95,6 +95,18 @@ class NotificationStore:
         ) as cursor:
             return [dict(row) async for row in cursor]
 
+    async def has_pending_session_interaction(self, session_id: str) -> bool:
+        """Whether a session is waiting for a question or approval answer."""
+        async with self.db.execute(
+            """SELECT 1 FROM notifications
+               WHERE session_id = ?
+                 AND status = 'pending'
+                 AND type IN ('question', 'approval')
+               LIMIT 1""",
+            (session_id,),
+        ) as cursor:
+            return await cursor.fetchone() is not None
+
     async def answer_notification(
         self, notification_id: str, answer: str, answered_by: str,
     ) -> bool:

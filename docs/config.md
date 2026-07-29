@@ -242,6 +242,21 @@ split only at Discord's message-size boundary. Completion, stop, and error
 events flush without waiting for the window. Hidden model reasoning is never
 mirrored.
 
+The mirror manages two tags on each audit thread when the audit forum contains
+one unique tag with each of these exact names:
+
+- type: `системные` for cron, hook, and system sessions; otherwise `сессия`;
+- state: `ожидаю` while a question or approval owned by the session is pending,
+  `остановленная` for stopped, errored, or archived sessions, and `активная`
+  otherwise.
+
+The mirror applies and replaces these existing tags directly as a bounded,
+restart-safe projection; these thread-only state changes do not create approval
+notifications. Unrelated tags are preserved, subject to Discord's five-tag
+limit. Creating, renaming, updating, or deleting the available tag definitions
+remains approval-gated. Use the forum-tag tools with `project: AUDIT` to inspect
+or prepare those administrative changes.
+
 The session-to-thread mapping and per-item Discord message IDs are stored in
 the Nerve database. On restart, mapped threads are reconciled and incomplete
 live placeholders are repaired without duplicating persisted content. Existing
@@ -290,8 +305,9 @@ discord:
 
 ### Discord forum-tag tools
 
-Two agent tools expose tag management only for forums listed in
-`discord.task_forums`:
+Two agent tools expose tag management for forums listed in
+`discord.task_forums` and for `discord.audit_forum_id` under the reserved
+project name `AUDIT`:
 
 - `discord_forum_tags` reads a project's available tags and, when a thread ID
   is supplied or inferred from the active Discord turn, its applied tags.
@@ -301,12 +317,12 @@ Two agent tools expose tag management only for forums listed in
   **Approve** and **Decline** options.
 
 On approval, a server-side dispatcher re-fetches the forum and thread,
-verifies the guild and current `discord.task_forums` mapping, validates the
-20-tag forum limit and 5-tag thread limit, and only then calls Discord's
-Modify Channel endpoint. Decline and expired approvals perform no Discord
-request. Approval cards use the configured notification channels (normally
-the web UI and/or Telegram) and are additionally delivered to the pinned
-`Approvals` thread whenever `discord.audit_forum_id` is configured.
+verifies the guild and current project/audit forum mapping, validates the
+20-tag forum limit and 5-tag thread limit, and only then calls Discord's Modify
+Channel endpoint. Decline and expired approvals perform no Discord request.
+Approval cards use the configured notification channels (normally the web UI
+and/or Telegram) and are additionally delivered to the pinned `Approvals`
+thread whenever `discord.audit_forum_id` is configured.
 
 Discord API reference:
 [Channel and Forum Tag objects](https://docs.discord.com/developers/resources/channel)

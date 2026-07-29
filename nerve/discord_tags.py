@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 DISCORD_FORUM_TAG_TARGET_KIND = "discord-forum-tag"
 DISCORD_FORUM_TAG_METADATA_KEY = "discord_forum_tag_action"
+DISCORD_AUDIT_FORUM_PROJECT = "AUDIT"
 
 _API_BASE = "https://discord.com/api/v10"
 _FORUM_CHANNEL_TYPES = frozenset({15, 16})
@@ -264,10 +265,18 @@ def _canonical_project(
         raise DiscordForumTagError(
             "project is required outside a configured forum thread"
         )
+    if (
+        requested == DISCORD_AUDIT_FORUM_PROJECT.casefold()
+        and config.audit_forum_id
+    ):
+        return DISCORD_AUDIT_FORUM_PROJECT, int(config.audit_forum_id)
     for name, forum_id in config.task_forums.items():
         if name.casefold() == requested:
             return name, int(forum_id)
-    configured = ", ".join(sorted(config.task_forums)) or "(none)"
+    configured_names = list(config.task_forums)
+    if config.audit_forum_id:
+        configured_names.append(DISCORD_AUDIT_FORUM_PROJECT)
+    configured = ", ".join(sorted(configured_names)) or "(none)"
     raise DiscordForumTagError(
         f"Unknown Discord project {project!r}; configured projects: {configured}"
     )
@@ -280,7 +289,11 @@ def _project_for_forum(
     for project, configured_id in config.task_forums.items():
         if int(configured_id) == forum_id:
             return project
-    raise DiscordForumTagError("Discord forum is not present in discord.task_forums")
+    if config.audit_forum_id and int(config.audit_forum_id) == forum_id:
+        return DISCORD_AUDIT_FORUM_PROJECT
+    raise DiscordForumTagError(
+        "Discord forum is not configured as a project or audit forum"
+    )
 
 
 def _validate_guild(config: DiscordConfig, channel: dict[str, Any]) -> None:
@@ -353,8 +366,10 @@ class DiscordForumTagManager:
         self.config = config.discord
         if not self.config.enabled:
             raise DiscordForumTagError("Discord integration is disabled")
-        if not self.config.task_forums:
-            raise DiscordForumTagError("discord.task_forums has no configured projects")
+        if not self.config.task_forums and not self.config.audit_forum_id:
+            raise DiscordForumTagError(
+                "Discord has no configured project or audit forums"
+            )
 
     def fetch_forum(
         self,

@@ -25,6 +25,7 @@ from nerve.discord_tags import (
 
 
 FORUM_ID = 100
+AUDIT_FORUM_ID = 101
 THREAD_ID = 200
 TAG_TODO = "300"
 TAG_DONE = "301"
@@ -37,14 +38,19 @@ def _config() -> NerveConfig:
         bot_token="test-token",
         guild_id=1,
         task_forums={"NERVE": FORUM_ID},
+        audit_forum_id=AUDIT_FORUM_ID,
         allowed_author_ids=[2],
     )
     return config
 
 
-def _forum(tags: list[dict] | None = None) -> dict:
+def _forum(
+    tags: list[dict] | None = None,
+    *,
+    forum_id: int = FORUM_ID,
+) -> dict:
     return {
-        "id": str(FORUM_ID),
+        "id": str(forum_id),
         "guild_id": "1",
         "type": 15,
         "name": "nerve",
@@ -89,9 +95,11 @@ def _fake_api(monkeypatch, *, applied: list[str] | None = None):
         calls.append((method, channel_id, payload, audit_reason))
         if method == "GET" and channel_id == FORUM_ID:
             return _forum()
+        if method == "GET" and channel_id == AUDIT_FORUM_ID:
+            return _forum(forum_id=AUDIT_FORUM_ID)
         if method == "GET" and channel_id == THREAD_ID:
             return _thread(applied)
-        if method == "PATCH" and channel_id == FORUM_ID:
+        if method == "PATCH" and channel_id in {FORUM_ID, AUDIT_FORUM_ID}:
             tags = []
             next_id = 900
             for raw in payload["available_tags"]:
@@ -99,7 +107,7 @@ def _fake_api(monkeypatch, *, applied: list[str] | None = None):
                 tag.setdefault("id", str(next_id))
                 next_id += 1
                 tags.append(tag)
-            return _forum(tags)
+            return _forum(tags, forum_id=channel_id)
         if method == "PATCH" and channel_id == THREAD_ID:
             return _thread(payload["applied_tags"])
         raise AssertionError((method, channel_id, payload))
@@ -135,6 +143,18 @@ def test_inspect_lists_available_and_applied_tags(monkeypatch):
     assert [call[:2] for call in calls] == [
         ("GET", THREAD_ID),
         ("GET", FORUM_ID),
+    ]
+
+
+def test_inspect_supports_the_configured_audit_forum(monkeypatch):
+    calls = _fake_api(monkeypatch)
+
+    result = DiscordForumTagManager(_config()).inspect(project="AUDIT")
+
+    assert result["project"] == "AUDIT"
+    assert result["forum_id"] == str(AUDIT_FORUM_ID)
+    assert [call[:2] for call in calls] == [
+        ("GET", AUDIT_FORUM_ID),
     ]
 
 
@@ -175,6 +195,73 @@ async def test_mutation_tool_only_creates_approval(monkeypatch):
     assert action["operation"] == "create_tag"
     assert action["tag"]["name"] == "In review"
     assert action["action_id"].startswith("discord-tag-")
+
+
+@pytest.mark.asyncio
+async def test_audit_forum_tag_definition_changes_still_require_approval(
+    monkeypatch,
+):
+    calls = _fake_api(monkeypatch)
+    service = AsyncMock()
+    service.propose_action.return_value = {
+        "notification_id": "approval-audit",
+        "status": "sent",
+    }
+    ctx = ToolContext(
+        session_id="s1",
+        config=_config(),
+        notification_service=service,
+    )
+
+    result = await discord_forum_tag_action_handler(
+        ctx,
+        {
+            "operation": "create_tag",
+            "project": "AUDIT",
+            "name": "ожидаю",
+            "emoji_name": "⏳",
+        },
+    )
+
+    assert result.is_error is False
+    assert "No Discord state was changed" in result.content[0]["text"]
+    assert [call[:2] for call in calls] == [("GET", AUDIT_FORUM_ID)]
+    action = service.propose_action.await_args.kwargs[
+        "metadata"
+    ][DISCORD_FORUM_TAG_METADATA_KEY]
+    assert action["project"] == "AUDIT"
+    assert action["forum_id"] == str(AUDIT_FORUM_ID)
+
+
+def test_approved_audit_tag_definition_change_uses_audit_forum(
+    monkeypatch,
+):
+    calls = _fake_api(monkeypatch)
+    action = {
+        "version": 1,
+        "operation": "create_tag",
+        "project": "AUDIT",
+        "forum_id": str(AUDIT_FORUM_ID),
+        "tag": {
+            "name": "ожидаю",
+            "moderated": False,
+            "emoji_id": None,
+            "emoji_name": "⏳",
+        },
+    }
+
+    result = dispatch_discord_forum_tag_action(
+        _notification(action),
+        "action-1",
+        "approve",
+        _config(),
+    )
+
+    assert result.ok is True
+    assert [call[:2] for call in calls] == [
+        ("GET", AUDIT_FORUM_ID),
+        ("PATCH", AUDIT_FORUM_ID),
+    ]
 
 
 def test_decline_never_contacts_discord(monkeypatch):

@@ -837,8 +837,9 @@ DISCORD_FORUM_TAGS_SCHEMA = {
         "project": {
             "type": "string",
             "description": (
-                "Configured discord.task_forums project name. Optional inside "
-                "a currently active Discord project-forum thread."
+                "Configured discord.task_forums project name, or AUDIT for "
+                "discord.audit_forum_id. Optional inside a currently active "
+                "Discord project-forum thread."
             ),
             "default": "",
         },
@@ -876,8 +877,9 @@ DISCORD_FORUM_TAG_ACTION_SCHEMA = {
         "project": {
             "type": "string",
             "description": (
-                "Configured discord.task_forums project. Optional inside a "
-                "current project-forum thread."
+                "Configured discord.task_forums project, or AUDIT for "
+                "discord.audit_forum_id. Optional inside a current "
+                "project-forum thread."
             ),
             "default": "",
         },

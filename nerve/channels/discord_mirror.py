@@ -33,6 +33,15 @@ _MAX_LIVE_RENDER_CHARS = 12_000
 _BATCH_SEPARATOR = "\n\n"
 _COMPACT_BATCH_SEPARATOR = "\n"
 _COMPACT_EVENT_TYPES = {"created", "idle", "started", "stopped", "wakeup"}
+_AUDIT_TAG_NAMES = {
+    "waiting": "ожидаю",
+    "system": "системные",
+    "session": "сессия",
+    "active": "активная",
+    "stopped": "остановленная",
+}
+_SYSTEM_SESSION_SOURCES = frozenset({"cron", "hook", "system"})
+_STOPPED_SESSION_STATUSES = frozenset({"archived", "error", "stopped"})
 
 
 def _split_message(text: str, limit: int = _MAX_DISCORD_MESSAGE) -> list[str]:
@@ -113,6 +122,7 @@ class DiscordSessionMirror:
         self._live_blocks: dict[str, list[dict[str, Any]]] = {}
         self._live_hashes: dict[str, str] = {}
         self._terminal_sessions: set[str] = set()
+        self._missing_audit_tags: frozenset[str] = frozenset()
         self._listener_id = f"discord-session-mirror:{forum_id}"
 
     async def start(self) -> None:
@@ -179,6 +189,16 @@ class DiscordSessionMirror:
     ) -> None:
         """Capture one live event and enqueue a batched projection update."""
         event_type = str(event.get("type") or "")
+        if session_id == "__global__":
+            if event_type in {
+                "notification",
+                "notification_answered",
+                "notification_expired",
+            }:
+                target_session_id = str(event.get("session_id") or "")
+                if target_session_id:
+                    self._mark_dirty(target_session_id, immediate=True)
+            return
         if event_type == "thinking":
             # Nerve may store model reasoning for its own UI, but the audit
             # mirror intentionally exposes only user-visible output.
@@ -392,15 +412,9 @@ class DiscordSessionMirror:
             self._live_hashes.pop(session_id, None)
             self._terminal_sessions.discard(session_id)
             return
-        if self._is_system_session(session):
-            # System/cron runs stay in Nerve's own UI and logs. Do not create
-            # or update Discord audit threads for them.
-            self._live_blocks.pop(session_id, None)
-            self._live_hashes.pop(session_id, None)
-            self._terminal_sessions.discard(session_id)
-            return
 
         mirror, thread = await self._ensure_thread(session)
+        thread = await self._sync_thread_tags(session, thread)
         await self._sync_header(session, mirror, thread)
 
         persisted = await self.db.get_discord_mirror_content_items(session_id)
@@ -523,11 +537,16 @@ class DiscordSessionMirror:
                 )
 
         header = self._render_header(session)
+        applied_tags = await self._desired_audit_tags(session)
+        create_kwargs: dict[str, Any] = {}
+        if applied_tags is not None:
+            create_kwargs["applied_tags"] = applied_tags
         result = await self._forum.create_thread(
             name=self._thread_name(session),
             content=header,
             allowed_mentions=discord.AllowedMentions.none(),
             reason=f"Nerve session mirror {session_id[:32]}",
+            **create_kwargs,
         )
         thread = result.thread
         starter = result.message
@@ -543,6 +562,101 @@ class DiscordSessionMirror:
         if mirror is None:
             raise RuntimeError("Discord session mirror checkpoint was not saved")
         return mirror, thread
+
+    async def _sync_thread_tags(
+        self,
+        session: dict[str, Any],
+        thread: Any,
+    ) -> Any:
+        desired_managed = await self._desired_audit_tags(session)
+        if desired_managed is None:
+            return thread
+
+        available = self._available_audit_tags()
+        managed_ids = {
+            self._tag_id(tag)
+            for tag in available.values()
+        }
+        current = list(getattr(thread, "applied_tags", []) or [])
+        unmanaged = [
+            tag for tag in current
+            if self._tag_id(tag) not in managed_ids
+        ]
+        desired = unmanaged + desired_managed
+        if len(desired) > 5:
+            logger.warning(
+                "Discord mirror thread %s has too many unmanaged tags to "
+                "apply the audit policy",
+                getattr(thread, "id", "unknown"),
+            )
+            return thread
+
+        current_ids = {self._tag_id(tag) for tag in current}
+        desired_ids = {self._tag_id(tag) for tag in desired}
+        if current_ids == desired_ids and len(current) == len(desired):
+            return thread
+
+        updated = await thread.edit(
+            applied_tags=desired,
+            reason=f"Nerve audit tag policy {str(session['id'])[:32]}",
+        )
+        return updated or thread
+
+    async def _desired_audit_tags(
+        self,
+        session: dict[str, Any],
+    ) -> list[Any] | None:
+        tags = self._available_audit_tags()
+        if len(tags) != len(_AUDIT_TAG_NAMES):
+            return None
+
+        type_key = "system" if self._is_system_session(session) else "session"
+        status = str(session.get("status") or "").lower()
+        if status in _STOPPED_SESSION_STATUSES:
+            state_key = "stopped"
+        elif await self.db.has_pending_session_interaction(str(session["id"])):
+            state_key = "waiting"
+        else:
+            state_key = "active"
+        return [tags[type_key], tags[state_key]]
+
+    def _available_audit_tags(self) -> dict[str, Any]:
+        available = list(getattr(self._forum, "available_tags", []) or [])
+        by_name: dict[str, list[Any]] = {}
+        for tag in available:
+            name = self._tag_name(tag).casefold()
+            by_name.setdefault(name, []).append(tag)
+
+        resolved: dict[str, Any] = {}
+        missing: set[str] = set()
+        for key, name in _AUDIT_TAG_NAMES.items():
+            matches = by_name.get(name.casefold(), [])
+            if len(matches) == 1:
+                resolved[key] = matches[0]
+            else:
+                missing.add(name)
+
+        frozen_missing = frozenset(missing)
+        if frozen_missing != self._missing_audit_tags:
+            if frozen_missing:
+                logger.warning(
+                    "Discord audit forum is missing unique managed tags: %s",
+                    ", ".join(sorted(frozen_missing)),
+                )
+            else:
+                logger.info("Discord audit forum managed tags are available")
+            self._missing_audit_tags = frozen_missing
+        return resolved
+
+    @staticmethod
+    def _tag_id(tag: Any) -> int:
+        value = tag.get("id") if isinstance(tag, dict) else getattr(tag, "id")
+        return int(value)
+
+    @staticmethod
+    def _tag_name(tag: Any) -> str:
+        value = tag.get("name") if isinstance(tag, dict) else getattr(tag, "name")
+        return str(value or "")
 
     async def _sync_header(
         self,
@@ -856,4 +970,7 @@ class DiscordSessionMirror:
     def _is_system_session(session: dict[str, Any]) -> bool:
         session_id = str(session.get("id") or "")
         source = str(session.get("source") or "").lower()
-        return session_id.startswith("cron:") or source in {"cron", "system"}
+        return (
+            session_id.startswith(("cron:", "hook:"))
+            or source in _SYSTEM_SESSION_SOURCES
+        )
