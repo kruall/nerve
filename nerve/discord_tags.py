@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 DISCORD_FORUM_TAG_TARGET_KIND = "discord-forum-tag"
 DISCORD_FORUM_TAG_METADATA_KEY = "discord_forum_tag_action"
+DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND = "discord-project-task-completion"
 DISCORD_AUDIT_FORUM_PROJECT = "AUDIT"
 
 # Project forums use one of these tags as the durable task state.  An
@@ -937,6 +938,113 @@ def transition_project_task_status(
         }
 
 
+def complete_project_task(
+    config: NerveConfig,
+    *,
+    thread_id: Any,
+    audit_reason: str,
+) -> dict[str, Any]:
+    """Mark a project task complete, then archive its Discord thread.
+
+    Discord has no transaction spanning its tag and archive endpoints. The
+    status update intentionally happens first: an archive failure leaves an
+    accurately completed, visible task rather than an archived task that still
+    appears ready for user review. Repeating the operation is safe because a
+    completed tag is accepted idempotently and archiving is idempotent.
+    """
+    status_result = transition_project_task_status(
+        config,
+        thread_id=thread_id,
+        target_status="completed",
+        audit_reason=audit_reason,
+    )
+    resolved_thread_id = _snowflake(status_result["thread_id"], "thread id")
+    _discord_request(
+        config.discord,
+        "PATCH",
+        resolved_thread_id,
+        {"archived": True},
+        audit_reason=audit_reason,
+    )
+    return {**status_result, "archived": True}
+
+
+def dispatch_discord_project_task_completion(
+    notification: dict[str, Any],
+    target_id: str,
+    decision: str,
+    config: NerveConfig | None,
+) -> notification_handlers.DispatchResult:
+    """Complete a ready-for-user task after an approval button is clicked.
+
+    The dispatcher has no continuation: this is a mechanical Discord state
+    transition, so confirmation must not spend another model turn.
+    """
+    base_event: dict[str, Any] = {
+        "event": "approval-acted",
+        "notification_id": notification.get("id", ""),
+        "target_kind": DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND,
+        "target_id": target_id,
+        "decision": decision,
+    }
+    if decision == "decline":
+        return notification_handlers.DispatchResult(
+            ok=True,
+            audit_event={**base_event, "ok": True, "executed": False},
+        )
+    if decision != "approve":
+        return notification_handlers.DispatchResult(
+            ok=False,
+            audit_event={
+                **base_event,
+                "ok": False,
+                "executed": False,
+                "error": f"unsupported decision: {decision}",
+            },
+        )
+    if config is None:
+        return notification_handlers.DispatchResult(
+            ok=False,
+            audit_event={
+                **base_event,
+                "ok": False,
+                "executed": False,
+                "error": "Nerve config unavailable",
+            },
+        )
+
+    try:
+        result = complete_project_task(
+            config,
+            thread_id=target_id,
+            audit_reason=(
+                "Nerve task completion approval "
+                f"{notification.get('id', '')}"
+            ),
+        )
+    except DiscordForumTagError as exc:
+        logger.warning("Approved project task completion failed: %s", exc)
+        return notification_handlers.DispatchResult(
+            ok=False,
+            audit_event={
+                **base_event,
+                "ok": False,
+                "executed": False,
+                "error": str(exc),
+            },
+        )
+    return notification_handlers.DispatchResult(
+        ok=True,
+        audit_event={
+            **base_event,
+            "ok": True,
+            "executed": True,
+            "project": result["project"],
+            "archived": True,
+        },
+    )
+
+
 def dispatch_discord_forum_tag_action(
     notification: dict[str, Any],
     target_id: str,
@@ -1038,4 +1146,8 @@ def dispatch_discord_forum_tag_action(
 notification_handlers.register(
     DISCORD_FORUM_TAG_TARGET_KIND,
     dispatch_discord_forum_tag_action,
+)
+notification_handlers.register(
+    DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND,
+    dispatch_discord_project_task_completion,
 )

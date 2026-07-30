@@ -57,7 +57,9 @@ next allowed status:
 `in-progress` -> `ready-for-user` / `blocked` / `cancelled`;
 `ready-for-user` -> `completed` / `blocked` / `cancelled`;
 `blocked` -> `ready-for-agent`.
-Do not infer task completion from a transient session ending.]
+Do not infer task completion from a transient session ending. Requesting
+`completed` creates a user confirmation card; only its accepted button changes
+the task to `completed` and archives the thread, without another model turn.]
 """
 
 

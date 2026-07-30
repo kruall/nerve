@@ -21,6 +21,7 @@ from nerve.agent.tools.schemas import (
 from nerve.discord_tags import (
     DISCORD_FORUM_TAG_METADATA_KEY,
     DISCORD_FORUM_TAG_TARGET_KIND,
+    DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND,
     DiscordForumTagError,
     DiscordForumTagManager,
     DiscordProjectTaskStatusError,
@@ -149,12 +150,46 @@ async def discord_project_task_status_handler(
             "discord_project_task_status: this tool requires a Discord project thread.",
             is_error=True,
         )
+    target_status = str(args.get("status") or "").strip().casefold()
+    if target_status == "completed":
+        if ctx.notification_service is None:
+            return ToolResult.text(
+                "discord_project_task_status: notification service is unavailable "
+                "to request completion confirmation.",
+                is_error=True,
+            )
+        try:
+            approval = await ctx.notification_service.propose_action(
+                session_id=ctx.session_id,
+                target_kind=DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND,
+                target_id=thread_id,
+                title="Complete and archive project task",
+                body=(
+                    "Mark this task as completed and archive its Discord thread. "
+                    "Nothing changes until this confirmation is accepted."
+                ),
+                options=[
+                    {"label": "Complete & archive", "value": "approve"},
+                    {"label": "Keep task open", "value": "decline"},
+                ],
+                priority="high",
+            )
+        except Exception as exc:
+            return ToolResult.text(
+                "discord_project_task_status: failed to request completion "
+                f"confirmation: {exc}",
+                is_error=True,
+            )
+        return ToolResult.text(
+            "Project task completion confirmation requested "
+            f"({approval['notification_id']}). No Discord task state changed."
+        )
     try:
         result = await asyncio.to_thread(
             transition_project_task_status,
             ctx.config,
             thread_id=thread_id,
-            target_status=str(args.get("status") or ""),
+            target_status=target_status,
             audit_reason=f"Nerve project task lifecycle {ctx.session_id[:32]}",
         )
     except DiscordProjectTaskStatusError as exc:

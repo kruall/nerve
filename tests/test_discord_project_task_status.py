@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -11,11 +11,14 @@ from nerve.agent.tools.handlers.discord import (
     discord_project_task_status_handler,
 )
 from nerve.agent.tools.registry import ToolContext
-from nerve.config import DiscordConfig, NerveConfig
+from nerve.config import DiscordConfig, NerveConfig, NotificationsConfig
 from nerve.discord_tags import (
+    DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND,
     DiscordProjectTaskStatusError,
+    dispatch_discord_project_task_completion,
     transition_project_task_status,
 )
+from nerve.notifications.service import NotificationService
 
 
 GUILD_ID = 1
@@ -90,7 +93,10 @@ def _fake_api(monkeypatch, *, applied: list[str]) -> list[tuple]:
         if method == "GET" and channel_id == FORUM_ID:
             return _forum()
         if method == "PATCH" and channel_id == THREAD_ID:
-            return _thread(payload["applied_tags"])
+            if "applied_tags" in payload:
+                return _thread(payload["applied_tags"])
+            assert payload == {"archived": True}
+            return _thread(applied)
         raise AssertionError((method, channel_id, payload))
 
     monkeypatch.setattr("nerve.discord_tags._discord_request", request)
@@ -179,3 +185,100 @@ async def test_tool_rejects_non_discord_sessions():
 
     assert result.is_error is True
     assert "requires a Discord project thread" in result.content[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_completed_status_queues_confirmation_instead_of_mutating():
+    service = MagicMock()
+    service.propose_action = AsyncMock(
+        return_value={"notification_id": "approval-complete"},
+    )
+    engine = MagicMock()
+    engine.get_active_channel.return_value = "discord"
+    engine.router.get_message_context.return_value = {
+        "channel_name": "discord",
+        "target": str(THREAD_ID),
+    }
+
+    result = await discord_project_task_status_handler(
+        ToolContext(
+            session_id="s1", config=_config(), engine=engine,
+            notification_service=service,
+        ),
+        {"status": "completed"},
+    )
+
+    assert result.is_error is False
+    assert "No Discord task state changed" in result.content[0]["text"]
+    kwargs = service.propose_action.await_args.kwargs
+    assert kwargs["target_kind"] == DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND
+    assert kwargs["target_id"] == str(THREAD_ID)
+    assert kwargs["options"] == [
+        {"label": "Complete & archive", "value": "approve"},
+        {"label": "Keep task open", "value": "decline"},
+    ]
+
+
+def test_approved_completion_changes_tag_then_archives(monkeypatch):
+    calls = _fake_api(monkeypatch, applied=["303"])
+
+    result = dispatch_discord_project_task_completion(
+        {"id": "approval-complete"}, str(THREAD_ID), "approve", _config(),
+    )
+
+    assert result.ok is True
+    assert [call[:2] for call in calls] == [
+        ("GET", THREAD_ID),
+        ("GET", FORUM_ID),
+        ("PATCH", THREAD_ID),
+        ("PATCH", THREAD_ID),
+    ]
+    assert calls[2][2] == {"applied_tags": ["304"]}
+    assert calls[3][2] == {"archived": True}
+
+
+def test_declined_completion_does_not_contact_discord(monkeypatch):
+    calls = _fake_api(monkeypatch, applied=["303"])
+
+    result = dispatch_discord_project_task_completion(
+        {"id": "approval-complete"}, str(THREAD_ID), "decline", _config(),
+    )
+
+    assert result.ok is True
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_confirmation_click_completes_and_archives_without_model(
+    db, monkeypatch,
+):
+    calls = _fake_api(monkeypatch, applied=["303"])
+    config = _config()
+    config.notifications = NotificationsConfig(channels=["web"])
+    engine = MagicMock()
+    service = NotificationService(config, db, engine)
+    service._append_approval_audit = AsyncMock()
+    await db.create_session("s1")
+    await db.create_notification(
+        notification_id="approval-complete",
+        session_id="s1",
+        type="approval",
+        title="Complete and archive project task",
+        options=["approve", "decline"],
+        target_kind=DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND,
+        target_id=str(THREAD_ID),
+    )
+
+    assert await service.handle_answer(
+        "approval-complete", "approve", "discord:400",
+    )
+
+    notification = await db.get_notification("approval-complete")
+    assert notification["status"] == "answered"
+    assert [call[:2] for call in calls] == [
+        ("GET", THREAD_ID),
+        ("GET", FORUM_ID),
+        ("PATCH", THREAD_ID),
+        ("PATCH", THREAD_ID),
+    ]
+    engine.run.assert_not_called()
