@@ -192,6 +192,30 @@ class TestSessionCRUD:
 
         assert await db.get_discord_session_binding("discord-bound") == first
 
+    async def test_latest_discord_binding_wins_for_thread_lookup(
+        self, db: Database,
+    ):
+        await db.create_session("discord-plan", source="discord")
+        await db.create_session("discord-execution", source="discord")
+        await db.db.executemany(
+            """INSERT INTO discord_session_bindings
+                   (session_id, guild_id, thread_id, created_at)
+               VALUES (?, ?, ?, ?)""",
+            [
+                ("discord-plan", "100", "200", "2026-07-30T18:00:00+00:00"),
+                (
+                    "discord-execution", "100", "200",
+                    "2026-07-30T18:01:00+00:00",
+                ),
+            ],
+        )
+        await db.db.commit()
+
+        binding = await db.get_discord_session_binding_by_thread(100, 200)
+
+        assert binding is not None
+        assert binding["session_id"] == "discord-execution"
+
     async def test_v44_backfills_oldest_discord_mapping(self, db: Database):
         from nerve.db.migrations import v044_discord_session_binding as v044
 

@@ -157,7 +157,9 @@ class DiscordProjectTaskAuditStore:
         async with self.db.execute(
             """SELECT session_id, guild_id, thread_id, created_at
                FROM discord_session_bindings
-               WHERE guild_id = ? AND thread_id = ?""",
+               WHERE guild_id = ? AND thread_id = ?
+               ORDER BY created_at DESC
+               LIMIT 1""",
             (guild, thread),
         ) as cursor:
             row = await cursor.fetchone()
