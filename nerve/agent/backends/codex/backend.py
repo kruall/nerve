@@ -82,6 +82,9 @@ You are running on Nerve's Codex backend.
 - Native Codex skills keep their normal trigger and per-turn behavior.
 - To schedule a future wakeup of this session, use the `schedule_wakeup` nerve
   tool (there is no ScheduleWakeup built-in here).
+- For a long build or test, prefer `run_long_command`: it returns promptly and
+  Nerve resumes this exact session with the output when the command settles or
+  reaches its timeout. Pass argv, never a shell string.
 - Native structured questions and plan updates are bridged into Nerve's UI.
   The persistent/asynchronous question tool is `mcp__nerve__ask_user`.
 </backend-notes>

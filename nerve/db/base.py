@@ -21,6 +21,7 @@ from nerve.db.discord_context import DiscordContextStore
 from nerve.db.discord_mirror import DiscordMirrorStore
 from nerve.db.discord_project_prompts import DiscordProjectPromptStore
 from nerve.db.files import FileStore
+from nerve.db.long_commands import LongCommandStore
 from nerve.db.maintenance import MaintenanceStore
 from nerve.db.mcp import McpStore
 from nerve.db.messages import MessageStore
@@ -106,6 +107,7 @@ class Database(
     AuditStore,
     UsageStore,
     FileStore,
+    LongCommandStore,
     WakeupStore,
     MaintenanceStore,
 ):

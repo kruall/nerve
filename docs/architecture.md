@@ -70,6 +70,11 @@ Claude Agent SDK wrapper providing:
   channel context. On startup, after channels are ready, Nerve resumes the
   native conversation and injects a continuation turn; a second restart during
   recovery retries from the same checkpoint.
+- **Detached build/test commands** — `run_long_command` accepts a constrained
+  argv command below the workspace, writes output plus terminal status through
+  a detached wrapper, and resumes the same session with the output tail when
+  it finishes or reaches its timeout. Pending commands are re-monitored after
+  a gateway restart.
 - **Orphan recovery** — on startup, sessions marked `active` in DB but with no
   live client are transitioned to `idle` when they have either a native session
   ID or an interrupted-turn checkpoint, otherwise to `stopped`
