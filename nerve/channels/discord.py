@@ -322,12 +322,20 @@ class DiscordChannel(BaseChannel):
             description="Создать задачу в проекте Nerve",
             guild=guild,
         )
-        @app_commands.describe(project="Проект, в котором будет создана задача")
+        @app_commands.describe(
+            project="Проект, в котором будет создана задача",
+            ready_for_agent="Сразу пометить задачу для автономного агента",
+        )
         async def create_task_command(
             interaction: discord.Interaction,
             project: str,
+            ready_for_agent: bool = False,
         ) -> None:
-            await self._handle_create_task_command(interaction, project)
+            await self._handle_create_task_command(
+                interaction,
+                project,
+                ready_for_agent=ready_for_agent,
+            )
 
         @create_task_command.autocomplete("project")
         async def create_task_project_autocomplete(
@@ -469,6 +477,8 @@ class DiscordChannel(BaseChannel):
         self,
         interaction: discord.Interaction,
         project: str,
+        *,
+        ready_for_agent: bool = False,
     ) -> None:
         """Open the project-task modal after validating the command context."""
         guild_id = int(getattr(interaction, "guild_id", 0) or 0)
@@ -488,7 +498,11 @@ class DiscordChannel(BaseChannel):
             await self._respond_to_interaction(interaction, str(exc))
             return
         await interaction.response.send_modal(
-            ProjectTaskCreateModal(self._project_task_creator, project_name),
+            ProjectTaskCreateModal(
+                self._project_task_creator,
+                project_name,
+                ready_for_agent=ready_for_agent,
+            ),
         )
 
     async def create_project_task(

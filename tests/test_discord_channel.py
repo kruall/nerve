@@ -166,6 +166,9 @@ def test_model_command_is_registered_for_configured_guild_only():
     assert [choice.value for choice in tier.choices] == [
         "auto", "luna-high", "terra-high", "sol-medium", "sol-xhigh",
     ]
+    create_task = commands[1]
+    assert create_task.parameters[1].name == "ready_for_agent"
+    assert create_task.parameters[1].default is False
 
 
 @pytest.mark.asyncio
@@ -173,6 +176,8 @@ async def test_create_task_command_opens_modal_and_uses_next_project_number():
     channel = _channel(task_forums={"YDB": YDB_FORUM, "NERVE": NERVE_FORUM})
     forum = MagicMock()
     forum.id = NERVE_FORUM
+    ready_tag = SimpleNamespace(id=1004, name="ready-for-agent")
+    forum.available_tags = [ready_tag]
     forum.archived_threads = lambda **_kwargs: _async_iter([
         SimpleNamespace(
             id=1001, parent_id=NERVE_FORUM, name="NERVE-29 archived task",
@@ -198,10 +203,15 @@ async def test_create_task_command_opens_modal_and_uses_next_project_number():
     channel._client.get_guild.return_value = guild
 
     interaction = _interaction()
-    await channel._handle_create_task_command(interaction, "nerve")
+    await channel._handle_create_task_command(
+        interaction,
+        "nerve",
+        ready_for_agent=True,
+    )
 
     modal = interaction.response.send_modal.await_args.args[0]
     assert modal.project == "NERVE"
+    assert modal.ready_for_agent is True
     modal.task_title._value = "Добавить команду"
     modal.description._value = "Открывать модальное окно для новой задачи."
     submit_interaction = _interaction()
@@ -214,6 +224,7 @@ async def test_create_task_command_opens_modal_and_uses_next_project_number():
         auto_archive_duration=10080,
         allowed_mentions=ANY,
         reason="Create Nerve project task NERVE-30",
+        applied_tags=[ready_tag],
     )
     allowed_mentions = forum.create_thread.await_args.kwargs["allowed_mentions"]
     assert allowed_mentions.users == [discord.Object(id=USER)]

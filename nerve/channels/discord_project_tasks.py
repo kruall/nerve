@@ -16,6 +16,7 @@ _MAX_THREAD_NAME_LENGTH = 100
 _MAX_TASK_TITLE_LENGTH = 80
 _MAX_TASK_DESCRIPTION_LENGTH = 2000
 _AUTO_ARCHIVE_DURATION_MINUTES = 10080
+_READY_FOR_AGENT_TAG_NAME = "ready-for-agent"
 
 
 class DiscordProjectTaskCreateError(ValueError):
@@ -72,6 +73,7 @@ class DiscordProjectTaskCreator:
         project: str,
         title: str,
         description: str,
+        ready_for_agent: bool = False,
     ) -> tuple[str, int]:
         """Create the task and return its rendered identifier and thread ID."""
         if not self.command_allowed(interaction):
@@ -86,6 +88,7 @@ class DiscordProjectTaskCreator:
             author_id=int(
                 getattr(getattr(interaction, "user", None), "id", 0) or 0
             ),
+            ready_for_agent=ready_for_agent,
         )
 
     async def create_for_agent(
@@ -95,6 +98,7 @@ class DiscordProjectTaskCreator:
         title: str,
         description: str,
         author_id: int | None = None,
+        ready_for_agent: bool = False,
     ) -> tuple[str, int]:
         """Create a task for a Nerve agent using the connected Discord client.
 
@@ -133,6 +137,9 @@ class DiscordProjectTaskCreator:
             raise DiscordProjectTaskCreateError(
                 "Nerve не видит форум выбранного проекта."
             )
+        ready_for_agent_tag = (
+            self._ready_for_agent_tag(forum) if ready_for_agent else None
+        )
 
         lock = self._forum_locks.setdefault(forum_id, asyncio.Lock())
         async with lock:
@@ -153,6 +160,9 @@ class DiscordProjectTaskCreator:
                 raise DiscordProjectTaskCreateError(
                     "Заголовок слишком длинный для имени Discord-треда."
                 )
+            create_kwargs: dict[str, Any] = {}
+            if ready_for_agent_tag is not None:
+                create_kwargs["applied_tags"] = [ready_for_agent_tag]
             try:
                 created = await forum.create_thread(
                     name=thread_name,
@@ -160,6 +170,7 @@ class DiscordProjectTaskCreator:
                     auto_archive_duration=_AUTO_ARCHIVE_DURATION_MINUTES,
                     allowed_mentions=allowed_mentions,
                     reason=f"Create Nerve project task {task_id}",
+                    **create_kwargs,
                 )
             except discord.HTTPException as exc:
                 logger.warning(
@@ -172,6 +183,20 @@ class DiscordProjectTaskCreator:
                 ) from exc
             self._last_created_number[forum_id] = number
             return task_id, int(created.thread.id)
+
+    @staticmethod
+    def _ready_for_agent_tag(forum: Any) -> Any:
+        matches = [
+            tag
+            for tag in list(getattr(forum, "available_tags", []) or [])
+            if str(getattr(tag, "name", "") or "").casefold()
+            == _READY_FOR_AGENT_TAG_NAME
+        ]
+        if len(matches) != 1:
+            raise DiscordProjectTaskCreateError(
+                "Форум проекта должен содержать ровно один тег ready-for-agent."
+            )
+        return matches[0]
 
     async def _maximum_existing_number(
         self,
@@ -216,7 +241,13 @@ class DiscordProjectTaskCreator:
 class ProjectTaskCreateModal(discord.ui.Modal):
     """Collect the title and description after the project is selected."""
 
-    def __init__(self, creator: DiscordProjectTaskCreator, project: str) -> None:
+    def __init__(
+        self,
+        creator: DiscordProjectTaskCreator,
+        project: str,
+        *,
+        ready_for_agent: bool = False,
+    ) -> None:
         super().__init__(
             title=f"Новая задача: {project}"[:45],
             custom_id=f"nerve:project-task:create:{project}"[:100],
@@ -224,6 +255,7 @@ class ProjectTaskCreateModal(discord.ui.Modal):
         )
         self.creator = creator
         self.project = project
+        self.ready_for_agent = ready_for_agent
         self.task_title = discord.ui.TextInput(
             label="Заголовок",
             placeholder="Кратко опишите задачу",
@@ -248,6 +280,7 @@ class ProjectTaskCreateModal(discord.ui.Modal):
                 project=self.project,
                 title=str(self.task_title.value or ""),
                 description=str(self.description.value or ""),
+                ready_for_agent=self.ready_for_agent,
             )
         except DiscordProjectTaskCreateError as exc:
             await interaction.followup.send(str(exc), ephemeral=True)

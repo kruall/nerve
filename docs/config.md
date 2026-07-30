@@ -438,12 +438,14 @@ running.
 
 `/create-task project:<name>` is available in the same guild to
 `discord.allowed_author_ids`. It suggests configured `discord.task_forums`
-projects, then opens a modal for the task title and description. Nerve creates
-an untagged forum thread named `PROJECT-N title`, where `N` is one greater than
-the largest existing number for that project (including archived threads). The
-starter message mentions the command's author and contains the description.
-The new thread therefore starts in the normal `new-task` lifecycle state and
-does not start an agent session by itself.
+projects, then opens a modal for the task title and description. Its optional
+`ready_for_agent` choice starts the task with the project's existing
+`ready-for-agent` lifecycle tag; otherwise Nerve creates an untagged forum
+thread named `PROJECT-N title`, where `N` is one greater than the largest
+existing number for that project (including archived threads). The starter
+message mentions the command's author and contains the description. An
+unmarked task starts in the normal `new-task` lifecycle state. Neither form
+choice starts an agent session directly.
 
 ### Discord project-forum tools
 
