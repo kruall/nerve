@@ -245,8 +245,6 @@ class ProjectTaskCreateModal(discord.ui.Modal):
         self,
         creator: DiscordProjectTaskCreator,
         project: str,
-        *,
-        ready_for_agent: bool = False,
     ) -> None:
         super().__init__(
             title=f"Новая задача: {project}"[:45],
@@ -255,7 +253,6 @@ class ProjectTaskCreateModal(discord.ui.Modal):
         )
         self.creator = creator
         self.project = project
-        self.ready_for_agent = ready_for_agent
         self.task_title = discord.ui.TextInput(
             label="Заголовок",
             placeholder="Кратко опишите задачу",
@@ -269,8 +266,17 @@ class ProjectTaskCreateModal(discord.ui.Modal):
             required=True,
             max_length=_MAX_TASK_DESCRIPTION_LENGTH,
         )
+        self.ready_for_agent = discord.ui.Checkbox(
+            custom_id="nerve:project-task:ready-for-agent",
+            default=False,
+        )
         self.add_item(self.task_title)
         self.add_item(self.description)
+        self.add_item(discord.ui.Label(
+            text="Готово для агента",
+            description="Сразу передать задачу автономному агенту",
+            component=self.ready_for_agent,
+        ))
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
@@ -280,7 +286,7 @@ class ProjectTaskCreateModal(discord.ui.Modal):
                 project=self.project,
                 title=str(self.task_title.value or ""),
                 description=str(self.description.value or ""),
-                ready_for_agent=self.ready_for_agent,
+                ready_for_agent=self.ready_for_agent.value,
             )
         except DiscordProjectTaskCreateError as exc:
             await interaction.followup.send(str(exc), ephemeral=True)

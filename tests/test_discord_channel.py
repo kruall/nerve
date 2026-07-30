@@ -167,8 +167,7 @@ def test_model_command_is_registered_for_configured_guild_only():
         "auto", "luna-high", "terra-high", "sol-medium", "sol-xhigh",
     ]
     create_task = commands[1]
-    assert create_task.parameters[1].name == "ready_for_agent"
-    assert create_task.parameters[1].default is False
+    assert [parameter.name for parameter in create_task.parameters] == ["project"]
 
 
 @pytest.mark.asyncio
@@ -206,14 +205,24 @@ async def test_create_task_command_opens_modal_and_uses_next_project_number():
     await channel._handle_create_task_command(
         interaction,
         "nerve",
-        ready_for_agent=True,
     )
 
     modal = interaction.response.send_modal.await_args.args[0]
     assert modal.project == "NERVE"
-    assert modal.ready_for_agent is True
+    assert modal.ready_for_agent.value is False
+    assert modal.to_components()[-1] == {
+        "type": 18,
+        "label": "Готово для агента",
+        "description": "Сразу передать задачу автономному агенту",
+        "component": {
+            "type": 23,
+            "custom_id": "nerve:project-task:ready-for-agent",
+            "default": False,
+        },
+    }
     modal.task_title._value = "Добавить команду"
     modal.description._value = "Открывать модальное окно для новой задачи."
+    modal.ready_for_agent._value = True
     submit_interaction = _interaction()
 
     await modal.on_submit(submit_interaction)
