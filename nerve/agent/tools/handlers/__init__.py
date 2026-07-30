@@ -21,6 +21,7 @@ from nerve.agent.tools.handlers.restart import RESTART_SPECS
 from nerve.agent.tools.handlers.skills import SKILL_SPECS
 from nerve.agent.tools.handlers.sources import SOURCE_SPECS
 from nerve.agent.tools.handlers.tasks import TASK_SPECS
+from nerve.agent.tools.handlers.tool_leases import TOOL_LEASE_SPECS
 from nerve.agent.tools.handlers.wakeups import WAKEUP_SPECS
 
 
@@ -35,6 +36,7 @@ def build_default_registry() -> ToolRegistry:
     registry = ToolRegistry()
     for spec in (
         *TASK_SPECS,
+        *TOOL_LEASE_SPECS,
         *MEMORY_SPECS,
         *LONG_COMMAND_SPECS,
         *SOURCE_SPECS,

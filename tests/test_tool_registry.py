@@ -150,6 +150,9 @@ class TestDefaultRegistry:
             # tasks
             "task_search", "task_create", "task_list", "task_update",
             "task_read", "task_write", "task_done",
+            # durable exclusive-tool leases
+            "tool_lease_status", "tool_lease_acquire", "tool_lease_renew",
+            "tool_lease_release", "tool_lease_subscribe", "tool_lease_unsubscribe",
             # memory
             "memory_recall", "conversation_history", "memorize",
             # plans

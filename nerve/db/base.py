@@ -33,6 +33,7 @@ from nerve.db.skills import SkillStore
 from nerve.db.sources import SourceStore
 from nerve.db.task_statuses import TaskStatusStore
 from nerve.db.tasks import TaskStore
+from nerve.db.tool_leases import ToolLeaseStore
 from nerve.db.usage import UsageStore
 from nerve.db.wakeups import WakeupStore
 
@@ -95,6 +96,7 @@ class Database(
     MessageStore,
     TaskStore,
     TaskStatusStore,
+    ToolLeaseStore,
     PlanStore,
     NotificationStore,
     SourceStore,

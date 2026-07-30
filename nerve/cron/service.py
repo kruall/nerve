@@ -240,6 +240,15 @@ class CronService:
             name="Fire due session wakeups",
             replace_existing=True,
         )
+        self.scheduler.add_job(
+            self._sweep_tool_lease_subscriptions,
+            IntervalTrigger(
+                seconds=_WAKEUP_SWEEP_SECONDS, timezone=self.timezone,
+            ),
+            id="tool_lease_sweep",
+            name="Hand off exclusive tool leases",
+            replace_existing=True,
+        )
 
         self.scheduler.start()
         logger.info(
@@ -800,6 +809,59 @@ class CronService:
                 )
 
         task.add_done_callback(_done)
+
+    async def _sweep_tool_lease_subscriptions(self) -> None:
+        """Atomically hand a freed tool to its first waiting session.
+
+        A handoff reserves the lease before the continuation turn starts, so a
+        third session cannot win the tool between notification and retry.  The
+        persistent queue and lease expiry make this restart-safe and recover a
+        lease whose prior owner forgot to release it.
+        """
+        try:
+            waiters = await self.db.list_ready_tool_lease_subscriptions()
+        except Exception as e:
+            logger.error("Tool lease sweep query failed: %s", e, exc_info=True)
+            return
+
+        for waiter in waiters:
+            session_id = waiter["session_id"]
+            # Preserve FIFO: a live turn may itself release, renew, or cancel
+            # its subscription, so do not skip it in favour of a later waiter.
+            if self.engine.sessions.is_running(session_id):
+                continue
+            try:
+                handoff = await self.db.claim_tool_lease_subscription(waiter["id"])
+            except Exception as e:
+                logger.error(
+                    "Failed to hand off tool lease subscription %s: %s",
+                    waiter["id"], e, exc_info=True,
+                )
+                continue
+            if handoff is None:
+                continue
+            logger.info(
+                "Handing tool lease %s to session %s until %s",
+                handoff["tool_name"], session_id[:8], handoff["lease_expires_at"],
+            )
+            task = asyncio.create_task(
+                self.engine.run(
+                    session_id=session_id,
+                    user_message=handoff["prompt"],
+                    source="wakeup",
+                    internal=True,
+                )
+            )
+
+            def _done(t: asyncio.Task, *, subscription_id: int = waiter["id"]) -> None:
+                exc = t.exception() if not t.cancelled() else None
+                if exc is not None:
+                    logger.error(
+                        "Tool lease handoff %s continuation failed: %s",
+                        subscription_id, exc,
+                    )
+
+            task.add_done_callback(_done)
 
     async def run_job(self, job_id: str) -> None:
         """Run a specific job manually (used by CLI)."""

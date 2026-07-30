@@ -196,6 +196,40 @@ TASK_STATUS_CREATE_SCHEMA = {
     "required": ["name"],
 }
 
+# ----- Exclusive tool lease tools -----
+
+TOOL_LEASE_STATUS_SCHEMA = {
+    "type": "object",
+    "properties": {"tool_name": {"type": "string", "description": "Stable exclusive-tool identifier, e.g. 'mcp__github__publish'"}},
+    "required": ["tool_name"],
+}
+
+TOOL_LEASE_ACQUIRE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "tool_name": {"type": "string", "description": "Stable exclusive-tool identifier"},
+        "lease_seconds": {"type": "integer", "description": "Lease TTL, 60–3600 seconds (default 300)", "default": 300},
+    },
+    "required": ["tool_name"],
+}
+
+TOOL_LEASE_RENEW_SCHEMA = TOOL_LEASE_ACQUIRE_SCHEMA
+
+TOOL_LEASE_RELEASE_SCHEMA = TOOL_LEASE_STATUS_SCHEMA
+
+TOOL_LEASE_SUBSCRIBE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "tool_name": {"type": "string", "description": "Stable exclusive-tool identifier"},
+        "prompt": {"type": "string", "description": "Continuation prompt injected after the lease is handed over", "default": ""},
+        "lease_seconds": {"type": "integer", "description": "TTL reserved at handoff, 60–3600 seconds (default 300)", "default": 300},
+        "wait_seconds": {"type": "integer", "description": "How long this subscription remains valid, 60–3600 seconds (default 3600)", "default": 3600},
+    },
+    "required": ["tool_name"],
+}
+
+TOOL_LEASE_UNSUBSCRIBE_SCHEMA = TOOL_LEASE_STATUS_SCHEMA
+
 # ----- Memory tools -----
 
 MEMORY_RECALL_SCHEMA = {
