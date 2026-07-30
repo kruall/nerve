@@ -423,6 +423,14 @@ the pin and resumes adaptive routing. The command is restricted to
 `discord.allowed_author_ids` and refuses to change a session while it is
 running.
 
+`/create-task project:<name>` is available in the same guild to
+`discord.allowed_author_ids`. It suggests configured `discord.task_forums`
+projects, then opens a modal for the task title and description. Nerve creates
+an untagged forum thread named `PROJECT-N title`, where `N` is one greater than
+the largest existing number for that project (including archived threads). The
+new thread therefore starts in the normal `new-task` lifecycle state and does
+not start an agent session by itself.
+
 ### Discord forum-tag tools
 
 Two agent tools expose tag management for forums listed in

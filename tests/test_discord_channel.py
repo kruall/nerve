@@ -4,7 +4,7 @@ import asyncio
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import discord
 import pytest
@@ -26,6 +26,11 @@ AUDIT_FORUM = 350
 USER = 400
 PEER_BOT = 401
 DOGGY = 900
+
+
+async def _async_iter(values):
+    for value in values:
+        yield value
 
 
 class _HistoryChannel:
@@ -104,6 +109,10 @@ def _interaction(
     interaction.channel_id = channel_id
     interaction.user = SimpleNamespace(id=user_id)
     interaction.response.send_message = AsyncMock()
+    interaction.response.send_modal = AsyncMock()
+    interaction.response.defer = AsyncMock()
+    interaction.response.is_done.return_value = True
+    interaction.followup.send = AsyncMock()
     return interaction
 
 
@@ -150,12 +159,77 @@ def test_model_command_is_registered_for_configured_guild_only():
     commands = channel._command_tree.get_commands(
         guild=discord.Object(id=GUILD),
     )
-    assert [command.name for command in commands] == ["model"]
+    assert [command.name for command in commands] == ["model", "create-task"]
     command = commands[0]
     tier = command.parameters[0]
     assert [choice.value for choice in tier.choices] == [
         "auto", "luna-high", "terra-high", "sol-medium", "sol-xhigh",
     ]
+
+
+@pytest.mark.asyncio
+async def test_create_task_command_opens_modal_and_uses_next_project_number():
+    channel = _channel(task_forums={"YDB": YDB_FORUM, "NERVE": NERVE_FORUM})
+    forum = MagicMock()
+    forum.id = NERVE_FORUM
+    forum.archived_threads = lambda **_kwargs: _async_iter([
+        SimpleNamespace(
+            id=1001, parent_id=NERVE_FORUM, name="NERVE-29 archived task",
+        ),
+        SimpleNamespace(
+            id=1002, parent_id=YDB_FORUM, name="NERVE-900 other project",
+        ),
+    ])
+    created_thread = SimpleNamespace(id=1003)
+    forum.create_thread = AsyncMock(
+        return_value=SimpleNamespace(thread=created_thread),
+    )
+    guild = MagicMock()
+    guild.active_threads = AsyncMock(return_value=[
+        SimpleNamespace(
+            id=1000, parent_id=NERVE_FORUM, name="NERVE-8 active task",
+        ),
+    ])
+    guild.get_channel.side_effect = lambda channel_id: (
+        forum if channel_id == NERVE_FORUM else None
+    )
+    channel._client = MagicMock()
+    channel._client.get_guild.return_value = guild
+
+    interaction = _interaction()
+    await channel._handle_create_task_command(interaction, "nerve")
+
+    modal = interaction.response.send_modal.await_args.args[0]
+    assert modal.project == "NERVE"
+    modal.task_title._value = "Добавить команду"
+    modal.description._value = "Открывать модальное окно для новой задачи."
+    submit_interaction = _interaction()
+
+    await modal.on_submit(submit_interaction)
+
+    forum.create_thread.assert_awaited_once_with(
+        name="NERVE-30 Добавить команду",
+        content="Открывать модальное окно для новой задачи.",
+        auto_archive_duration=10080,
+        allowed_mentions=ANY,
+        reason="Create Nerve project task NERVE-30",
+    )
+    submit_interaction.followup.send.assert_awaited_once_with(
+        "Создана задача **NERVE-30**: <#1003>", ephemeral=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_task_command_rejects_unknown_project_before_modal():
+    channel = _channel()
+    interaction = _interaction()
+
+    await channel._handle_create_task_command(interaction, "unknown")
+
+    interaction.response.send_modal.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once_with(
+        "Неизвестный проект 'unknown'. Доступны: YDB.", ephemeral=True,
+    )
 
 
 @pytest.mark.asyncio

@@ -31,6 +31,11 @@ from nerve.channels.discord_context import (
     ContextSummarizer,
     DiscordThreadContext,
 )
+from nerve.channels.discord_project_tasks import (
+    DiscordProjectTaskCreateError,
+    DiscordProjectTaskCreator,
+    ProjectTaskCreateModal,
+)
 from nerve.config import NerveConfig
 from nerve.discord_tags import DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND
 
@@ -123,6 +128,12 @@ class DiscordChannel(BaseChannel):
         self._recent_message_ids: OrderedDict[int, None] = OrderedDict()
         self._bot_user_id = 0
         self._allowed_authors = set(self.config.allowed_author_ids)
+        self._project_task_creator = DiscordProjectTaskCreator(
+            guild_id=self.config.guild_id,
+            task_forums=self.config.task_forums,
+            allowed_author_ids=self._allowed_authors,
+            client=lambda: self._client,
+        )
         self._text_channels = set(self.config.channel_ids)
         self._project_forums = {
             channel_id: project
@@ -304,6 +315,27 @@ class DiscordChannel(BaseChannel):
         ) -> None:
             await self._handle_model_command(interaction, tier.value)
 
+        @tree.command(
+            name="create-task",
+            description="Создать задачу в проекте Nerve",
+            guild=guild,
+        )
+        @app_commands.describe(project="Проект, в котором будет создана задача")
+        async def create_task_command(
+            interaction: discord.Interaction,
+            project: str,
+        ) -> None:
+            await self._handle_create_task_command(interaction, project)
+
+        @create_task_command.autocomplete("project")
+        async def create_task_project_autocomplete(
+            interaction: discord.Interaction,
+            current: str,
+        ) -> list[app_commands.Choice[str]]:
+            if not self._project_task_creator.command_allowed(interaction):
+                return []
+            return self._project_task_creator.project_choices(current)
+
         @client.event
         async def on_ready() -> None:
             await self._on_ready()
@@ -429,6 +461,32 @@ class DiscordChannel(BaseChannel):
         })
         await self._respond_to_interaction(
             interaction, f"Модель: {tier.id}. Tier закреплён для следующих ходов.",
+        )
+
+    async def _handle_create_task_command(
+        self,
+        interaction: discord.Interaction,
+        project: str,
+    ) -> None:
+        """Open the project-task modal after validating the command context."""
+        guild_id = int(getattr(interaction, "guild_id", 0) or 0)
+        if guild_id != self.config.guild_id:
+            await self._respond_to_interaction(
+                interaction, "Эта команда доступна только в настроенном сервере Nerve.",
+            )
+            return
+        if not self._project_task_creator.command_allowed(interaction):
+            await self._respond_to_interaction(
+                interaction, "У вас нет доступа к созданию задач Nerve.",
+            )
+            return
+        try:
+            project_name = self._project_task_creator.project_name(project)
+        except DiscordProjectTaskCreateError as exc:
+            await self._respond_to_interaction(interaction, str(exc))
+            return
+        await interaction.response.send_modal(
+            ProjectTaskCreateModal(self._project_task_creator, project_name),
         )
 
     async def start(self) -> None:
