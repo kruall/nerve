@@ -754,16 +754,9 @@ class DiscordApprovalInbox:
         )
         embed = _append_embed_status(message, label, value)
         edit_kwargs: dict[str, Any] = {
-            "view": ApprovalView(
-                self,
-                notification_id,
-                _option_values(row),
-                _option_labels(row),
-                target_kind=str(row.get("target_kind") or "").strip(),
-                disabled=True,
-                show_plan=self._has_plan_details(row),
-                show_describe=bool(_plan_summary(row)),
-            ),
+            # A terminal approval is no longer actionable. Remove its view
+            # altogether instead of leaving inert controls in the card.
+            "view": None,
             "allowed_mentions": discord.AllowedMentions.none(),
         }
         if embed is not None:
@@ -782,11 +775,49 @@ class DiscordApprovalInbox:
                     edit_kwargs["content"] = content + suffix[:room]
         try:
             await message.edit(**edit_kwargs)
-        except Exception as exc:  # an archived task thread can reject edits
+            return
+        except discord.HTTPException as exc:
+            if getattr(exc, "code", None) != 50083:
+                logger.warning(
+                    "Could not close Discord approval card %s: %s",
+                    getattr(message, "id", "unknown"), exc,
+                )
+                return
+
+        # Project-task completion archives the clicked thread in the
+        # dispatcher. Discord refuses to edit a card there afterwards. Briefly
+        # reopen just that managed thread, write the durable terminal result,
+        # and archive it again; other approval copies do not need this path.
+        thread = getattr(message, "channel", None)
+        if not bool(getattr(thread, "archived", False)):
             logger.warning(
-                "Could not close Discord approval card %s: %s",
+                "Could not close archived Discord approval card %s: "
+                "its thread is unavailable",
+                getattr(message, "id", "unknown"),
+            )
+            return
+        try:
+            await thread.edit(
+                archived=False,
+                reason="Record Nerve task completion outcome",
+            )
+            await message.edit(**edit_kwargs)
+        except Exception as exc:
+            logger.warning(
+                "Could not update archived Discord approval card %s: %s",
                 getattr(message, "id", "unknown"), exc,
             )
+        finally:
+            try:
+                await thread.edit(
+                    archived=True,
+                    reason="Archive completed Nerve project task",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not re-archive completed Discord task thread: %s",
+                    exc,
+                )
 
     @staticmethod
     def _decision_outcome(
