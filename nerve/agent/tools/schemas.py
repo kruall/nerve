@@ -863,6 +863,24 @@ DISCORD_SEND_SCHEMA = {
     "required": ["message"],
 }
 
+SESSION_MESSAGE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "session_id": {
+            "type": "string",
+            "description": (
+                "ID of an existing Nerve-owned session that should receive "
+                "the message"
+            ),
+        },
+        "message": {
+            "type": "string",
+            "description": "Message to inject into the target session",
+        },
+    },
+    "required": ["session_id", "message"],
+}
+
 DISCORD_FORUM_TAGS_SCHEMA = {
     "type": "object",
     "properties": {

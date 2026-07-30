@@ -161,7 +161,7 @@ class TestDefaultRegistry:
             "list_sources", "poll_source",
             # notifications
             "notify", "ask_user", "react", "send_sticker", "discord_send",
-            "send_file",
+            "send_session_message", "send_file",
             # discord project forums
             "discord_forum_tags", "discord_project_task_status",
             "discord_project_task_create",

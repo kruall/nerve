@@ -1697,6 +1697,68 @@ adjacent tier is a better fit:
     def is_session_running(self, session_id: str) -> bool:
         return self.sessions.is_running(session_id)
 
+    async def send_session_message(
+        self,
+        *,
+        source_session_id: str,
+        target_session_id: str,
+        message: str,
+    ) -> str:
+        """Deliver an agent message to another Nerve-owned session.
+
+        A live target gets the message through its backend's steer mechanism.
+        Otherwise a normal, persisted turn is scheduled in the target's own
+        context.  The target is deliberately not assigned the caller's
+        channel: any explicit output remains governed by its existing binding.
+        """
+        if source_session_id == target_session_id:
+            raise ValueError("a session cannot send a message to itself")
+
+        target = await self.db.get_session(target_session_id)
+        if target is None:
+            raise ValueError("target session was not found")
+        if target.get("source") == "external":
+            raise ValueError("target session is externally managed")
+        if target.get("status") == SessionStatus.ARCHIVED.value:
+            raise ValueError("target session is archived")
+
+        injected_message = (
+            f"[Message from Nerve session {source_session_id}]\n\n{message}"
+        )
+        if await self.steer(
+            target_session_id, injected_message, channel=None,
+        ):
+            return "steered"
+
+        task = asyncio.create_task(
+            self.run(
+                session_id=target_session_id,
+                user_message=injected_message,
+                source="session",
+                channel=None,
+            ),
+            name=f"session-message:{target_session_id}",
+        )
+
+        # Register only a newly-started target.  When steer lost a race with
+        # an active target turn, replacing its registered task would make that
+        # turn impossible to stop; ``run`` still serializes this follow-up.
+        if not self.sessions.is_running(target_session_id):
+            self.register_task(target_session_id, task)
+
+        def _report_failure(finished: asyncio.Task) -> None:
+            if finished.cancelled():
+                return
+            exc = finished.exception()
+            if exc is not None:
+                logger.error(
+                    "Cross-session message run failed for %s: %s",
+                    target_session_id, exc,
+                )
+
+        task.add_done_callback(_report_failure)
+        return "started"
+
     @staticmethod
     def _restart_recovery_prompt(user_message: str) -> str:
         """Build the internal continuation turn for one interrupted run."""

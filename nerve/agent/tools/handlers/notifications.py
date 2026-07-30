@@ -34,6 +34,7 @@ from nerve.agent.tools.schemas import (
     REACT_SCHEMA,
     SEND_FILE_SCHEMA,
     SEND_STICKER_SCHEMA,
+    SESSION_MESSAGE_SCHEMA,
 )
 
 logger = logging.getLogger(__name__)
@@ -438,6 +439,48 @@ async def discord_send_handler(ctx: ToolContext, args: dict) -> ToolResult:
     return ToolResult.text("Discord message sent.")
 
 
+async def send_session_message_handler(
+    ctx: ToolContext, args: dict,
+) -> ToolResult:
+    """Inject a message into another Nerve-owned session."""
+    target_session_id = str(args.get("session_id") or "").strip()
+    raw_message = args.get("message")
+    if not target_session_id:
+        return ToolResult.text(
+            "send_session_message: session_id is required.", is_error=True,
+        )
+    if not isinstance(raw_message, str) or not raw_message.strip():
+        return ToolResult.text(
+            "send_session_message: message is required.", is_error=True,
+        )
+    if ctx.engine is None:
+        return ToolResult.text(
+            "send_session_message: engine not available.", is_error=True,
+        )
+
+    try:
+        outcome = await ctx.engine.send_session_message(
+            source_session_id=ctx.session_id,
+            target_session_id=target_session_id,
+            message=raw_message.strip(),
+        )
+    except ValueError as exc:
+        return ToolResult.text(f"send_session_message: {exc}", is_error=True)
+    except Exception as exc:
+        logger.error("cross-session message dispatch failed: %s", exc)
+        return ToolResult.text(
+            f"send_session_message failed: {exc}", is_error=True,
+        )
+
+    if outcome == "steered":
+        return ToolResult.text(
+            "Session message delivered to the target's active turn."
+        )
+    return ToolResult.text(
+        "Session message queued; the target session has been started."
+    )
+
+
 async def send_file_handler(ctx: ToolContext, args: dict) -> ToolResult:
     """Deliver a file via the channel router.
 
@@ -578,6 +621,19 @@ DISCORD_SEND_SPEC = ToolSpec(
     handler=discord_send_handler,
 )
 
+SESSION_MESSAGE_SPEC = ToolSpec(
+    name="send_session_message",
+    description=(
+        "Send a message to another existing Nerve-owned session by ID. "
+        "If its turn is active, the message is steered into that turn; "
+        "otherwise Nerve starts a new turn in the target session. "
+        "The target session's own channel bindings and output rules remain "
+        "in effect."
+    ),
+    input_schema=SESSION_MESSAGE_SCHEMA,
+    handler=send_session_message_handler,
+)
+
 SEND_FILE_SPEC = ToolSpec(
     name="send_file",
     description=(
@@ -598,5 +654,6 @@ NOTIFICATION_SPECS = [
     REACT_SPEC,
     SEND_STICKER_SPEC,
     DISCORD_SEND_SPEC,
+    SESSION_MESSAGE_SPEC,
     SEND_FILE_SPEC,
 ]
