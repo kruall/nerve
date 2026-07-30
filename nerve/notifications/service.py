@@ -41,6 +41,7 @@ _APPROVAL_EMOJIS: dict[str, str] = {
 
 _APPROVAL_CONTINUATION_KEY = "approval_continuation"
 _APPROVAL_DISPATCH_OUTCOME_KEY = "approval_dispatch"
+_DEFER_DISCORD_UNTIL_TURN_END_KEY = "defer_discord_until_turn_end"
 _CONTINUATION_CONTEXT_KEYS = ("channel_name", "target", "message_id")
 
 
@@ -349,6 +350,7 @@ class NotificationService:
         metadata: dict[str, Any] | None = None,
         channels: list[str] | None = None,
         continuation_prompt: str | None = None,
+        defer_discord_until_turn_end: bool = False,
     ) -> dict:
         """File an actionable ``approval``-kind notification.
 
@@ -406,6 +408,8 @@ class NotificationService:
             "target_id": target_id,
             "option_labels": option_labels,
         })
+        if defer_discord_until_turn_end:
+            notification_metadata[_DEFER_DISCORD_UNTIL_TURN_END_KEY] = True
         if continuation_prompt:
             session = await self.db.get_session(session_id)
             if not session or session.get("source") == "external":
@@ -461,15 +465,68 @@ class NotificationService:
             target_id=target_id,
         )
 
-        await self._fanout(
-            notification_id, session_id, "approval", title, body,
-            priority,
-            options=option_values,
-            option_labels=option_labels,
-            channels=channels,
-        )
+        if not defer_discord_until_turn_end:
+            await self._fanout(
+                notification_id, session_id, "approval", title, body,
+                priority,
+                options=option_values,
+                option_labels=option_labels,
+                channels=channels,
+            )
 
         return {"notification_id": notification_id, "status": "sent"}
+
+    async def deliver_deferred_discord(self, session_id: str) -> int:
+        """Deliver approvals held until the originating turn has finished.
+
+        The marker is persisted with the notification, so a restart never
+        turns a queued task-completion card into an early delivery.  A failed
+        Discord attempt leaves it marked for a later completed turn or the
+        normal pending-card restoration path.
+        """
+        rows = await self.db.list_notifications(
+            status="pending", type="approval", session_id=session_id,
+            limit=50,
+        )
+        delivered = 0
+        for row in rows:
+            if not _notification_metadata(row).get(
+                _DEFER_DISCORD_UNTIL_TURN_END_KEY,
+            ):
+                continue
+            try:
+                await self._deliver_discord(row["id"])
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Failed to deliver deferred Discord approval %s",
+                    row["id"],
+                )
+                continue
+
+            refreshed = await self.db.get_notification(row["id"])
+            if refreshed is None or refreshed.get("status") != "pending":
+                continue
+            metadata = _notification_metadata(refreshed)
+            metadata[_DEFER_DISCORD_UNTIL_TURN_END_KEY] = False
+            try:
+                channels_delivered = json.loads(
+                    refreshed.get("channels_delivered") or "[]",
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                channels_delivered = []
+            if not isinstance(channels_delivered, list):
+                channels_delivered = []
+            if "discord" not in channels_delivered:
+                channels_delivered.append("discord")
+            await self.db.update_notification(
+                row["id"],
+                metadata=json.dumps(metadata),
+                channels_delivered=json.dumps(channels_delivered),
+            )
+            delivered += 1
+        return delivered
 
     # ------------------------------------------------------------------ #
     #  Answer routing (called by REST API / Telegram callback)             #

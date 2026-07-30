@@ -213,6 +213,7 @@ async def test_completed_status_queues_confirmation_instead_of_mutating():
     kwargs = service.propose_action.await_args.kwargs
     assert kwargs["target_kind"] == DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND
     assert kwargs["target_id"] == str(THREAD_ID)
+    assert kwargs["defer_discord_until_turn_end"] is True
     assert kwargs["options"] == [
         {"label": "Complete & archive", "value": "approve"},
         {"label": "Keep task open", "value": "decline"},
@@ -258,6 +259,7 @@ async def test_ready_for_user_queues_completion_confirmation_after_handoff(
     kwargs = service.propose_action.await_args.kwargs
     assert kwargs["target_kind"] == DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND
     assert kwargs["target_id"] == str(THREAD_ID)
+    assert kwargs["defer_discord_until_turn_end"] is True
 
 
 @pytest.mark.asyncio

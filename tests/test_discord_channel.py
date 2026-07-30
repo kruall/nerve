@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -1359,6 +1360,7 @@ async def test_post_ready_restores_missing_task_thread_completion_cards():
         completion,
         {"id": "approval-plan", "target_kind": "plan"},
     ])
+    channel.db.get_session_run_recovery = AsyncMock(return_value=None)
     channel._deliver_project_task_completion = AsyncMock()
 
     await channel._restore_project_task_completion_cards()
@@ -1366,6 +1368,24 @@ async def test_post_ready_restores_missing_task_thread_completion_cards():
     channel._deliver_project_task_completion.assert_awaited_once_with(
         completion, duplicate_to_audit=False,
     )
+
+
+@pytest.mark.asyncio
+async def test_post_ready_defers_task_completion_card_until_turn_end():
+    channel = _channel()
+    completion = {
+        "id": "approval-task-complete",
+        "session_id": "s1",
+        "target_kind": "discord-project-task-completion",
+        "metadata": json.dumps({"defer_discord_until_turn_end": True}),
+    }
+    channel.db.list_notifications = AsyncMock(return_value=[completion])
+    channel.db.get_session_run_recovery = AsyncMock(return_value={"session_id": "s1"})
+    channel._deliver_project_task_completion = AsyncMock()
+
+    await channel._restore_project_task_completion_cards()
+
+    channel._deliver_project_task_completion.assert_not_awaited()
 
 
 def test_token_loader_reads_one_line_file(tmp_path: Path):

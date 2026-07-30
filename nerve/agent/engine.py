@@ -2812,6 +2812,20 @@ adjacent tier is a better fit:
                             "limit in one run",
                             session_id,
                         )
+                    if self.notification_service is not None:
+                        try:
+                            await self.notification_service.deliver_deferred_discord(
+                                session_id,
+                            )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            # A notification channel is optional: a failed card
+                            # must not invalidate an otherwise completed turn.
+                            logger.exception(
+                                "Failed to flush deferred Discord approvals for %s",
+                                session_id,
+                            )
                     completed = True
                     return result
                 finally:

@@ -11,6 +11,7 @@ threads accept either a direct mention or a reply to the bot.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import stat
@@ -64,9 +65,9 @@ next allowed status:
 `ready-for-user` -> `completed` / `blocked` / `cancelled`;
 `blocked` -> `ready-for-agent`.
 Do not infer task completion from a transient session ending. Moving a task to
-`ready-for-user` creates a user confirmation card; only its accepted button
-changes the task to `completed` and archives the thread, without another model
-turn.]
+`ready-for-user` queues a user confirmation card after this turn's messages;
+only its accepted button changes the task to `completed` and archives the
+thread, without another model turn.]
 """
 
 
@@ -1454,6 +1455,19 @@ class DiscordChannel(BaseChannel):
         for row in rows:
             if row.get("target_kind") != DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND:
                 continue
+            try:
+                metadata = json.loads(row.get("metadata") or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                metadata = {}
+            if isinstance(metadata, dict) and metadata.get(
+                "defer_discord_until_turn_end",
+            ):
+                # A restart can happen while the originating turn still has
+                # a durable recovery checkpoint.  Let that turn finish and
+                # flush its card in order; otherwise this is a prior failed
+                # delivery and post-ready restoration may safely retry it.
+                if await self.db.get_session_run_recovery(row["session_id"]):
+                    continue
             try:
                 await self._deliver_project_task_completion(
                     row, duplicate_to_audit=False,

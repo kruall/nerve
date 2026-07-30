@@ -181,6 +181,7 @@ async def discord_project_task_status_handler(
                     {"label": "Keep task open", "value": "decline"},
                 ],
                 priority="high",
+                defer_discord_until_turn_end=True,
             )
         except Exception as exc:
             raise RuntimeError(

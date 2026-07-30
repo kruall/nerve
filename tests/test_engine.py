@@ -71,6 +71,51 @@ async def test_claude_steer_only_writes_during_active_turn():
     client._sdk.query.assert_awaited_once_with("new context")
 
 
+@pytest.mark.asyncio
+async def test_run_delivers_deferred_discord_cards_after_final_turn():
+    engine = AgentEngine.__new__(AgentEngine)
+    engine.config = NerveConfig()
+    engine.db = MagicMock()
+    engine.db.clear_session_run_recovery = AsyncMock()
+    engine.sessions = MagicMock()
+    engine.sessions.get_or_create = AsyncMock()
+    engine._session_locks = {}
+    engine._semaphore = asyncio.Semaphore()
+    engine._router = None
+    engine._shutting_down = False
+    engine._pending_model_tier_continuations = {}
+    engine._active_channel = {}
+    events: list[str] = []
+    service = MagicMock()
+
+    async def deliver_deferred(session_id: str) -> int:
+        assert session_id == "s1"
+        events.append("card")
+        return 1
+
+    async def run_inner(*args, **kwargs) -> str:
+        events.append("final")
+        return "final response"
+
+    service.deliver_deferred_discord = deliver_deferred
+    engine.notification_service = service
+    engine._run_inner = run_inner
+
+    with (
+        patch("nerve.agent.engine.broadcaster.start_buffering"),
+        patch("nerve.agent.engine.broadcaster.mark_turn_open"),
+        patch("nerve.agent.engine.broadcaster.broadcast", AsyncMock()),
+        patch("nerve.agent.engine.broadcaster.is_turn_open", return_value=False),
+        patch("nerve.agent.engine.broadcaster.stop_buffering"),
+    ):
+        assert await engine.run(
+            "s1", "work", source="discord", channel="discord",
+            _restart_recovery=True,
+        ) == "final response"
+
+    assert events == ["final", "card"]
+
+
 @pytest.mark.parametrize(
     "value, model, expected",
     [

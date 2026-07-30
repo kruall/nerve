@@ -316,6 +316,57 @@ class TestProposeAction:
         assert meta["option_labels"]["snooze_24h"] == "Snooze 24h"
         assert meta["target_kind"] == "mechanical-action"
 
+    async def test_propose_action_can_defer_discord_until_turn_end(
+        self,
+        db: Database,
+        fake_config: NerveConfig,
+        fake_engine: MagicMock,
+    ):
+        await db.create_session("s1")
+        svc = NotificationService(fake_config, db, fake_engine)
+        svc._fanout = AsyncMock()
+
+        result = await svc.propose_action(
+            session_id="s1",
+            target_kind="discord-project-task-completion",
+            target_id="thread-1",
+            title="Complete task",
+            defer_discord_until_turn_end=True,
+        )
+
+        notif = await db.get_notification(result["notification_id"])
+        assert json.loads(notif["metadata"])[
+            "defer_discord_until_turn_end"
+        ] is True
+        svc._fanout.assert_not_awaited()
+
+    async def test_deferred_discord_delivery_follows_turn_completion(
+        self,
+        db: Database,
+        fake_config: NerveConfig,
+        fake_engine: MagicMock,
+    ):
+        await db.create_session("s1")
+        await db.create_notification(
+            notification_id="approval-deferred",
+            session_id="s1",
+            type="approval",
+            title="Complete task",
+            target_kind="discord-project-task-completion",
+            target_id="thread-1",
+            metadata={"defer_discord_until_turn_end": True},
+        )
+        svc = NotificationService(fake_config, db, fake_engine)
+        svc._deliver_discord = AsyncMock()
+
+        assert await svc.deliver_deferred_discord("s1") == 1
+        svc._deliver_discord.assert_awaited_once_with("approval-deferred")
+        notif = await db.get_notification("approval-deferred")
+        assert json.loads(notif["metadata"])[
+            "defer_discord_until_turn_end"
+        ] is False
+        assert json.loads(notif["channels_delivered"]) == ["discord"]
+
     async def test_propose_action_rejects_empty_options(
         self,
         db: Database,
