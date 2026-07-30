@@ -118,6 +118,77 @@ class TestSchemaMigration:
         assert after["activated_at"] == before["activated_at"]
         assert after["baseline_initialized"] == before["baseline_initialized"]
 
+    async def test_tool_lease_schema_repairs_v48_database(
+        self, tmp_path,
+    ):
+        db_path = tmp_path / "v48-without-tool-leases.db"
+        database = Database(db_path)
+        await database.connect()
+        await database.db.executescript(
+            """
+            DROP TABLE tool_lease_subscriptions;
+            DROP TABLE tool_leases;
+            DELETE FROM schema_version WHERE version = 49;
+            """
+        )
+        await database.db.commit()
+        await database.close()
+
+        repaired = Database(db_path)
+        await repaired.connect()
+        try:
+            async with repaired.db.execute(
+                """
+                SELECT name FROM sqlite_master
+                WHERE name IN (
+                    'tool_leases',
+                    'idx_tool_leases_expires_at',
+                    'tool_lease_subscriptions',
+                    'idx_tool_lease_subscriptions_ready',
+                    'idx_tool_lease_subscriptions_expires_at'
+                )
+                """
+            ) as cursor:
+                objects = {row[0] async for row in cursor}
+            assert objects == {
+                "tool_leases",
+                "idx_tool_leases_expires_at",
+                "tool_lease_subscriptions",
+                "idx_tool_lease_subscriptions_ready",
+                "idx_tool_lease_subscriptions_expires_at",
+            }
+            async with repaired.db.execute(
+                "SELECT MAX(version) FROM schema_version"
+            ) as cursor:
+                assert (await cursor.fetchone())[0] == 49
+        finally:
+            await repaired.close()
+
+    async def test_tool_lease_repair_preserves_existing_rows(
+        self, db: Database,
+    ):
+        from nerve.db.migrations import v049_repair_tool_leases as v049
+
+        await db.create_session("lease-owner")
+        await db.create_session("lease-waiter")
+        await db.acquire_tool_lease("deploy", "lease-owner", 300)
+        subscription = await db.subscribe_tool_lease(
+            "deploy", "lease-waiter", "continue", 120, 600,
+        )
+
+        await v049.up(db.db)
+        await v049.up(db.db)
+        await db.db.commit()
+
+        lease = await db.get_tool_lease("deploy")
+        assert lease is not None
+        assert lease["session_id"] == "lease-owner"
+        async with db.db.execute(
+            "SELECT session_id FROM tool_lease_subscriptions WHERE id = ?",
+            (subscription["id"],),
+        ) as cursor:
+            assert (await cursor.fetchone())[0] == "lease-waiter"
+
 
 @pytest.mark.asyncio
 class TestDiscordThreadContext:
