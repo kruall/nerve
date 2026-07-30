@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -67,6 +68,40 @@ async def test_remote_command_uses_common_detached_launcher(tmp_path):
     assert command[command.index("--host") + 1] == "builder"
     assert command[command.index("--arguments-json") + 1] == '["target"]'
     assert "builder.example.test" not in " ".join(command)
+
+
+@pytest.mark.asyncio
+async def test_detached_command_state_lives_beside_database(tmp_path):
+    engine = AgentEngine.__new__(AgentEngine)
+    engine.config = SimpleNamespace(
+        workspace=tmp_path / "workspace",
+        config_dir=tmp_path / "config",
+    )
+    engine.config.workspace.mkdir()
+    engine.config.config_dir.mkdir()
+    engine.db = SimpleNamespace(
+        db_path=tmp_path / "state" / "nerve.db",
+        add_long_command=AsyncMock(),
+        set_long_command_pid=AsyncMock(),
+    )
+    engine._start_long_command_monitor = Mock()
+    process = SimpleNamespace(pid=123)
+
+    with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=process)):
+        result = await engine._start_detached_long_command(
+            session_id="s1",
+            command=["pytest"],
+            cwd=engine.config.workspace,
+            timeout_seconds=60,
+            prompt="continue",
+        )
+
+    state_root = tmp_path / "state" / "long-commands"
+    assert Path(result["output_path"]).parent == state_root
+    assert state_root.is_dir()
+    job = engine.db.add_long_command.await_args.args[0]
+    assert Path(job["status_path"]).parent == state_root
+    assert not (engine.config.config_dir / "long-commands").exists()
 
 
 class _Db:

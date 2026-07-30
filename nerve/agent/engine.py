@@ -4044,9 +4044,12 @@ adjacent tier is a better fit:
         timeout = min(max(timeout, 60.0), 14_400.0)
 
         command_id = uuid.uuid4().hex
-        state_root = Path(
-            getattr(self.config, "config_dir", self.config.workspace)
-        ) / "long-commands"
+        db_path = Path(getattr(
+            self.db,
+            "db_path",
+            Path("~/.nerve/nerve.db").expanduser(),
+        )).expanduser()
+        state_root = db_path.parent / "long-commands"
         state_root.mkdir(parents=True, exist_ok=True)
         output_path = state_root / f"{command_id}.log"
         status_path = state_root / f"{command_id}.json"
