@@ -16,6 +16,7 @@ from nerve.agent.tools.handlers.memory import MEMORY_SPECS
 from nerve.agent.tools.handlers.model_routing import MODEL_ROUTING_SPECS
 from nerve.agent.tools.handlers.notifications import NOTIFICATION_SPECS
 from nerve.agent.tools.handlers.plans import PLAN_SPECS
+from nerve.agent.tools.handlers.restart import RESTART_SPECS
 from nerve.agent.tools.handlers.skills import SKILL_SPECS
 from nerve.agent.tools.handlers.sources import SOURCE_SPECS
 from nerve.agent.tools.handlers.tasks import TASK_SPECS
@@ -42,6 +43,7 @@ def build_default_registry() -> ToolRegistry:
         *MCP_ADMIN_SPECS,
         *MODEL_ROUTING_SPECS,
         *WAKEUP_SPECS,
+        *RESTART_SPECS,
         *HOA_SPECS,
     ):
         registry.register(spec)

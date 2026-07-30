@@ -144,6 +144,14 @@ class ChannelRouter:
         if not channel:
             raise ValueError(f"Unknown channel: {msg.channel_name}")
 
+        restart_coordinator = getattr(self.engine, "restart_coordinator", None)
+        if getattr(restart_coordinator, "pending", False) is True:
+            await channel.send(OutboundMessage(
+                target=msg.sender_id,
+                text=restart_coordinator.pending_message(),
+            ))
+            return ""
+
         # Resolve session
         if msg.session_id:
             session_id = msg.session_id

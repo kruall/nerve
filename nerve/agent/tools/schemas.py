@@ -881,6 +881,42 @@ SESSION_MESSAGE_SCHEMA = {
     "required": ["session_id", "message"],
 }
 
+RESTART_SCHEDULE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "prompt_after_seconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 3600,
+            "default": 300,
+            "description": (
+                "How long active sessions may finish normally before they are "
+                "asked for a restart decision."
+            ),
+        },
+    },
+    "required": [],
+}
+
+RESTART_READY_SCHEMA = {
+    "type": "object",
+    "properties": {},
+    "required": [],
+}
+
+RESTART_WAIT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "seconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 3600,
+            "description": "Additional time needed before another restart question.",
+        },
+    },
+    "required": ["seconds"],
+}
+
 DISCORD_FORUM_TAGS_SCHEMA = {
     "type": "object",
     "properties": {

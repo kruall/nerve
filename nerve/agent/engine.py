@@ -67,6 +67,7 @@ from nerve.agent.tools import (
 from nerve.agent.tools import init_tools
 from nerve.config import NerveConfig, load_mcp_servers
 from nerve.db import Database
+from nerve.restart import RestartCoordinator, RestartScheduledError
 from nerve.observability.langfuse import attributes as lf_attrs
 from nerve.skills.manager import SkillManager
 
@@ -216,6 +217,7 @@ class AgentEngine:
             default_cwd=str(config.workspace),
         )
         self._semaphore = asyncio.Semaphore(config.agent.max_concurrent)
+        self.restart_coordinator = RestartCoordinator(self, config)
         self._memory_bridge = None
         self._xmemory_bridge = None
         self._skill_manager: SkillManager | None = None
@@ -646,6 +648,7 @@ class AgentEngine:
         Sessions are marked idle so they can be resumed on next startup.
         """
         self.begin_shutdown()
+        await self.restart_coordinator.shutdown()
 
         # Stop turns before killing their clients. Their CancelledError path
         # captures the native thread id and deliberately leaves the durable
@@ -2667,6 +2670,9 @@ adjacent tier is a better fit:
             image_refs: Optional metadata about uploaded files for persisting
                         in the user message blocks column (web uploads only).
         """
+        if self.restart_coordinator.pending:
+            raise RestartScheduledError(self.restart_coordinator.pending_message())
+
         # Serialize runs per session — messages for the same session wait
         # in order instead of failing with "already running".
         lock = self._session_locks.setdefault(session_id, asyncio.Lock())
