@@ -72,6 +72,7 @@ def _runner(threads: list[_Thread]) -> tuple[DiscordProjectTaskRunner, MagicMock
         project_forums={FORUM_ID: "NERVE"},
         project_prompt=lambda _forum, _thread: "Project instructions.",
     )
+    router.handle_message.side_effect = ["1. Inspect the code.\n2. Implement it.", "Done."]
     return runner, guild
 
 
@@ -97,14 +98,84 @@ async def test_scans_oldest_ready_task_claims_it_then_dispatches(monkeypatch):
         target_status="in-progress",
         audit_reason="Nerve autonomous project-task runner",
     )
-    runner.db.bind_discord_session.assert_awaited_once_with(
-        "discord-task:1:100", guild_id=GUILD_ID, thread_id=older.id,
+    planning_binding, execution_binding = (
+        runner.db.bind_discord_session.await_args_list
     )
-    message = runner.router.handle_message.await_args.args[0]
-    assert message.session_id == "discord-task:1:100"
-    assert "Project instructions." in message.text
-    assert "Implement the selected task." in message.text
-    assert "already been moved to `in-progress`" in message.text
+    assert planning_binding.args == ("discord-task-plan:1:100",)
+    assert planning_binding.kwargs == {
+        "guild_id": GUILD_ID, "thread_id": older.id,
+    }
+    assert execution_binding.args == ("discord-task:1:100",)
+    assert execution_binding.kwargs == {
+        "guild_id": GUILD_ID, "thread_id": older.id,
+    }
+    planning_message, execution_message = [
+        call.args[0] for call in runner.router.handle_message.await_args_list
+    ]
+    assert planning_message.session_id == "discord-task-plan:1:100"
+    assert "Project instructions." in planning_message.text
+    assert "Implement the selected task." in planning_message.text
+    assert (
+        "Produce a concrete, self-contained implementation plan"
+        in planning_message.text
+    )
+    assert execution_message.session_id == "discord-task:1:100"
+    assert "[Planner handoff]" in execution_message.text
+    assert "1. Inspect the code." in execution_message.text
+    assert "already been moved to `in-progress`" in execution_message.text
+
+
+@pytest.mark.asyncio
+async def test_planning_uses_project_tier_but_execution_uses_global_default(
+    monkeypatch,
+):
+    runner, guild = _runner([_Thread(100)])
+    runner.nerve_config.agent.backend = "codex"
+    runner.nerve_config.discord.project_model_tiers = {"NERVE": "terra-high"}
+    monkeypatch.setattr(
+        "nerve.channels.discord_project_task_runner.transition_project_task_status",
+        lambda *_args, **_kwargs: {"current_status": "in-progress"},
+    )
+
+    assert await runner.scan_once(guild) is True
+    task = runner._active_task
+    assert task is not None
+    await task
+
+    planning_call, execution_call = (
+        runner.router.engine.sessions.get_or_create.await_args_list
+    )
+    assert planning_call.args[0] == "discord-task-plan:1:100"
+    assert planning_call.kwargs["model"] == "gpt-5.6-terra"
+    assert planning_call.kwargs["model_tier"] == "terra-high"
+    assert planning_call.kwargs["reasoning_effort"] == "high"
+    assert (
+        planning_call.kwargs["metadata"]["discord_task_stage"] == "planning"
+    )
+    assert execution_call.args[0] == "discord-task:1:100"
+    assert "model" not in execution_call.kwargs
+    assert (
+        execution_call.kwargs["metadata"]["discord_task_stage"]
+        == "implementation"
+    )
+
+
+@pytest.mark.asyncio
+async def test_empty_planner_response_does_not_start_execution(monkeypatch):
+    runner, guild = _runner([_Thread(100)])
+    runner.router.handle_message.side_effect = [""]
+    monkeypatch.setattr(
+        "nerve.channels.discord_project_task_runner.transition_project_task_status",
+        lambda *_args, **_kwargs: {"current_status": "in-progress"},
+    )
+
+    assert await runner.scan_once(guild) is True
+    task = runner._active_task
+    assert task is not None
+    await task
+
+    assert runner.router.handle_message.await_count == 1
+    assert runner.router.engine.sessions.get_or_create.await_count == 1
 
 
 @pytest.mark.asyncio

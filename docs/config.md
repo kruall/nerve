@@ -211,7 +211,7 @@ WebSocket. It does not require an inbound listener or a public Nerve endpoint.
 | `discord.task_forums` | map[string, int] | `{}` | Project name to Discord forum-channel ID |
 | `discord.project_task_runner_enabled` | bool | `false` | Opt in to selecting and running one `ready-for-agent` project task at a time |
 | `discord.project_task_runner_poll_interval_seconds` | float | `60` | Delay between autonomous task scans; values below 10 seconds are clamped |
-| `discord.project_model_tiers` | map[string, string] | `{}` | Initial Codex tier for sessions created in each project forum; keys must exist in `task_forums` |
+| `discord.project_model_tiers` | map[string, string] | `{}` | Initial Codex tier for ordinary project sessions and the planning pass of an autonomous task; keys must exist in `task_forums` |
 | `discord.skills_forum_id` | int | `0` | Shared forum where Nerve publishes one managed thread per local skill |
 | `discord.audit_forum_id` | int | `0` | Outbound-only forum where Nerve mirrors one thread per session |
 | `discord.audit_batch_window_seconds` | float | `60` | Window used to combine adjacent audit activity before updating Discord; terminal events flush immediately |
@@ -237,8 +237,12 @@ sent to the individual thread.
 When `project_task_runner_enabled` is enabled, completed Discord post-ready
 initialization starts one polling worker for all configured project forums. It
 selects the oldest active thread carrying exactly one `ready-for-agent` tag,
-changes that tag to `in-progress`, and starts a session bound to that thread.
-The worker has one in-memory flight across every configured forum, and the
+changes that tag to `in-progress`, and first starts a planning session bound to
+that thread. The planning session uses the project's configured Codex tier;
+its plan is handed to a separate implementation session, which uses the
+ordinary global default tier. This lets a stronger model plan the work without
+changing the normal implementation model. The worker has one in-memory flight
+across every configured forum, and the
 `in-progress` Discord tag is its durable restart-safe claim. It never starts a
 second task while the first task's turn is running, and it does not infer task
 completion or close threads after that turn.
