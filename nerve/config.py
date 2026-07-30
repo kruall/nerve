@@ -285,6 +285,9 @@ class DiscordConfig:
     guild_id: int = 0
     channel_ids: list[int] = field(default_factory=list)
     task_forums: dict[str, int] = field(default_factory=dict)
+    # Disabled by default: selecting work is an external action.
+    project_task_runner_enabled: bool = False
+    project_task_runner_poll_interval_seconds: float = 60.0
     # Optional initial Codex tier per project forum. These defaults apply only
     # when a new Discord session is created; a stored session tier is sticky.
     project_model_tiers: dict[str, str] = field(default_factory=dict)
@@ -318,6 +321,12 @@ class DiscordConfig:
                 for project, channel_id in raw_forums.items()
                 if str(project).strip()
             },
+            project_task_runner_enabled=bool(
+                d.get("project_task_runner_enabled", False)
+            ),
+            project_task_runner_poll_interval_seconds=float(
+                d.get("project_task_runner_poll_interval_seconds", 60.0)
+            ),
             project_model_tiers={
                 str(project).strip(): str(tier).strip()
                 for project, tier in raw_project_model_tiers.items()

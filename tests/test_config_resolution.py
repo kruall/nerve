@@ -244,6 +244,8 @@ class TestDiscordConfig:
         assert cfg.guild_id == 0
         assert cfg.channel_ids == []
         assert cfg.task_forums == {}
+        assert cfg.project_task_runner_enabled is False
+        assert cfg.project_task_runner_poll_interval_seconds == 60.0
         assert cfg.project_model_tiers == {}
         assert cfg.skills_forum_id == 0
         assert cfg.audit_forum_id == 0
@@ -258,6 +260,8 @@ class TestDiscordConfig:
             "guild_id": "100",
             "channel_ids": ["200"],
             "task_forums": {"YDB": "300"},
+            "project_task_runner_enabled": True,
+            "project_task_runner_poll_interval_seconds": "120",
             "project_model_tiers": {"YDB": "sol-xhigh"},
             "skills_forum_id": "325",
             "audit_forum_id": "350",
@@ -269,6 +273,8 @@ class TestDiscordConfig:
         assert cfg.guild_id == 100
         assert cfg.channel_ids == [200]
         assert cfg.task_forums == {"YDB": 300}
+        assert cfg.project_task_runner_enabled is True
+        assert cfg.project_task_runner_poll_interval_seconds == 120.0
         assert cfg.project_model_tiers == {"YDB": "sol-xhigh"}
         assert cfg.skills_forum_id == 325
         assert cfg.audit_forum_id == 350
@@ -289,6 +295,8 @@ class TestDiscordConfig:
                 "guild_id": 100,
                 "channel_ids": [200],
                 "task_forums": {"YDB": 300},
+                "project_task_runner_enabled": True,
+                "project_task_runner_poll_interval_seconds": 60,
                 "project_model_tiers": {"YDB": "sol-xhigh"},
                 "skills_forum_id": 325,
                 "audit_forum_id": 350,

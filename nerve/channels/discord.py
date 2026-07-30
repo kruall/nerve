@@ -113,6 +113,7 @@ class DiscordChannel(BaseChannel):
         self._system_audit: Any | None = None
         self._skill_forum: Any | None = None
         self._project_prompts: Any | None = None
+        self._project_task_runner: Any | None = None
         self._skill_manager = skill_manager
         self._system_audit_lock = asyncio.Lock()
         self._notification_service: Any | None = None
@@ -506,11 +507,15 @@ class DiscordChannel(BaseChannel):
         skill_forum = self._skill_forum
         self._skill_forum = None
         self._project_prompts = None
+        project_task_runner = self._project_task_runner
+        self._project_task_runner = None
 
         if mirror is not None:
             await mirror.stop()
         if skill_forum is not None:
             await skill_forum.stop()
+        if project_task_runner is not None:
+            await project_task_runner.stop()
         if presence is not None:
             await presence.stop()
         if client is not None and not client.is_closed():
@@ -746,6 +751,36 @@ class DiscordChannel(BaseChannel):
             logger.exception(
                 "Discord backlog catch-up failed; live messages remain available"
             )
+
+        if (
+            self.config.project_task_runner_enabled
+            and self._project_forums
+            and self._project_task_runner is None
+        ):
+            try:
+                from nerve.channels.discord_project_task_runner import (
+                    DiscordProjectTaskRunner,
+                )
+
+                prompts = self._project_prompts
+                self._project_task_runner = DiscordProjectTaskRunner(
+                    config=self._nerve_config,
+                    router=self.router,
+                    db=self.db,
+                    project_forums=self._project_forums,
+                    project_prompt=(
+                        prompts.prompt_for_thread if prompts is not None else None
+                    ),
+                )
+                await self._project_task_runner.start(guild)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._project_task_runner = None
+                logger.exception(
+                    "Discord project-task runner failed to start; "
+                    "continuing without autonomous task execution"
+                )
 
     async def _ensure_system_audit(
         self,
