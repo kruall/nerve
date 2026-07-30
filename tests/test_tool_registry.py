@@ -173,6 +173,8 @@ class TestDefaultRegistry:
             "discord_forum_tag_action",
             # mcp admin
             "nerve_api", "mcp_reload",
+            # allowlisted remote Git worktrees
+            "run_remote_worktree_command",
             # hoa
             "hoa_status", "hoa_list_pipelines", "hoa_execute",
         }

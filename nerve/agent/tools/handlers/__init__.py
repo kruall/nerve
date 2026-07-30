@@ -17,6 +17,7 @@ from nerve.agent.tools.handlers.long_commands import LONG_COMMAND_SPECS
 from nerve.agent.tools.handlers.model_routing import MODEL_ROUTING_SPECS
 from nerve.agent.tools.handlers.notifications import NOTIFICATION_SPECS
 from nerve.agent.tools.handlers.plans import PLAN_SPECS
+from nerve.agent.tools.handlers.remote_worktrees import REMOTE_WORKTREE_SPECS
 from nerve.agent.tools.handlers.restart import RESTART_SPECS
 from nerve.agent.tools.handlers.skills import SKILL_SPECS
 from nerve.agent.tools.handlers.sources import SOURCE_SPECS
@@ -41,6 +42,7 @@ def build_default_registry() -> ToolRegistry:
         *LONG_COMMAND_SPECS,
         *SOURCE_SPECS,
         *PLAN_SPECS,
+        *REMOTE_WORKTREE_SPECS,
         *SKILL_SPECS,
         *NOTIFICATION_SPECS,
         *DISCORD_SPECS,

@@ -85,6 +85,10 @@ You are running on Nerve's Codex backend.
 - For a long build or test, prefer `run_long_command`: it returns promptly and
   Nerve resumes this exact session with the output when the command settles or
   reaches its timeout. Pass argv, never a shell string.
+- For builds or tests in an allowlisted remote Git worktree, use
+  `run_remote_worktree_command`. Address only configured host aliases and pass
+  arguments as argv. Synchronization and execution run detached; completion
+  arrives in a separate continuation turn for this same session.
 - Native structured questions and plan updates are bridged into Nerve's UI.
   The persistent/asynchronous question tool is `mcp__nerve__ask_user`.
 </backend-notes>

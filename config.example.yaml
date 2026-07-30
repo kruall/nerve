@@ -5,6 +5,22 @@
 workspace: ~/nerve-workspace    # Path to workspace with SOUL.md, MEMORY.md, etc.
 timezone: America/New_York
 
+# Optional allowlist for detached commands in synchronized remote Git
+# worktrees. Agents address only the host alias ("ydb-builder"), never the
+# hostname or remote paths.
+# remote_worktrees:
+#   hosts:
+#     ydb-builder:
+#       fqdn: build.example.internal
+#       ssh_user: builder
+#       ssh_port: 22
+#       ssh_args: ["-o", "BatchMode=yes"]
+#       repositories:
+#         ydb:
+#           local_worktree_root: ~/git/ydb-worktrees
+#           remote_bare_repo: /home/builder/.cache/nerve/ydb.git
+#           remote_checkout_root: /home/builder/.cache/nerve/ydb-worktrees
+
 # Provider — how Nerve connects to Claude (default: anthropic)
 # provider:
 #   type: bedrock              # "anthropic" or "bedrock"

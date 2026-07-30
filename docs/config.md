@@ -32,6 +32,65 @@ from any working directory:
 
 > **Note:** The _mode_ (personal vs worker) is not a config field — it's determined at `nerve init` time and expressed through which workspace templates, cron jobs, and memory categories are active. There's no `mode` key in config.
 
+## Remote Git worktrees
+
+`remote_worktrees` is an optional allowlist for detached build, test, and
+arbitrary argv commands on trusted SSH hosts. An agent can select only a
+configured host alias and a local Git worktree below one of that host's
+repository roots. The hostname, SSH destination, remote bare repository, and
+remote checkout root are resolved from configuration inside Nerve and cannot
+be supplied by a tool call.
+
+```yaml
+remote_worktrees:
+  hosts:
+    ydb-builder:
+      fqdn: build.example.internal
+      ssh_user: builder
+      ssh_port: 22
+      ssh_args: ["-o", "BatchMode=yes"]
+      repositories:
+        ydb:
+          local_worktree_root: ~/git/ydb-worktrees
+          remote_bare_repo: /home/builder/.cache/nerve/ydb.git
+          remote_checkout_root: /home/builder/.cache/nerve/ydb-worktrees
+```
+
+Host and repository names are aliases. Local roots must be absolute after
+environment-variable and `~` expansion, must not overlap within one host, and
+must not be `/`. Remote paths must be normalized absolute POSIX paths other
+than `/`; bare-repository and checkout paths may not overlap. With no hosts
+configured, `run_remote_worktree_command` fails closed and reports that there
+are no allowed aliases.
+
+The tool supports:
+
+- `sync`: snapshot and synchronize only;
+- `make`: `./ya make --build relwithdebinfo <arguments>`;
+- `test`: `./ya make --build relwithdebinfo -tA <arguments>`;
+- `execute`: run the exact argv supplied by the agent. A shell is used only
+  when it is explicitly present in argv, for example
+  `["bash", "-lc", "command"]`. `skipSync` is allowed only for `execute`.
+
+The snapshot starts from `HEAD`, overlays tracked changes plus untracked
+non-ignored files through a temporary Git index, and pushes a deterministic
+synthetic commit to a `refs/nerve/snapshots/*` ref. It does not change the
+local branch, index, status, or history. Each session/worktree pair gets an
+isolated checkout below `remote_checkout_root`; synchronization uses
+`git reset --hard` and `git clean -ffd`, which removes stale non-ignored files
+while preserving ignored build caches.
+
+This feature is a routing allowlist, not a command sandbox. In particular,
+`execute` intentionally permits arbitrary commands as the configured SSH user
+on the trusted host. Keep normal `known_hosts` verification enabled and limit
+that account separately. For a large repository, pre-populate
+`remote_bare_repo` before first use to avoid an expensive initial object
+transfer. Automatic remote-cache cleanup is intentionally not performed.
+Git submodules are rejected; Git LFS objects are not transferred separately
+and must already be available on the remote host. A timeout terminates the
+local SSH process group, but cannot guarantee termination of a remote command
+that deliberately detached itself.
+
 ## Agent
 
 | Key | Type | Default | Description |

@@ -3977,6 +3977,66 @@ adjacent tier is a better fit:
             raise ValueError("cwd must remain inside the configured workspace") from e
         if not resolved_cwd.is_dir():
             raise ValueError(f"cwd does not exist or is not a directory: {cwd}")
+        return await self._start_detached_long_command(
+            session_id=session_id,
+            command=command,
+            cwd=resolved_cwd,
+            timeout_seconds=timeout_seconds,
+            prompt=prompt,
+        )
+
+    async def start_remote_worktree_command(
+        self,
+        *,
+        session_id: str,
+        host_alias: str,
+        repository_name: str,
+        worktree: str,
+        operation: str,
+        arguments: list[str],
+        remote_cwd: str,
+        skip_sync: bool,
+        timeout_seconds: Any,
+        prompt: str,
+    ) -> dict[str, str]:
+        """Run the remote-worktree runner through durable command recovery."""
+        values = [
+            host_alias, repository_name, worktree, operation, remote_cwd,
+            *arguments,
+        ]
+        if any("\x00" in value for value in values):
+            raise ValueError("remote worktree arguments must not contain NUL bytes")
+        command = [
+            sys.executable, "-m", "nerve.agent.remote_worktree_runner",
+            "--config-dir", str(self.config.config_dir),
+            "--host", host_alias,
+            "--repository", repository_name,
+            "--worktree", worktree,
+            "--session-id", session_id,
+            "--operation", operation,
+            "--arguments-json", json.dumps(arguments),
+            "--remote-cwd", remote_cwd,
+        ]
+        if skip_sync:
+            command.append("--skip-sync")
+        return await self._start_detached_long_command(
+            session_id=session_id,
+            command=command,
+            cwd=self.config.workspace.resolve(),
+            timeout_seconds=timeout_seconds,
+            prompt=prompt,
+        )
+
+    async def _start_detached_long_command(
+        self,
+        *,
+        session_id: str,
+        command: list[str],
+        cwd: Path,
+        timeout_seconds: Any,
+        prompt: str,
+    ) -> dict[str, str]:
+        """Launch a wrapper-owned command and persist its continuation state."""
         try:
             timeout = float(timeout_seconds)
         except (TypeError, ValueError) as e:
@@ -3984,7 +4044,9 @@ adjacent tier is a better fit:
         timeout = min(max(timeout, 60.0), 14_400.0)
 
         command_id = uuid.uuid4().hex
-        state_root = Path(getattr(self.config, "config_dir", workspace)) / "long-commands"
+        state_root = Path(
+            getattr(self.config, "config_dir", self.config.workspace)
+        ) / "long-commands"
         state_root.mkdir(parents=True, exist_ok=True)
         output_path = state_root / f"{command_id}.log"
         status_path = state_root / f"{command_id}.json"
@@ -3993,7 +4055,7 @@ adjacent tier is a better fit:
             "id": command_id,
             "session_id": session_id,
             "command_json": json.dumps(command),
-            "cwd": str(resolved_cwd),
+            "cwd": str(cwd),
             "output_path": str(output_path),
             "status_path": str(status_path),
             "process_pid": None,
@@ -4006,8 +4068,8 @@ adjacent tier is a better fit:
                 sys.executable, "-m", "nerve.agent.long_command_runner",
                 "--status-file", str(status_path),
                 "--output-file", str(output_path),
-                "--cwd", str(resolved_cwd), "--", *command,
-                cwd=str(workspace), start_new_session=True,
+                "--cwd", str(cwd), "--", *command,
+                cwd=str(self.config.workspace.resolve()), start_new_session=True,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,

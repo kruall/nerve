@@ -44,6 +44,31 @@ async def test_tool_rejects_satellite_session(tmp_path):
     engine.start_long_command.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_remote_command_uses_common_detached_launcher(tmp_path):
+    engine = AgentEngine.__new__(AgentEngine)
+    engine.config = SimpleNamespace(workspace=tmp_path, config_dir=tmp_path)
+    engine._start_detached_long_command = AsyncMock(return_value={
+        "id": "remote-1", "output_path": str(tmp_path / "remote.log"),
+    })
+    result = await engine.start_remote_worktree_command(
+        session_id="s1", host_alias="builder", repository_name="repo",
+        worktree=str(tmp_path / "worktree"), operation="test",
+        arguments=["target"], remote_cwd="subdir", skip_sync=False,
+        timeout_seconds=120, prompt="continue",
+    )
+    assert result["id"] == "remote-1"
+    call = engine._start_detached_long_command.await_args.kwargs
+    assert call["session_id"] == "s1"
+    assert call["cwd"] == tmp_path.resolve()
+    assert call["timeout_seconds"] == 120
+    command = call["command"]
+    assert command[1:3] == ["-m", "nerve.agent.remote_worktree_runner"]
+    assert command[command.index("--host") + 1] == "builder"
+    assert command[command.index("--arguments-json") + 1] == '["target"]'
+    assert "builder.example.test" not in " ".join(command)
+
+
 class _Db:
     def __init__(self, session):
         self.session = session

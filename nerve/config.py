@@ -11,7 +11,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from nerve.houseofagents.config import HouseOfAgentsConfig
@@ -1560,6 +1560,221 @@ class XmemoryConfig:
         )
 
 
+_REMOTE_WORKTREE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+_REMOTE_FQDN_LABEL_RE = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+)
+_REMOTE_SSH_USER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}")
+
+
+def _remote_worktree_name(value: Any, label: str) -> str:
+    name = str(value or "").strip()
+    if not _REMOTE_WORKTREE_NAME_RE.fullmatch(name):
+        raise ValueError(
+            f"{label} must match {_REMOTE_WORKTREE_NAME_RE.pattern!r}"
+        )
+    return name
+
+
+def _remote_fqdn(value: Any, label: str) -> str:
+    fqdn = str(value or "").strip().lower()
+    labels = fqdn.split(".")
+    if (
+        len(fqdn) > 253
+        or len(labels) < 2
+        or any(not _REMOTE_FQDN_LABEL_RE.fullmatch(part) for part in labels)
+    ):
+        raise ValueError(f"{label} must be a valid fully-qualified hostname")
+    return fqdn
+
+
+def _remote_absolute_path(value: Any, label: str) -> str:
+    raw = str(value or "").strip()
+    if "\x00" in raw or "\n" in raw or "\r" in raw:
+        raise ValueError(f"{label} must not contain control characters")
+    path = PurePosixPath(raw)
+    if (
+        not raw
+        or raw == "/"
+        or not path.is_absolute()
+        or ".." in path.parts
+        or raw != str(path)
+    ):
+        raise ValueError(
+            f"{label} must be a normalized absolute remote path other than '/'"
+        )
+    return raw
+
+
+@dataclass(frozen=True)
+class RemoteWorktreeRepositoryConfig:
+    name: str
+    local_worktree_root: Path
+    remote_bare_repo: str
+    remote_checkout_root: str
+
+    @classmethod
+    def from_dict(
+        cls, name: str, raw: dict[str, Any],
+    ) -> "RemoteWorktreeRepositoryConfig":
+        name = _remote_worktree_name(name, "remote_worktrees repository name")
+        root_raw = str(raw.get("local_worktree_root") or "").strip()
+        if "\x00" in root_raw:
+            raise ValueError(
+                f"remote_worktrees repository {name!r} local_worktree_root "
+                "must not contain NUL bytes"
+            )
+        root = _expand_path(root_raw)
+        if root is None or not root_raw or not root.is_absolute():
+            raise ValueError(
+                f"remote_worktrees repository {name!r} local_worktree_root "
+                "must be an absolute local path"
+            )
+        root = root.resolve(strict=False)
+        if root == Path("/"):
+            raise ValueError(
+                f"remote_worktrees repository {name!r} local_worktree_root "
+                "must not be '/'"
+            )
+        bare = _remote_absolute_path(
+            raw.get("remote_bare_repo"),
+            f"remote_worktrees repository {name!r} remote_bare_repo",
+        )
+        checkout = _remote_absolute_path(
+            raw.get("remote_checkout_root"),
+            f"remote_worktrees repository {name!r} remote_checkout_root",
+        )
+        bare_path = PurePosixPath(bare)
+        checkout_path = PurePosixPath(checkout)
+        if (
+            bare_path == checkout_path
+            or bare_path.is_relative_to(checkout_path)
+            or checkout_path.is_relative_to(bare_path)
+        ):
+            raise ValueError(
+                f"remote_worktrees repository {name!r} bare and checkout "
+                "paths must not overlap"
+            )
+        return cls(
+            name=name,
+            local_worktree_root=root,
+            remote_bare_repo=bare,
+            remote_checkout_root=checkout,
+        )
+
+
+@dataclass(frozen=True)
+class RemoteWorktreeHostConfig:
+    alias: str
+    fqdn: str
+    ssh_user: str
+    ssh_port: int
+    ssh_args: tuple[str, ...]
+    repositories: tuple[RemoteWorktreeRepositoryConfig, ...]
+
+    @classmethod
+    def from_dict(
+        cls, alias: str, raw: dict[str, Any],
+    ) -> "RemoteWorktreeHostConfig":
+        alias = _remote_worktree_name(alias, "remote_worktrees host alias")
+        fqdn = _remote_fqdn(
+            raw.get("fqdn"), f"remote_worktrees host {alias!r} fqdn",
+        )
+        ssh_user = str(raw.get("ssh_user") or "").strip()
+        if not _REMOTE_SSH_USER_RE.fullmatch(ssh_user):
+            raise ValueError(
+                f"remote_worktrees host {alias!r} ssh_user is invalid"
+            )
+        try:
+            ssh_port = int(raw.get("ssh_port", 22))
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"remote_worktrees host {alias!r} ssh_port must be an integer"
+            ) from e
+        if not 1 <= ssh_port <= 65535:
+            raise ValueError(
+                f"remote_worktrees host {alias!r} ssh_port must be in [1, 65535]"
+            )
+        ssh_args_raw = raw.get("ssh_args") or []
+        if not isinstance(ssh_args_raw, list) or not all(
+            isinstance(part, str)
+            and part
+            and "\x00" not in part
+            and "\n" not in part
+            and "\r" not in part
+            for part in ssh_args_raw
+        ):
+            raise ValueError(
+                f"remote_worktrees host {alias!r} ssh_args must be an argv list"
+            )
+        repositories_raw = raw.get("repositories") or {}
+        if not isinstance(repositories_raw, dict) or not repositories_raw:
+            raise ValueError(
+                f"remote_worktrees host {alias!r} needs at least one repository"
+            )
+        repositories = tuple(
+            RemoteWorktreeRepositoryConfig.from_dict(name, repository)
+            for name, repository in repositories_raw.items()
+            if isinstance(repository, dict)
+        )
+        if len(repositories) != len(repositories_raw):
+            raise ValueError(
+                f"remote_worktrees host {alias!r} repositories must be mappings"
+            )
+        for index, left in enumerate(repositories):
+            for right in repositories[index + 1:]:
+                if (
+                    left.local_worktree_root == right.local_worktree_root
+                    or left.local_worktree_root.is_relative_to(
+                        right.local_worktree_root
+                    )
+                    or right.local_worktree_root.is_relative_to(
+                        left.local_worktree_root
+                    )
+                ):
+                    raise ValueError(
+                        f"remote_worktrees host {alias!r} has ambiguous local "
+                        f"repository roots for {left.name!r} and {right.name!r}"
+                    )
+        return cls(
+            alias=alias,
+            fqdn=fqdn,
+            ssh_user=ssh_user,
+            ssh_port=ssh_port,
+            ssh_args=tuple(ssh_args_raw),
+            repositories=repositories,
+        )
+
+
+@dataclass(frozen=True)
+class RemoteWorktreesConfig:
+    hosts: tuple[RemoteWorktreeHostConfig, ...] = ()
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any] | None) -> "RemoteWorktreesConfig":
+        if raw is not None and not isinstance(raw, dict):
+            raise ValueError("remote_worktrees must be a mapping")
+        d = raw or {}
+        hosts_raw = d.get("hosts") or {}
+        if not isinstance(hosts_raw, dict):
+            raise ValueError("remote_worktrees.hosts must be a mapping")
+        hosts = tuple(
+            RemoteWorktreeHostConfig.from_dict(alias, host)
+            for alias, host in hosts_raw.items()
+            if isinstance(host, dict)
+        )
+        if len(hosts) != len(hosts_raw):
+            raise ValueError("remote_worktrees hosts must be mappings")
+        return cls(hosts=hosts)
+
+    def host(self, alias: str) -> RemoteWorktreeHostConfig | None:
+        return next((host for host in self.hosts if host.alias == alias), None)
+
+    @property
+    def aliases(self) -> tuple[str, ...]:
+        return tuple(host.alias for host in self.hosts)
+
+
 @dataclass
 class NerveConfig:
     workspace: Path = field(default_factory=lambda: Path("~/nerve-workspace"))
@@ -1591,6 +1806,9 @@ class NerveConfig:
     mcp_endpoint: McpEndpointConfig = field(default_factory=McpEndpointConfig)
     mcp_servers: list[McpServerConfig] = field(default_factory=list)
     external_agents: ExternalAgentsConfig = field(default_factory=ExternalAgentsConfig)
+    remote_worktrees: RemoteWorktreesConfig = field(
+        default_factory=RemoteWorktreesConfig
+    )
 
     # API keys (from config.local.yaml)
     anthropic_api_key: str = ""
@@ -1836,6 +2054,9 @@ class NerveConfig:
             mcp_endpoint=McpEndpointConfig.from_dict(d.get("mcp_endpoint", {})),
             mcp_servers=_parse_mcp_servers(d),
             external_agents=ExternalAgentsConfig.from_dict(d.get("external_agents", {})),
+            remote_worktrees=RemoteWorktreesConfig.from_dict(
+                d.get("remote_worktrees")
+            ),
             anthropic_api_key=d.get("anthropic_api_key", ""),
             openai_api_key=d.get("openai_api_key", ""),
             brave_search_api_key=d.get("brave_search_api_key", ""),

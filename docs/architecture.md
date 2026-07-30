@@ -75,6 +75,13 @@ Claude Agent SDK wrapper providing:
   a detached wrapper, and resumes the same session with the output tail when
   it finishes or reaches its timeout. Pending commands are re-monitored after
   a gateway restart.
+- **Allowlisted remote worktrees** — `run_remote_worktree_command` creates a
+  synthetic commit through a temporary Git index, pushes it to a namespaced
+  ref in a configured bare repository over SSH, and resets an isolated
+  session/worktree checkout before optional execution. Hostnames and remote
+  paths stay behind configured aliases. The runner uses the same detached
+  command record, timeout monitor, restart recovery, output tail, and
+  same-session continuation path as local long commands.
 - **Orphan recovery** — on startup, sessions marked `active` in DB but with no
   live client are transitioned to `idle` when they have either a native session
   ID or an interrupted-turn checkpoint, otherwise to `stopped`
