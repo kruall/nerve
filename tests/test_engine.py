@@ -83,6 +83,8 @@ async def test_run_delivers_deferred_discord_cards_after_final_turn():
     engine._semaphore = asyncio.Semaphore()
     engine._router = None
     engine._shutting_down = False
+    engine.restart_coordinator = MagicMock()
+    engine.restart_coordinator.pending = False
     engine._pending_model_tier_continuations = {}
     engine._active_channel = {}
     events: list[str] = []
