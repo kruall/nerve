@@ -95,6 +95,17 @@ def _option_values(row: dict[str, Any]) -> list[str]:
     return [str(value) for value in raw if str(value)]
 
 
+def _delivery_coordinates(row: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return every persisted Discord card for one approval notification."""
+    metadata = _metadata(row)
+    coordinates = []
+    for key in ("discord_approval", "discord_project_task_completion"):
+        value = metadata.get(key)
+        if isinstance(value, dict):
+            coordinates.append(value)
+    return coordinates
+
+
 def _plan_summary(row: dict[str, Any]) -> str:
     """Return the model-authored brief description for a plan approval."""
     return str(_metadata(row).get("plan_summary") or "").strip()[
@@ -533,8 +544,27 @@ class DiscordApprovalInbox:
         return None
 
     async def deliver(self, row: dict[str, Any]) -> str:
-        """Post one approval card and persist its Discord coordinates."""
-        thread = await self._ensure_thread()
+        """Post one approval card to the pinned audit thread."""
+        return await self.deliver_to_thread(
+            row,
+            await self._ensure_thread(),
+            metadata_key="discord_approval",
+        )
+
+    async def deliver_to_thread(
+        self,
+        row: dict[str, Any],
+        thread: discord.Thread,
+        *,
+        metadata_key: str,
+    ) -> str:
+        """Post one restart-safe approval card in an explicitly resolved thread."""
+        metadata = _metadata(row)
+        existing = metadata.get(metadata_key)
+        if isinstance(existing, dict):
+            message_id = str(existing.get("message_id") or "").strip()
+            if message_id:
+                return message_id
         options = _option_values(row)
         labels = _option_labels(row)
         if not options:
@@ -571,13 +601,12 @@ class DiscordApprovalInbox:
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
-        meta = _metadata(row)
-        meta["discord_approval"] = {
+        metadata[metadata_key] = {
             "thread_id": str(thread.id),
             "message_id": str(message.id),
         }
         await self.db.update_notification(
-            row["id"], metadata=json.dumps(meta),
+            row["id"], metadata=json.dumps(metadata),
         )
         return str(message.id)
 
@@ -588,27 +617,25 @@ class DiscordApprovalInbox:
             limit=500,
         )
         for row in rows:
-            coords = _metadata(row).get("discord_approval")
-            if not isinstance(coords, dict):
-                continue
-            try:
-                message_id = int(coords["message_id"])
-            except (KeyError, TypeError, ValueError):
-                continue
             options = _option_values(row)
             if not options:
                 continue
-            self.client.add_view(
-                ApprovalView(
-                    self,
-                    row["id"],
-                    options,
-                    _option_labels(row),
-                    show_plan=self._has_plan_details(row),
-                    show_describe=bool(_plan_summary(row)),
-                ),
-                message_id=message_id,
-            )
+            for coords in _delivery_coordinates(row):
+                try:
+                    message_id = int(coords["message_id"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                self.client.add_view(
+                    ApprovalView(
+                        self,
+                        row["id"],
+                        options,
+                        _option_labels(row),
+                        show_plan=self._has_plan_details(row),
+                        show_describe=bool(_plan_summary(row)),
+                    ),
+                    message_id=message_id,
+                )
 
     async def answer(
         self,
@@ -709,7 +736,10 @@ class DiscordApprovalInbox:
             parts.append(f"Use {actions}.")
         elif body:
             parts.append(body)
-        if target_kind or target_id:
+        if (
+            (target_kind or target_id)
+            and target_kind != "discord-project-task-completion"
+        ):
             parts.append(f"`{target_kind}:{target_id}`")
         text = "\n\n".join(parts)
         return text

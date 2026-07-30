@@ -32,6 +32,7 @@ from nerve.channels.discord_context import (
     DiscordThreadContext,
 )
 from nerve.config import NerveConfig
+from nerve.discord_tags import DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND
 
 if TYPE_CHECKING:
     from nerve.channels.router import ChannelRouter
@@ -649,6 +650,7 @@ class DiscordChannel(BaseChannel):
                     allowed_author_ids=self._allowed_authors,
                 )
                 await self._approval_inbox.start(guild)
+                await self._restore_project_task_completion_cards()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -1329,10 +1331,64 @@ class DiscordChannel(BaseChannel):
 
     async def deliver_approval(self, row: dict[str, Any]) -> str:
         """Deliver an actionable notification to the pinned audit thread."""
+        if row.get("target_kind") == DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND:
+            return await self._deliver_project_task_completion(row)
         inbox = self._approval_inbox
         if inbox is None:
             raise RuntimeError("Discord approval inbox is not available")
         return await inbox.deliver(row)
+
+    async def _restore_project_task_completion_cards(self) -> None:
+        """Backfill source-thread cards for pending completion approvals."""
+        rows = await self.db.list_notifications(
+            status="pending", type="approval", limit=500,
+        )
+        for row in rows:
+            if row.get("target_kind") != DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND:
+                continue
+            try:
+                await self._deliver_project_task_completion(
+                    row, duplicate_to_audit=False,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Failed to restore project task completion card for %s",
+                    row.get("id"),
+                )
+
+    async def _deliver_project_task_completion(
+        self,
+        row: dict[str, Any],
+        *,
+        duplicate_to_audit: bool = True,
+    ) -> str:
+        """Deliver task completion approval in both its task and audit threads."""
+        inbox = self._approval_inbox
+        if inbox is None:
+            raise RuntimeError("Discord approval inbox is not available")
+        target = str(row.get("target_id") or "").strip()
+        if not target:
+            raise ValueError("Project task completion approval has no thread target")
+        thread = await self._resolve_messageable(target)
+        if (
+            not isinstance(thread, discord.Thread)
+            or int(getattr(thread, "parent_id", 0) or 0) not in self._project_forums
+        ):
+            raise ValueError("Project task completion target is not a project thread")
+
+        message_id = await inbox.deliver_to_thread(
+            row,
+            thread,
+            metadata_key="discord_project_task_completion",
+        )
+        if duplicate_to_audit:
+            refreshed = await self.db.get_notification(row["id"])
+            if refreshed is None:
+                raise RuntimeError("Completion approval disappeared after task delivery")
+            await inbox.deliver(refreshed)
+        return message_id
 
     async def deliver_notification(self, row: dict[str, Any]) -> str:
         """Deliver any notification kind to its pinned audit-forum inbox."""

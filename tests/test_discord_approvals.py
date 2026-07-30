@@ -209,6 +209,40 @@ async def test_delivery_posts_persistent_view_and_saves_coordinates():
 
 
 @pytest.mark.asyncio
+async def test_task_thread_copy_persists_separate_coordinates():
+    thread = _thread()
+    message = MagicMock(spec=discord.Message)
+    message.id = MESSAGE_ID
+    thread.send.return_value = message
+    inbox = _inbox(thread=thread)
+    row = {
+        "id": "approval-task-complete",
+        "title": "Complete and archive project task",
+        "body": "Confirm task closure.",
+        "target_kind": "discord-project-task-completion",
+        "target_id": "200",
+        "options": json.dumps(["approve", "decline"]),
+        "metadata": json.dumps({
+            "option_labels": {
+                "approve": "Complete & archive",
+                "decline": "Keep task open",
+            },
+        }),
+    }
+
+    await inbox.deliver_to_thread(
+        row, thread, metadata_key="discord_project_task_completion",
+    )
+
+    metadata = json.loads(inbox.db.update_notification.await_args.kwargs["metadata"])
+    assert metadata["discord_project_task_completion"] == {
+        "thread_id": str(THREAD_ID),
+        "message_id": str(MESSAGE_ID),
+    }
+    assert "discord-project-task-completion:200" not in thread.send.await_args.args[0]
+
+
+@pytest.mark.asyncio
 async def test_long_plan_posts_only_compact_action_card():
     thread = _thread()
     action_message = MagicMock(spec=discord.Message)
@@ -269,6 +303,31 @@ async def test_restart_restores_pending_view_by_message_id():
         "nerve:approval:approval-1:describe"
     )
     assert inbox.client.add_view.call_args.kwargs["message_id"] == MESSAGE_ID
+
+
+@pytest.mark.asyncio
+async def test_restart_restores_views_for_audit_and_task_thread_copies():
+    inbox = _inbox(thread=_thread())
+    inbox.db.list_notifications.return_value = [{
+        "id": "approval-1",
+        "body": "Close task",
+        "target_kind": "discord-project-task-completion",
+        "options": json.dumps(["approve", "decline"]),
+        "metadata": json.dumps({
+            "option_labels": {"approve": "Complete", "decline": "Keep open"},
+            "discord_approval": {"thread_id": "201", "message_id": "300"},
+            "discord_project_task_completion": {
+                "thread_id": "202", "message_id": "301",
+            },
+        }),
+    }]
+
+    await inbox._restore_pending_views()
+
+    assert inbox.client.add_view.call_count == 2
+    assert [call.kwargs["message_id"] for call in inbox.client.add_view.call_args_list] == [
+        300, 301,
+    ]
 
 
 @pytest.mark.asyncio
