@@ -31,6 +31,9 @@ _THREAD_INTRO = (
 _MAX_MESSAGE_LENGTH = 2000
 _MAX_ACTION_CARD_LENGTH = 1500
 _MAX_PLAN_SUMMARY_LENGTH = 600
+_MAX_EMBED_TITLE_LENGTH = 256
+_MAX_EMBED_DESCRIPTION_LENGTH = 4096
+_MAX_EMBED_FIELD_VALUE_LENGTH = 1024
 _FEEDBACK_DECISIONS = frozenset({"decline", "revise", "request_changes"})
 
 _BUTTON_STYLES = {
@@ -46,6 +49,12 @@ _BUTTON_EMOJIS = {
     "revise": "✏️",
     "request_changes": "✏️",
     "snooze_24h": "💤",
+}
+_PRIORITY_COLOURS = {
+    "urgent": discord.Colour.red(),
+    "high": discord.Colour.orange(),
+    "normal": discord.Colour.blurple(),
+    "low": discord.Colour.light_grey(),
 }
 
 
@@ -113,6 +122,36 @@ def _split_message(text: str) -> list[str]:
         chunks.append(remaining[:cut].rstrip())
         remaining = remaining[cut:].lstrip()
     return chunks
+
+
+def _append_embed_status(
+    source_message: discord.Message,
+    label: str,
+    value: str,
+) -> discord.Embed | None:
+    """Copy an embed card and append one terminal decision status.
+
+    Legacy content-based cards remain actionable after an upgrade: their
+    handlers receive ``None`` and retain the existing text-edit path.
+    """
+    embeds = getattr(source_message, "embeds", ())
+    if not isinstance(embeds, (list, tuple)):
+        return None
+    source = next(
+        (embed for embed in embeds if isinstance(embed, discord.Embed)),
+        None,
+    )
+    if source is None:
+        return None
+    card = source.copy()
+    if any(field.name == label for field in card.fields):
+        return card
+    card.add_field(
+        name=label,
+        value=str(value)[:_MAX_EMBED_FIELD_VALUE_LENGTH] or "—",
+        inline=False,
+    )
+    return card
 
 
 class ApprovalFeedbackModal(discord.ui.Modal):
@@ -514,20 +553,20 @@ class DiscordApprovalInbox:
         if len(content) > _MAX_ACTION_CARD_LENGTH:
             for chunk in _split_message(content):
                 await thread.send(
-                    chunk,
+                    embed=discord.Embed(
+                        description=chunk[:_MAX_EMBED_DESCRIPTION_LENGTH],
+                        colour=_PRIORITY_COLOURS.get(
+                            str(row.get("priority") or "normal"),
+                            discord.Colour.blurple(),
+                        ),
+                    ),
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
-            target_kind = str(row.get("target_kind") or "").strip()
-            target_id = str(row.get("target_id") or "").strip()
-            title = str(row.get("title") or "Approval")[:500]
-            content = (
-                f"**Decision required: {title}**"
-                "\n\nFull details are in the messages immediately above."
-            )
-            if target_kind or target_id:
-                content += f"\n\n`{target_kind}:{target_id}`"
+            compact = True
+        else:
+            compact = False
         message = await thread.send(
-            content,
+            embed=self._card_embed(row, compact=compact),
             view=view,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -601,25 +640,19 @@ class DiscordApprovalInbox:
             labels = _option_labels(row or {})
             status = _safe_label(decision, labels)
             suffix = f"\n\n**Decision:** {status} by <@{interaction.user.id}>"
-            source_content = str(source_message.content or "")
-            if feedback:
-                room = (
-                    _MAX_MESSAGE_LENGTH
-                    - len(source_content)
-                    - len(suffix)
-                    - len("\n**Feedback:** ")
+            embed = _append_embed_status(
+                source_message,
+                "Decision",
+                f"{status} by <@{interaction.user.id}>",
+            )
+            if embed is not None and feedback:
+                embed.add_field(
+                    name="Feedback",
+                    value=feedback[:_MAX_EMBED_FIELD_VALUE_LENGTH] or "—",
+                    inline=False,
                 )
-                if room > 0:
-                    rendered_feedback = feedback[:room]
-                    if len(rendered_feedback) < len(feedback):
-                        rendered_feedback = rendered_feedback[:-1] + "…"
-                    suffix += f"\n**Feedback:** {rendered_feedback}"
-            content = source_content
-            if "**Decision:**" not in content:
-                content = content + suffix
-            await source_message.edit(
-                content=content,
-                view=ApprovalView(
+            edit_kwargs: dict[str, Any] = {
+                "view": ApprovalView(
                     self,
                     notification_id,
                     options,
@@ -628,8 +661,29 @@ class DiscordApprovalInbox:
                     show_plan=self._has_plan_details(row or {}),
                     show_describe=bool(_plan_summary(row or {})),
                 ),
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+                "allowed_mentions": discord.AllowedMentions.none(),
+            }
+            if embed is None:
+                source_content = str(source_message.content or "")
+                if feedback:
+                    room = (
+                        _MAX_MESSAGE_LENGTH
+                        - len(source_content)
+                        - len(suffix)
+                        - len("\n**Feedback:** ")
+                    )
+                    if room > 0:
+                        rendered_feedback = feedback[:room]
+                        if len(rendered_feedback) < len(feedback):
+                            rendered_feedback = rendered_feedback[:-1] + "…"
+                        suffix += f"\n**Feedback:** {rendered_feedback}"
+                content = source_content
+                if "**Decision:**" not in content:
+                    content = content + suffix
+                edit_kwargs["content"] = content
+            else:
+                edit_kwargs["embed"] = embed
+            await source_message.edit(**edit_kwargs)
             return True
 
     @staticmethod
@@ -659,3 +713,44 @@ class DiscordApprovalInbox:
             parts.append(f"`{target_kind}:{target_id}`")
         text = "\n\n".join(parts)
         return text
+
+    @staticmethod
+    def _card_embed(
+        row: dict[str, Any],
+        *,
+        compact: bool = False,
+    ) -> discord.Embed:
+        """Render a card for the persistent audit approval inbox only."""
+        priority = str(row.get("priority") or "normal")
+        prefix = {"urgent": "🚨 ", "high": "⚠️ "}.get(priority, "")
+        title = str(row.get("title") or "Approval required").strip()
+        title = title or "Approval required"
+        body = str(row.get("body") or "").strip()
+        target_kind = str(row.get("target_kind") or "").strip()
+        if compact:
+            description = (
+                "Decision required. Full details are in the embeds "
+                "immediately above."
+            )
+        elif body and target_kind == "plan":
+            description = "Use **Show plan** to view the full plan privately."
+            if _plan_summary(row):
+                description = (
+                    "Use **Describe** for a short overview or **Show plan** "
+                    "to view the full plan privately."
+                )
+        else:
+            description = body or None
+        card = discord.Embed(
+            title=(prefix + title)[:_MAX_EMBED_TITLE_LENGTH],
+            description=(
+                description[:_MAX_EMBED_DESCRIPTION_LENGTH]
+                if description
+                else None
+            ),
+            colour=_PRIORITY_COLOURS.get(priority, discord.Colour.blurple()),
+        )
+        target_id = str(row.get("target_id") or "").strip()
+        if target_kind or target_id:
+            card.set_footer(text=f"{target_kind}:{target_id}"[:2048])
+        return card

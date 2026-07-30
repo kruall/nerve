@@ -195,9 +195,12 @@ async def test_delivery_posts_persistent_view_and_saves_coordinates():
         "nerve:approval:approval-1:show_plan",
         "nerve:approval:approval-1:describe",
     ]
-    assert "Details" not in thread.send.await_args.args[0]
-    assert "Show plan" in thread.send.await_args.args[0]
-    assert "Describe" in thread.send.await_args.args[0]
+    card = thread.send.await_args.kwargs["embed"]
+    assert card.title == "⚠️ Review this"
+    assert "Details" not in (card.description or "")
+    assert "Show plan" in (card.description or "")
+    assert "Describe" in (card.description or "")
+    assert card.footer.text == "plan:plan-1"
     encoded = inbox.db.update_notification.await_args.kwargs["metadata"]
     assert json.loads(encoded)["discord_approval"] == {
         "thread_id": str(THREAD_ID),
@@ -231,9 +234,10 @@ async def test_long_plan_posts_only_compact_action_card():
     calls = thread.send.await_args_list
     assert len(calls) == 1
     assert isinstance(calls[0].kwargs["view"], ApprovalView)
-    assert "step" not in calls[0].args[0]
-    assert "Show plan" in calls[0].args[0]
-    assert "Describe" in calls[0].args[0]
+    card = calls[0].kwargs["embed"]
+    assert "step" not in (card.description or "")
+    assert "Show plan" in (card.description or "")
+    assert "Describe" in (card.description or "")
 
 
 @pytest.mark.asyncio
@@ -368,6 +372,40 @@ async def test_revision_modal_submits_required_feedback():
     interaction.followup.send.assert_awaited_once_with(
         "Decision recorded.", ephemeral=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_answer_updates_embed_card_with_decision_and_feedback():
+    source = MagicMock(spec=discord.Message)
+    source.content = ""
+    source.embeds = [discord.Embed(title="Review this")]
+    source.edit = AsyncMock()
+    inbox = _inbox(thread=_thread())
+    inbox.db.get_notification.return_value = {
+        "target_kind": "plan",
+        "body": "Details",
+        "options": json.dumps(["approve", "revise"]),
+        "metadata": json.dumps({
+            "option_labels": {"revise": "Request changes"},
+        }),
+    }
+    interaction = _interaction(source)
+
+    assert await inbox.answer(
+        interaction=interaction,
+        notification_id="approval-1",
+        decision="revise",
+        feedback="Add rollback coverage",
+        source_message=source,
+    )
+
+    edited = source.edit.await_args.kwargs
+    assert "content" not in edited
+    assert [(field.name, field.value) for field in edited["embed"].fields] == [
+        ("Decision", f"Request changes by <@{USER_ID}>"),
+        ("Feedback", "Add rollback coverage"),
+    ]
+    assert all(item.disabled for item in edited["view"].children)
 
 
 @pytest.mark.asyncio

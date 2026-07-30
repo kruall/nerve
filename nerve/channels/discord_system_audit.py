@@ -27,6 +27,14 @@ _LEVEL_EMOJIS = {
     "warning": "🟡",
     "error": "🔴",
 }
+_LEVEL_COLOURS = {
+    "info": discord.Colour.blurple(),
+    "success": discord.Colour.green(),
+    "warning": discord.Colour.orange(),
+    "error": discord.Colour.red(),
+}
+_MAX_EMBED_TITLE_LENGTH = 256
+_MAX_EMBED_DESCRIPTION_LENGTH = 4096
 
 
 def _tag_id(tag: Any) -> int:
@@ -98,18 +106,24 @@ class DiscordSystemAudit:
             )
 
         timestamp = int(time.time()) if occurred_at is None else occurred_at
-        content = (
-            f"{_LEVEL_EMOJIS[level]} **{title}** · <t:{timestamp}:F>"
-        )
+        content = f"<t:{timestamp}:F>"
         details = str(details or "").strip()
         if details:
-            content += f"\n{details}"
+            content += f"\n\n{details}"
 
         async with self._event_lock:
             thread = await self._ensure_thread()
-            for chunk in _split_message(content):
+            chunks = _split_message(content)
+            for index, chunk in enumerate(chunks):
+                suffix = "" if index == 0 else " (continued)"
                 await thread.send(
-                    chunk,
+                    embed=discord.Embed(
+                        title=(
+                            f"{_LEVEL_EMOJIS[level]} {title}{suffix}"
+                        )[:_MAX_EMBED_TITLE_LENGTH],
+                        description=chunk[:_MAX_EMBED_DESCRIPTION_LENGTH],
+                        colour=_LEVEL_COLOURS[level],
+                    ),
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
 

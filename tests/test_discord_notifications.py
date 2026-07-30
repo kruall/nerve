@@ -231,7 +231,10 @@ async def test_notification_delivery_has_dismiss_view_and_coordinates():
 
     assert result == str(MESSAGE_ID)
     sent = thread.send.await_args
-    assert "Build complete" in sent.args[0]
+    card = sent.kwargs["embed"]
+    assert card.title == "Build complete"
+    assert card.description == "All checks passed"
+    assert card.footer.text == "Session: session-1"
     assert isinstance(sent.kwargs["view"], NotificationView)
     assert sent.kwargs["view"].children[0].custom_id == (
         "nerve:notification:notif-1:dismiss"
@@ -264,6 +267,9 @@ async def test_question_delivery_has_options_and_free_form_answer():
 
     await inbox.deliver(row)
 
+    card = thread.send.await_args.kwargs["embed"]
+    assert card.title == "⚠️ Deploy now?"
+    assert card.description == "Choose a rollout window"
     view = thread.send.await_args.kwargs["view"]
     assert isinstance(view, QuestionView)
     assert [item.label for item in view.children] == [
@@ -277,10 +283,38 @@ async def test_question_delivery_has_options_and_free_form_answer():
 
 
 @pytest.mark.asyncio
+async def test_long_notification_uses_embeds_for_details_and_action_card():
+    thread = _thread("Notifications", NOTIFICATION_THREAD_ID)
+    message = MagicMock(spec=discord.Message)
+    message.id = MESSAGE_ID
+    thread.send.return_value = message
+    inbox = _inbox(notification_thread=thread)
+    row = {
+        "id": "notif-long",
+        "session_id": "session-1",
+        "type": "notify",
+        "title": "Long report",
+        "body": "detail\n" * 400,
+        "priority": "normal",
+        "metadata": json.dumps({}),
+    }
+
+    await inbox.deliver(row)
+
+    calls = thread.send.await_args_list
+    assert len(calls) == 3
+    assert all("embed" in call.kwargs for call in calls)
+    assert "view" not in calls[0].kwargs
+    assert isinstance(calls[-1].kwargs["view"], NotificationView)
+    assert "Full details" in (calls[-1].kwargs["embed"].description or "")
+
+
+@pytest.mark.asyncio
 async def test_question_option_answers_and_disables_card():
     thread = _thread("Questions", QUESTION_THREAD_ID)
     source = MagicMock(spec=discord.Message)
-    source.content = "**Deploy now?**"
+    source.content = ""
+    source.embeds = [discord.Embed(title="Deploy now?")]
     source.edit = AsyncMock()
     inbox = _inbox(question_thread=thread)
     inbox.db.get_notification.return_value = {
@@ -298,7 +332,9 @@ async def test_question_option_answers_and_disables_card():
     )
     edited_view = source.edit.await_args.kwargs["view"]
     assert all(item.disabled for item in edited_view.children)
-    assert "**Answer:** Now" in source.edit.await_args.kwargs["content"]
+    edited_card = source.edit.await_args.kwargs["embed"]
+    assert edited_card.fields[0].name == "Answer"
+    assert "Now" in edited_card.fields[0].value
 
 
 @pytest.mark.asyncio
@@ -348,6 +384,26 @@ async def test_notification_dismiss_button_closes_card():
     edited = source.edit.await_args.kwargs
     assert edited["view"].children[0].disabled is True
     assert "**Dismissed by:**" in edited["content"]
+
+
+@pytest.mark.asyncio
+async def test_notification_dismiss_updates_embed_card():
+    source = MagicMock(spec=discord.Message)
+    source.content = ""
+    source.embeds = [discord.Embed(title="Build complete")]
+    source.edit = AsyncMock()
+    inbox = _inbox(notification_thread=_thread(
+        "Notifications", NOTIFICATION_THREAD_ID,
+    ))
+    view = NotificationView(inbox, "notif-1")
+    interaction = _interaction(source)
+
+    await view.children[0].callback(interaction)
+
+    edited = source.edit.await_args.kwargs
+    assert "content" not in edited
+    assert edited["embed"].fields[0].name == "Dismissed by"
+    assert edited["view"].children[0].disabled is True
 
 
 @pytest.mark.asyncio

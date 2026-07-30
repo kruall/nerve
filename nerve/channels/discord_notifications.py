@@ -39,6 +39,15 @@ _THREADS = {
 _MAX_MESSAGE_LENGTH = 2000
 _MAX_ACTION_CARD_LENGTH = 1500
 _MAX_QUESTION_OPTIONS = 20
+_MAX_EMBED_TITLE_LENGTH = 256
+_MAX_EMBED_DESCRIPTION_LENGTH = 4096
+_MAX_EMBED_FIELD_VALUE_LENGTH = 1024
+_PRIORITY_COLOURS = {
+    "urgent": discord.Colour.red(),
+    "high": discord.Colour.orange(),
+    "normal": discord.Colour.blurple(),
+    "low": discord.Colour.light_grey(),
+}
 
 
 def _metadata(row: dict[str, Any]) -> dict[str, Any]:
@@ -93,6 +102,36 @@ def _append_status(content: str, label: str, value: str) -> str:
     if len(rendered) < len(value) and rendered:
         rendered = rendered[:-1] + "…"
     return content + prefix + rendered
+
+
+def _append_embed_status(
+    source_message: discord.Message,
+    label: str,
+    value: str,
+) -> discord.Embed | None:
+    """Copy an embed card and append one terminal interaction status.
+
+    Returning ``None`` keeps action handlers compatible with cards posted by
+    older Nerve versions, which used message content instead of an embed.
+    """
+    embeds = getattr(source_message, "embeds", ())
+    if not isinstance(embeds, (list, tuple)):
+        return None
+    source = next(
+        (embed for embed in embeds if isinstance(embed, discord.Embed)),
+        None,
+    )
+    if source is None:
+        return None
+    card = source.copy()
+    if any(field.name == label for field in card.fields):
+        return card
+    card.add_field(
+        name=label,
+        value=str(value)[:_MAX_EMBED_FIELD_VALUE_LENGTH] or "—",
+        inline=False,
+    )
+    return card
 
 
 class QuestionAnswerModal(discord.ui.Modal):
@@ -491,18 +530,21 @@ class DiscordNotificationInbox:
         if len(content) > _MAX_ACTION_CARD_LENGTH:
             for chunk in _split_message(content):
                 await thread.send(
-                    chunk,
+                    embed=discord.Embed(
+                        description=chunk[:_MAX_EMBED_DESCRIPTION_LENGTH],
+                        colour=_PRIORITY_COLOURS.get(
+                            str(row.get("priority") or "normal"),
+                            discord.Colour.blurple(),
+                        ),
+                    ),
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
-            title = str(row.get("title") or "Nerve")[:500]
-            action = "Answer required" if kind == "question" else "Notification"
-            content = (
-                f"**{action}: {title}**"
-                "\n\nFull details are in the messages immediately above."
-            )
+            compact = True
+        else:
+            compact = False
 
         message = await thread.send(
-            content,
+            embed=self._card_embed(row, compact=compact),
             view=view,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -561,20 +603,25 @@ class DiscordNotificationInbox:
             if not success:
                 return False
             row = await self.db.get_notification(notification_id)
-            content = str(source_message.content or "")
             status = f"{answer} — by <@{interaction.user.id}>"
-            if "**Answer:**" not in content:
-                content = _append_status(content, "Answer", status)
-            await source_message.edit(
-                content=content,
-                view=QuestionView(
+            embed = _append_embed_status(source_message, "Answer", status)
+            edit_kwargs: dict[str, Any] = {
+                "view": QuestionView(
                     self,
                     notification_id,
                     _option_values(row or {}),
                     disabled=True,
                 ),
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+                "allowed_mentions": discord.AllowedMentions.none(),
+            }
+            if embed is None:
+                content = str(source_message.content or "")
+                if "**Answer:**" not in content:
+                    content = _append_status(content, "Answer", status)
+                edit_kwargs["content"] = content
+            else:
+                edit_kwargs["embed"] = embed
+            await source_message.edit(**edit_kwargs)
             return True
 
     async def dismiss_notification(
@@ -596,22 +643,28 @@ class DiscordNotificationInbox:
             )
             if not success:
                 return False
-            content = str(source_message.content or "")
-            if "**Dismissed by:**" not in content:
-                content = _append_status(
-                    content,
-                    "Dismissed by",
-                    f"<@{interaction.user.id}>",
-                )
-            await source_message.edit(
-                content=content,
-                view=NotificationView(
+            status = f"<@{interaction.user.id}>"
+            embed = _append_embed_status(
+                source_message,
+                "Dismissed by",
+                status,
+            )
+            edit_kwargs: dict[str, Any] = {
+                "view": NotificationView(
                     self,
                     notification_id,
                     disabled=True,
                 ),
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+                "allowed_mentions": discord.AllowedMentions.none(),
+            }
+            if embed is None:
+                content = str(source_message.content or "")
+                if "**Dismissed by:**" not in content:
+                    content = _append_status(content, "Dismissed by", status)
+                edit_kwargs["content"] = content
+            else:
+                edit_kwargs["embed"] = embed
+            await source_message.edit(**edit_kwargs)
             return True
 
     @staticmethod
@@ -632,3 +685,42 @@ class DiscordNotificationInbox:
         if session_id:
             parts.append(f"`Session: {session_id}`")
         return "\n\n".join(parts)
+
+    @staticmethod
+    def _card_embed(
+        row: dict[str, Any],
+        *,
+        compact: bool = False,
+    ) -> discord.Embed:
+        """Render an audit-inbox card without affecting ordinary channels."""
+        priority = str(row.get("priority") or "normal")
+        prefix = {"urgent": "🚨 ", "high": "⚠️ "}.get(priority, "")
+        fallback = (
+            "Question" if row.get("type") == "question" else "Notification"
+        )
+        title = str(row.get("title") or fallback).strip() or fallback
+        body = str(row.get("body") or "").strip()
+        if compact:
+            action = (
+                "Answer required"
+                if row.get("type") == "question"
+                else "Notification"
+            )
+            description = (
+                f"{action}. Full details are in the embeds immediately above."
+            )
+        else:
+            description = body or None
+        card = discord.Embed(
+            title=(prefix + title)[:_MAX_EMBED_TITLE_LENGTH],
+            description=(
+                description[:_MAX_EMBED_DESCRIPTION_LENGTH]
+                if description
+                else None
+            ),
+            colour=_PRIORITY_COLOURS.get(priority, discord.Colour.blurple()),
+        )
+        session_id = str(row.get("session_id") or "").strip()
+        if session_id:
+            card.set_footer(text=f"Session: {session_id}"[:2048])
+        return card

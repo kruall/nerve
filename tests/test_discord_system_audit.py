@@ -139,9 +139,10 @@ async def test_emit_appends_timestamped_event_without_mentions():
     )
 
     thread.send.assert_awaited_once()
-    assert thread.send.await_args.args == (
-        "🟢 **Nerve started** · <t:1700000000:F>\nProcess ID: `123`",
-    )
+    card = thread.send.await_args.kwargs["embed"]
+    assert card.title == "🟢 Nerve started"
+    assert card.description == "<t:1700000000:F>\n\nProcess ID: `123`"
+    assert card.colour == discord.Colour.green()
     assert isinstance(
         thread.send.await_args.kwargs["allowed_mentions"],
         discord.AllowedMentions,
@@ -161,8 +162,11 @@ async def test_emit_splits_long_system_event_at_discord_limit():
 
     assert thread.send.await_count == 3
     assert all(
-        len(call.args[0]) <= 2000
+        len(call.kwargs["embed"].description or "") <= 2000
         for call in thread.send.await_args_list
+    )
+    assert thread.send.await_args_list[1].kwargs["embed"].title.endswith(
+        "(continued)",
     )
 
 
