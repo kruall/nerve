@@ -191,7 +191,8 @@ class DiscordProjectTaskAuditor:
                 str(approval.get("completion_at") or "") if approval else ""
             ),
             "dispatch_outcome": (
-                approval.get("metadata_decoded", {}).get("dispatch_outcome", {})
+                approval.get("metadata_decoded", {}).get("approval_dispatch")
+                or approval.get("metadata_decoded", {}).get("dispatch_outcome", {})
                 if approval else {}
             ),
         }

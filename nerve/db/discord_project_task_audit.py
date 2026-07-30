@@ -73,7 +73,10 @@ class DiscordProjectTaskAuditStore:
             metadata = _decode(row.get("metadata"), {})
             if not isinstance(metadata, dict):
                 metadata = {}
-            outcome = metadata.get("dispatch_outcome")
+            outcome = metadata.get("approval_dispatch")
+            if not isinstance(outcome, dict):
+                # Keep compatibility with early persisted/test records.
+                outcome = metadata.get("dispatch_outcome")
             if not isinstance(outcome, dict) or not outcome.get("ok"):
                 continue
             row["metadata_decoded"] = metadata
