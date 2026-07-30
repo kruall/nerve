@@ -858,6 +858,7 @@ async def test_dispatch_uses_independent_initial_tier_for_each_project_forum():
         task_forums={"YDB": YDB_FORUM, "NERVE": NERVE_FORUM},
         project_model_tiers={"YDB": "sol-medium", "NERVE": "terra-high"},
     )
+    channel.config.project_planner_model_tiers = {"NERVE": "sol-xhigh"}
     channel.router.handle_message = AsyncMock()
 
     await channel._dispatch(_message(

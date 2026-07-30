@@ -291,6 +291,9 @@ class DiscordConfig:
     # Optional initial Codex tier per project forum. These defaults apply only
     # when a new Discord session is created; a stored session tier is sticky.
     project_model_tiers: dict[str, str] = field(default_factory=dict)
+    # Optional Codex tier per project for autonomous task planning sessions.
+    # Falls back to project_model_tiers when unset for a project.
+    project_planner_model_tiers: dict[str, str] = field(default_factory=dict)
     skills_forum_id: int = 0
     audit_forum_id: int = 0
     audit_batch_window_seconds: float = 60.0
@@ -303,11 +306,19 @@ class DiscordConfig:
     def from_dict(cls, d: dict) -> "DiscordConfig":
         raw_forums = d.get("task_forums", {}) or {}
         raw_project_model_tiers = d.get("project_model_tiers", {}) or {}
+        raw_project_planner_model_tiers = (
+            d.get("project_planner_model_tiers", {}) or {}
+        )
         if not isinstance(raw_project_model_tiers, dict):
             logger.warning(
                 "Ignoring non-mapping discord.project_model_tiers value"
             )
             raw_project_model_tiers = {}
+        if not isinstance(raw_project_planner_model_tiers, dict):
+            logger.warning(
+                "Ignoring non-mapping discord.project_planner_model_tiers value"
+            )
+            raw_project_planner_model_tiers = {}
         return cls(
             enabled=bool(d.get("enabled", False)),
             bot_token=str(d.get("bot_token") or ""),
@@ -330,6 +341,11 @@ class DiscordConfig:
             project_model_tiers={
                 str(project).strip(): str(tier).strip()
                 for project, tier in raw_project_model_tiers.items()
+                if str(project).strip() and str(tier).strip()
+            },
+            project_planner_model_tiers={
+                str(project).strip(): str(tier).strip()
+                for project, tier in raw_project_planner_model_tiers.items()
                 if str(project).strip() and str(tier).strip()
             },
             skills_forum_id=int(d.get("skills_forum_id", 0) or 0),
@@ -1739,24 +1755,30 @@ class NerveConfig:
                 raise ValueError("; ".join(problems))
             for p in problems:
                 logger.warning("Inactive codex config problem: %s", p)
-        project_tiers = self.discord.project_model_tiers
-        unknown_projects = sorted(
-            set(project_tiers) - set(self.discord.task_forums)
-        )
-        if unknown_projects:
-            raise ValueError(
-                "discord.project_model_tiers contains projects not configured "
-                f"in discord.task_forums: {', '.join(unknown_projects)}"
+        for setting_name, project_tiers in (
+            ("project_model_tiers", self.discord.project_model_tiers),
+            (
+                "project_planner_model_tiers",
+                self.discord.project_planner_model_tiers,
+            ),
+        ):
+            unknown_projects = sorted(
+                set(project_tiers) - set(self.discord.task_forums)
             )
-        unknown_tiers = sorted(
-            tier_id for tier_id in set(project_tiers.values())
-            if self.codex.tier(tier_id) is None
-        )
-        if unknown_tiers:
-            raise ValueError(
-                "discord.project_model_tiers references unknown Codex tiers: "
-                + ", ".join(unknown_tiers)
+            if unknown_projects:
+                raise ValueError(
+                    f"discord.{setting_name} contains projects not configured "
+                    f"in discord.task_forums: {', '.join(unknown_projects)}"
+                )
+            unknown_tiers = sorted(
+                tier_id for tier_id in set(project_tiers.values())
+                if self.codex.tier(tier_id) is None
             )
+            if unknown_tiers:
+                raise ValueError(
+                    f"discord.{setting_name} references unknown Codex tiers: "
+                    + ", ".join(unknown_tiers)
+                )
         if codex_selected:
             if self.codex.model not in {
                 k for k in self.codex.pricing

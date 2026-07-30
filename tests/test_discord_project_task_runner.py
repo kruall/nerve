@@ -132,6 +132,9 @@ async def test_planning_uses_project_tier_but_execution_uses_global_default(
     runner, guild = _runner([_Thread(100)])
     runner.nerve_config.agent.backend = "codex"
     runner.nerve_config.discord.project_model_tiers = {"NERVE": "terra-high"}
+    runner.nerve_config.discord.project_planner_model_tiers = {
+        "NERVE": "sol-xhigh",
+    }
     monkeypatch.setattr(
         "nerve.channels.discord_project_task_runner.transition_project_task_status",
         lambda *_args, **_kwargs: {"current_status": "in-progress"},
@@ -146,9 +149,9 @@ async def test_planning_uses_project_tier_but_execution_uses_global_default(
         runner.router.engine.sessions.get_or_create.await_args_list
     )
     assert planning_call.args[0] == "discord-task-plan:1:100"
-    assert planning_call.kwargs["model"] == "gpt-5.6-terra"
-    assert planning_call.kwargs["model_tier"] == "terra-high"
-    assert planning_call.kwargs["reasoning_effort"] == "high"
+    assert planning_call.kwargs["model"] == "gpt-5.6-sol"
+    assert planning_call.kwargs["model_tier"] == "sol-xhigh"
+    assert planning_call.kwargs["reasoning_effort"] == "xhigh"
     assert (
         planning_call.kwargs["metadata"]["discord_task_stage"] == "planning"
     )
@@ -158,6 +161,18 @@ async def test_planning_uses_project_tier_but_execution_uses_global_default(
         execution_call.kwargs["metadata"]["discord_task_stage"]
         == "implementation"
     )
+
+
+def test_planner_uses_legacy_project_tier_without_override():
+    runner, _guild = _runner([])
+    runner.nerve_config.agent.backend = "codex"
+    runner.nerve_config.discord.project_model_tiers = {"NERVE": "terra-high"}
+
+    assert runner._planning_model_args("NERVE") == {
+        "model": "gpt-5.6-terra",
+        "model_tier": "terra-high",
+        "reasoning_effort": "high",
+    }
 
 
 @pytest.mark.asyncio

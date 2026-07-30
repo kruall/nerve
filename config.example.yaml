@@ -124,6 +124,11 @@ discord:
   # project_model_tiers:
   #   YDB: sol-medium
   #   NERVE: terra-high
+  # Optional planner-only tier for autonomous project tasks. When a project is
+  # omitted here, its project_model_tiers value is used for planning. The
+  # implementation session still uses the global codex.default_tier.
+  # project_planner_model_tiers:
+  #   NERVE: sol-xhigh
   # Optional shared skill forum. Nerve creates one thread per local skill,
   # attaches exact SKILL.md snapshots after creation and updates, and accepts
   # mention/reply-driven discussion in managed skill threads. Threads and

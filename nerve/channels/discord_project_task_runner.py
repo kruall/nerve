@@ -265,7 +265,8 @@ class DiscordProjectTaskRunner:
         if self.nerve_config.agent.backend != "codex":
             return {}
         tier = self.nerve_config.codex.tier(
-            self.config.project_model_tiers.get(project),
+            self.config.project_planner_model_tiers.get(project)
+            or self.config.project_model_tiers.get(project),
         )
         if tier is None:
             return {}

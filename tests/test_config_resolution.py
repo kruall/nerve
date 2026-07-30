@@ -247,6 +247,7 @@ class TestDiscordConfig:
         assert cfg.project_task_runner_enabled is False
         assert cfg.project_task_runner_poll_interval_seconds == 60.0
         assert cfg.project_model_tiers == {}
+        assert cfg.project_planner_model_tiers == {}
         assert cfg.skills_forum_id == 0
         assert cfg.audit_forum_id == 0
         assert cfg.audit_batch_window_seconds == 60.0
@@ -263,6 +264,7 @@ class TestDiscordConfig:
             "project_task_runner_enabled": True,
             "project_task_runner_poll_interval_seconds": "120",
             "project_model_tiers": {"YDB": "sol-xhigh"},
+            "project_planner_model_tiers": {"YDB": "sol-medium"},
             "skills_forum_id": "325",
             "audit_forum_id": "350",
             "audit_batch_window_seconds": "90",
@@ -276,6 +278,7 @@ class TestDiscordConfig:
         assert cfg.project_task_runner_enabled is True
         assert cfg.project_task_runner_poll_interval_seconds == 120.0
         assert cfg.project_model_tiers == {"YDB": "sol-xhigh"}
+        assert cfg.project_planner_model_tiers == {"YDB": "sol-medium"}
         assert cfg.skills_forum_id == 325
         assert cfg.audit_forum_id == 350
         assert cfg.audit_batch_window_seconds == 90.0
@@ -286,6 +289,12 @@ class TestDiscordConfig:
     def test_non_mapping_project_model_tiers_are_ignored(self):
         cfg = DiscordConfig.from_dict({"project_model_tiers": "sol-xhigh"})
         assert cfg.project_model_tiers == {}
+
+    def test_non_mapping_project_planner_model_tiers_are_ignored(self):
+        cfg = DiscordConfig.from_dict({
+            "project_planner_model_tiers": "sol-xhigh",
+        })
+        assert cfg.project_planner_model_tiers == {}
 
     def test_known_keys_pass_validation(self):
         merged = {
@@ -298,6 +307,7 @@ class TestDiscordConfig:
                 "project_task_runner_enabled": True,
                 "project_task_runner_poll_interval_seconds": 60,
                 "project_model_tiers": {"YDB": "sol-xhigh"},
+                "project_planner_model_tiers": {"YDB": "sol-medium"},
                 "skills_forum_id": 325,
                 "audit_forum_id": 350,
                 "audit_batch_window_seconds": 60,
@@ -320,6 +330,19 @@ class TestDiscordConfig:
             NerveConfig.from_dict({"discord": {
                 "task_forums": {"YDB": 300},
                 "project_model_tiers": {"YDB": "not-a-tier"},
+            }})
+
+    def test_project_planner_model_tiers_require_configured_project_and_known_tier(self):
+        with pytest.raises(ValueError, match="project_planner_model_tiers.*not configured"):
+            NerveConfig.from_dict({"discord": {
+                "task_forums": {"YDB": 300},
+                "project_planner_model_tiers": {"NERVE": "sol-xhigh"},
+            }})
+
+        with pytest.raises(ValueError, match="project_planner_model_tiers.*unknown Codex tiers"):
+            NerveConfig.from_dict({"discord": {
+                "task_forums": {"YDB": 300},
+                "project_planner_model_tiers": {"YDB": "not-a-tier"},
             }})
 
 
