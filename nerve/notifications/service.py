@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from nerve.notifications import handlers as _handlers
+from nerve.discord_tags import DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND
 
 if TYPE_CHECKING:
     from nerve.agent.engine import AgentEngine
@@ -43,6 +44,7 @@ _APPROVAL_CONTINUATION_KEY = "approval_continuation"
 _APPROVAL_DISPATCH_OUTCOME_KEY = "approval_dispatch"
 _DEFER_DISCORD_UNTIL_TURN_END_KEY = "defer_discord_until_turn_end"
 _CONTINUATION_CONTEXT_KEYS = ("channel_name", "target", "message_id")
+_DISCORD_PROJECT_TASK_TERMINAL_METADATA_KEY = "discord_project_task_terminal"
 
 
 def _notification_metadata(row: dict[str, Any]) -> dict[str, Any]:
@@ -747,6 +749,14 @@ class NotificationService:
         )
         notif["metadata"] = encoded_metadata
 
+        completed_project_task = (
+            target_kind == DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND
+            and answer == "approve"
+            and result.ok
+        )
+        if completed_project_task:
+            await self._retire_completed_project_task_session(session_id)
+
         # Snooze keeps the row pending and stamps ``redeliver_at`` so
         # the periodic maintenance tick (:meth:`redeliver_due`) fans it
         # out again at the snooze time. ``expires_at`` moves past the
@@ -796,7 +806,7 @@ class NotificationService:
             payload["snooze_until"] = snooze_until
         await broadcaster.broadcast("__global__", payload)
 
-        if not snoozed:
+        if not snoozed and not completed_project_task:
             await self._resume_approval_session(
                 notif,
                 decision=answer,
@@ -805,6 +815,38 @@ class NotificationService:
             )
 
         return True
+
+    async def _retire_completed_project_task_session(self, session_id: str) -> None:
+        """Make a completed task session inert before its thread is archived.
+
+        A completion dispatcher is mechanical and must never be followed by a
+        model turn. Persisting this marker closes the race where a wakeup had
+        already been claimed before its pending row could be removed; engine
+        recovery treats the marker as a terminal no-op.
+        """
+        try:
+            session = await self.db.get_session(session_id)
+            if session is not None:
+                metadata = _notification_metadata(session)
+                metadata[_DISCORD_PROJECT_TASK_TERMINAL_METADATA_KEY] = (
+                    "completed"
+                )
+                await self.db.update_session_metadata(session_id, metadata)
+            cancelled = await self.db.cancel_wakeups_for_session(session_id)
+            await self.db.clear_session_run_recovery(session_id)
+            logger.info(
+                "Retired completed Discord project task session %s "
+                "(cancelled_wakeups=%s)",
+                session_id[:8], cancelled,
+            )
+        except Exception:
+            # Completion already succeeded in Discord. Lifecycle cleanup is
+            # defense in depth and must not rewrite that result as a failed
+            # approval; the adapter guard still prevents thread activity.
+            logger.exception(
+                "Could not retire completed Discord project task session %s",
+                session_id[:8],
+            )
 
     async def _resume_approval_session(
         self,

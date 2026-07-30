@@ -89,6 +89,7 @@ _LONG_COMMAND_EXECUTABLES = {
 }
 _LONG_COMMAND_POLL_SECONDS = 2.0
 _LONG_COMMAND_OUTPUT_TAIL_BYTES = 12_000
+_DISCORD_PROJECT_TASK_TERMINAL_METADATA_KEY = "discord_project_task_terminal"
 
 def _sanitize_surrogates(s: str) -> str:
     """Remove orphaned UTF-16 surrogates that break JSON serialization.
@@ -2701,6 +2702,24 @@ adjacent tier is a better fit:
         # in order instead of failing with "already running".
         lock = self._session_locks.setdefault(session_id, asyncio.Lock())
         async with lock:
+            if source == "wakeup" or _restart_recovery:
+                session = await self.db.get_session(session_id)
+                try:
+                    metadata = json.loads((session or {}).get("metadata") or "{}")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    metadata = {}
+                if (
+                    isinstance(metadata, dict)
+                    and metadata.get(_DISCORD_PROJECT_TASK_TERMINAL_METADATA_KEY)
+                    in {"completed", "cancelled"}
+                ):
+                    await self.db.clear_session_run_recovery(session_id)
+                    logger.info(
+                        "Skipping %s for terminal Discord project task session %s",
+                        "restart recovery" if _restart_recovery else "wakeup",
+                        session_id[:8],
+                    )
+                    return ""
             broadcaster.start_buffering(session_id)
             async with self._semaphore:
                 # Clear any stale deferred-stop flag left over from a *previous*

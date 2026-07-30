@@ -347,3 +347,44 @@ async def test_confirmation_click_completes_and_archives_without_model(
         ("PATCH", THREAD_ID),
     ]
     engine.run.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_completion_retires_task_session_and_suppresses_continuation(
+    db, monkeypatch,
+):
+    _fake_api(monkeypatch, applied=["303"])
+    config = _config()
+    config.notifications = NotificationsConfig(channels=["web"])
+    engine = MagicMock()
+    service = NotificationService(config, db, engine)
+    service._append_approval_audit = AsyncMock()
+    service._resume_approval_session = AsyncMock()
+    await db.create_session(
+        "s1", source="discord", metadata={"discord_task_runner": True},
+    )
+    await db.add_wakeup("s1", "check task", "2099-01-01T00:00:00+00:00")
+    await db.set_session_run_recovery(
+        "s1", source="discord", channel="discord", user_message="resume",
+        channel_context=None,
+    )
+    await db.create_notification(
+        notification_id="approval-complete",
+        session_id="s1",
+        type="approval",
+        title="Complete and archive project task",
+        options=["approve", "decline"],
+        target_kind=DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND,
+        target_id=str(THREAD_ID),
+    )
+
+    assert await service.handle_answer(
+        "approval-complete", "approve", "discord:400",
+    )
+
+    session = await db.get_session("s1")
+    metadata = json.loads(session["metadata"])
+    assert metadata["discord_project_task_terminal"] == "completed"
+    assert await db.list_pending_wakeups("s1") == []
+    assert await db.get_session_run_recovery("s1") is None
+    service._resume_approval_session.assert_not_awaited()

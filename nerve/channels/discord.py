@@ -69,6 +69,7 @@ Do not infer task completion from a transient session ending. Moving a task to
 only its accepted button changes the task to `completed` and archives the
 thread, without another model turn.]
 """
+_TERMINAL_PROJECT_TASK_STATUSES = frozenset({"completed", "cancelled"})
 
 
 def split_discord_message(text: str, limit: int = _MAX_MESSAGE_LENGTH) -> list[str]:
@@ -1418,6 +1419,9 @@ class DiscordChannel(BaseChannel):
 
     async def send(self, message: OutboundMessage) -> None:
         channel = await self._resolve_messageable(message.target)
+        channel = await self._active_project_thread(channel, message.target)
+        if channel is None:
+            return
         model = message.metadata.get("model")
         reasoning_effort = message.metadata.get("reasoning_effort")
         chunks: list[str]
@@ -1526,7 +1530,50 @@ class DiscordChannel(BaseChannel):
 
     async def send_typing(self, target: str) -> None:
         channel = await self._resolve_messageable(target)
+        channel = await self._active_project_thread(channel, target)
+        if channel is None:
+            return
         await channel.typing()
+
+    async def _active_project_thread(self, channel: Any, target: str) -> Any | None:
+        """Return a project thread only when it may receive bot activity.
+
+        Completion is applied by the mechanical-action dispatcher, outside of
+        discord.py's cache. Reading a fresh thread here is load-bearing: a
+        stale cached archive flag would let a scheduled wakeup's typing request
+        reopen the task immediately after completion. Ordinary channels and
+        conversational threads keep the cached fast path; only configured
+        project-forum threads need this guard.
+        """
+        if getattr(channel, "parent_id", None) not in self._project_forums:
+            return channel
+        if self._client is None:  # _resolve_messageable already checked this
+            return None
+        try:
+            fresh = await self._client.fetch_channel(int(target))
+        except discord.HTTPException as exc:
+            # A project task may disappear from active listings once it is
+            # archived. Do not make an outbound side effect while its state
+            # cannot be confirmed.
+            logger.warning(
+                "Skipping Discord activity for project thread %s: %s",
+                target, exc,
+            )
+            return None
+
+        status_names = {
+            str(getattr(tag, "name", "") or "").casefold()
+            for tag in (getattr(fresh, "applied_tags", None) or [])
+        }
+        if bool(getattr(fresh, "archived", False)) or (
+            status_names & _TERMINAL_PROJECT_TASK_STATUSES
+        ):
+            logger.info(
+                "Skipping Discord activity for terminal project thread %s",
+                target,
+            )
+            return None
+        return fresh
 
     @staticmethod
     def _safe_label(value: Any) -> str:

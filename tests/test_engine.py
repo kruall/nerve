@@ -77,6 +77,7 @@ async def test_run_delivers_deferred_discord_cards_after_final_turn():
     engine.config = NerveConfig()
     engine.db = MagicMock()
     engine.db.clear_session_run_recovery = AsyncMock()
+    engine.db.get_session = AsyncMock(return_value=None)
     engine.sessions = MagicMock()
     engine.sessions.get_or_create = AsyncMock()
     engine._session_locks = {}

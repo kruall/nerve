@@ -206,6 +206,39 @@ async def test_restart_recovery_run_starts_session_typing(tmp_path, db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source", "restart_recovery"),
+    [("wakeup", False), ("discord", True)],
+)
+async def test_terminal_project_task_skips_wakeup_and_restart_recovery(
+    tmp_path, db, source, restart_recovery,
+):
+    engine = _engine(tmp_path, db)
+    await db.create_session(
+        "completed-task",
+        source="discord",
+        metadata={"discord_project_task_terminal": "completed"},
+    )
+    await db.set_session_run_recovery(
+        "completed-task", source="discord", channel="discord",
+        user_message="do not resume", channel_context=None,
+    )
+    engine._run_inner = AsyncMock(return_value="must not run")
+    engine.router.start_session_typing = AsyncMock()
+
+    with patch("nerve.agent.engine.broadcaster"):
+        result = await engine.run(
+            "completed-task", "do not resume", source=source,
+            channel="discord", internal=True, _restart_recovery=restart_recovery,
+        )
+
+    assert result == ""
+    assert await db.get_session_run_recovery("completed-task") is None
+    engine._run_inner.assert_not_awaited()
+    engine.router.start_session_typing.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_shutdown_cancellation_retains_restart_checkpoint(tmp_path, db):
     engine = _engine(tmp_path, db)
     entered = asyncio.Event()

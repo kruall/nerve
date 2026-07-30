@@ -1154,6 +1154,62 @@ async def test_send_typing_uses_messageable_typing_api():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("archived", "status"),
+    [(True, "in-progress"), (False, "completed"), (False, "cancelled")],
+)
+async def test_project_thread_activity_is_suppressed_when_terminal(
+    archived: bool, status: str,
+):
+    channel = _channel()
+    cached = SimpleNamespace(
+        parent_id=YDB_FORUM, send=AsyncMock(), typing=AsyncMock(),
+    )
+    fresh = SimpleNamespace(
+        parent_id=YDB_FORUM,
+        archived=archived,
+        applied_tags=[SimpleNamespace(name=status)],
+        send=AsyncMock(),
+        typing=AsyncMock(),
+    )
+    channel._client = MagicMock()
+    channel._client.get_channel.return_value = cached
+    channel._client.fetch_channel = AsyncMock(return_value=fresh)
+
+    await channel.send_typing(str(YDB_THREAD))
+    await channel.send(OutboundMessage(target=str(YDB_THREAD), text="late"))
+
+    fresh.typing.assert_not_awaited()
+    fresh.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_project_thread_activity_uses_fresh_nonterminal_state():
+    channel = _channel()
+    cached = SimpleNamespace(
+        parent_id=YDB_FORUM, send=AsyncMock(), typing=AsyncMock(),
+    )
+    fresh = SimpleNamespace(
+        parent_id=YDB_FORUM,
+        archived=False,
+        applied_tags=[SimpleNamespace(name="in-progress")],
+        send=AsyncMock(),
+        typing=AsyncMock(),
+    )
+    channel._client = MagicMock()
+    channel._client.get_channel.return_value = cached
+    channel._client.fetch_channel = AsyncMock(return_value=fresh)
+
+    await channel.send_typing(str(YDB_THREAD))
+    await channel.send(OutboundMessage(target=str(YDB_THREAD), text="working"))
+
+    fresh.typing.assert_awaited_once_with()
+    fresh.send.assert_awaited_once_with(
+        "working", allowed_mentions=ANY,
+    )
+
+
+@pytest.mark.asyncio
 async def test_first_start_primes_channel_without_replaying_old_messages():
     channel = _channel()
     target = _HistoryChannel(TEXT_CHANNEL, [], last_message_id=777)
