@@ -784,10 +784,22 @@ class DiscordApprovalInbox:
                 )
                 return
 
-        # Project-task completion archives the clicked thread in the
-        # dispatcher. Discord refuses to edit a card there afterwards. Briefly
-        # reopen just that managed thread, write the durable terminal result,
-        # and archive it again; other approval copies do not need this path.
+            if self._is_successfully_archived_task_card(
+                message,
+                row,
+                decision=decision,
+            ):
+                logger.info(
+                    "Leaving archived Discord task completion card %s "
+                    "unchanged after successful dispatch",
+                    getattr(message, "id", "unknown"),
+                )
+                return
+
+        # Legacy or unrelated archived approval cards may still need a brief
+        # reopen to record their terminal result. A successfully dispatched
+        # task-completion card was handled above without changing its archive
+        # state.
         thread = getattr(message, "channel", None)
         if not bool(getattr(thread, "archived", False)):
             logger.warning(
@@ -818,6 +830,28 @@ class DiscordApprovalInbox:
                     "Could not re-archive completed Discord task thread: %s",
                     exc,
                 )
+
+    @staticmethod
+    def _is_successfully_archived_task_card(
+        message: discord.Message,
+        row: dict[str, Any],
+        *,
+        decision: str,
+    ) -> bool:
+        if (
+            str(row.get("target_kind") or "").strip()
+            != _TASK_COMPLETION_TARGET_KIND
+            or decision != "approve"
+        ):
+            return False
+        outcome = _metadata(row).get(_DISPATCH_OUTCOME_KEY)
+        if not isinstance(outcome, dict) or not bool(outcome.get("ok")):
+            return False
+        target_id = str(row.get("target_id") or "").strip()
+        channel_id = str(
+            getattr(getattr(message, "channel", None), "id", "") or "",
+        ).strip()
+        return bool(target_id) and target_id == channel_id
 
     @staticmethod
     def _decision_outcome(

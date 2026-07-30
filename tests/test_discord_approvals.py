@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
@@ -45,9 +45,9 @@ class _AsyncRows:
             raise StopAsyncIteration from exc
 
 
-def _thread(*, archived: bool = False, applied_tags=None):
+def _thread(*, archived: bool = False, applied_tags=None, thread_id=THREAD_ID):
     thread = MagicMock(spec=discord.Thread)
-    thread.id = THREAD_ID
+    thread.id = thread_id
     thread.parent_id = FORUM_ID
     thread.name = "Approvals"
     thread.archived = archived
@@ -431,24 +431,36 @@ async def test_task_completion_decline_requires_a_reason():
 
 
 @pytest.mark.asyncio
-async def test_task_completion_outcome_updates_and_removes_both_card_views():
+async def test_task_completion_outcome_updates_audit_copy_and_leaves_archived_task_copy(
+):
+    task_thread = _thread(archived=True)
+    audit_thread = _thread(thread_id=THREAD_ID + 1)
     source = MagicMock(spec=discord.Message)
-    source.id = MESSAGE_ID
+    source.id = MESSAGE_ID + 1
     source.content = ""
     source.embeds = [discord.Embed(title="Complete task")]
+    source.channel = audit_thread
     source.edit = AsyncMock()
-    approval_copy = MagicMock(spec=discord.Message)
-    approval_copy.id = MESSAGE_ID + 1
-    approval_copy.content = ""
-    approval_copy.embeds = [discord.Embed(title="Complete task")]
-    approval_copy.edit = AsyncMock()
-    approval_thread = _thread()
-    approval_thread.fetch_message = AsyncMock(return_value=approval_copy)
-    inbox = _inbox(thread=approval_thread)
-    inbox.client.get_channel.return_value = approval_thread
+    task_card = MagicMock(spec=discord.Message)
+    task_card.id = MESSAGE_ID
+    task_card.content = ""
+    task_card.embeds = [discord.Embed(title="Complete task")]
+    response = SimpleNamespace(status=400, reason="Bad Request", headers={})
+    task_card.edit = AsyncMock(side_effect=discord.HTTPException(
+        response,
+        {"code": 50083, "message": "Thread is archived"},
+    ))
+    task_card.channel = task_thread
+    task_thread.fetch_message = AsyncMock(return_value=task_card)
+    inbox = _inbox(thread=audit_thread)
+    inbox.client.get_channel.side_effect = {
+        task_thread.id: task_thread,
+        audit_thread.id: audit_thread,
+    }.get
     inbox.db.get_notification.return_value = {
         "id": "approval-1",
         "target_kind": "discord-project-task-completion",
+        "target_id": str(THREAD_ID),
         "options": json.dumps(["approve", "decline"]),
         "metadata": json.dumps({
             "approval_dispatch": {"ok": True, "error": ""},
@@ -457,8 +469,8 @@ async def test_task_completion_outcome_updates_and_removes_both_card_views():
                 "message_id": str(MESSAGE_ID),
             },
             "discord_approval": {
-                "thread_id": str(THREAD_ID + 1),
-                "message_id": str(MESSAGE_ID + 1),
+                "thread_id": str(audit_thread.id),
+                "message_id": str(source.id),
             },
         }),
     }
@@ -471,12 +483,13 @@ async def test_task_completion_outcome_updates_and_removes_both_card_views():
         source_message=source,
     )
 
-    for message in (source, approval_copy):
-        edited = message.edit.await_args.kwargs
-        assert [(field.name, field.value) for field in edited["embed"].fields] == [
-            ("Status", "✅ Completed"),
-        ]
-        assert edited["view"] is None
+    edited = source.edit.await_args.kwargs
+    assert [(field.name, field.value) for field in edited["embed"].fields] == [
+        ("Status", "✅ Completed"),
+    ]
+    assert edited["view"] is None
+    task_card.edit.assert_awaited_once()
+    task_thread.edit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -531,7 +544,7 @@ async def test_task_completion_failure_records_reason_on_both_embed_cards():
 
 
 @pytest.mark.asyncio
-async def test_task_completion_card_is_updated_after_archiving_then_rearchived():
+async def test_successful_archived_task_completion_card_is_not_reopened():
     source = MagicMock(spec=discord.Message)
     source.id = MESSAGE_ID
     source.content = ""
@@ -546,11 +559,12 @@ async def test_task_completion_card_is_updated_after_archiving_then_rearchived()
         response,
         {"code": 50083, "message": "Thread is archived"},
     )
-    source.edit = AsyncMock(side_effect=[archived_error, None])
+    source.edit = AsyncMock(side_effect=archived_error)
     inbox = _inbox(thread=source.channel)
     inbox.db.get_notification.return_value = {
         "id": "approval-1",
         "target_kind": "discord-project-task-completion",
+        "target_id": str(THREAD_ID),
         "options": json.dumps(["approve", "decline"]),
         "metadata": json.dumps({
             "approval_dispatch": {"ok": True, "error": ""},
@@ -565,18 +579,8 @@ async def test_task_completion_card_is_updated_after_archiving_then_rearchived()
         source_message=source,
     )
 
-    assert source.edit.await_count == 2
-    assert source.edit.await_args.kwargs["view"] is None
-    source.channel.edit.assert_has_awaits([
-        call(
-            archived=False,
-            reason="Record Nerve task completion outcome",
-        ),
-        call(
-            archived=True,
-            reason="Archive completed Nerve project task",
-        ),
-    ])
+    assert source.edit.await_count == 1
+    source.channel.edit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
