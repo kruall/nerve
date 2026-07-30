@@ -239,7 +239,8 @@ async def test_task_thread_copy_persists_separate_coordinates():
         "thread_id": str(THREAD_ID),
         "message_id": str(MESSAGE_ID),
     }
-    assert "discord-project-task-completion:200" not in thread.send.await_args.args[0]
+    footer = thread.send.await_args.kwargs["embed"].footer.text or ""
+    assert "discord-project-task-completion:200" not in footer
 
 
 @pytest.mark.asyncio
@@ -406,6 +407,129 @@ async def test_decline_button_opens_feedback_modal_without_dispatching():
     assert isinstance(modal, ApprovalFeedbackModal)
     assert modal.decision == "decline"
     inbox.notification_service.handle_answer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_task_completion_decline_requires_a_reason():
+    source = MagicMock(spec=discord.Message)
+    inbox = _inbox(thread=_thread())
+    view = ApprovalView(
+        inbox,
+        "approval-1",
+        ["decline"],
+        {"decline": "Keep task open"},
+        target_kind="discord-project-task-completion",
+    )
+    interaction = _interaction(source)
+
+    await view.children[0].callback(interaction)
+
+    modal = interaction.response.send_modal.await_args.args[0]
+    assert isinstance(modal, ApprovalFeedbackModal)
+    assert modal.feedback.required is True
+    assert "remain open" in modal.feedback.placeholder
+
+
+@pytest.mark.asyncio
+async def test_task_completion_outcome_updates_and_disables_both_embed_cards():
+    source = MagicMock(spec=discord.Message)
+    source.id = MESSAGE_ID
+    source.content = ""
+    source.embeds = [discord.Embed(title="Complete task")]
+    source.edit = AsyncMock()
+    approval_copy = MagicMock(spec=discord.Message)
+    approval_copy.id = MESSAGE_ID + 1
+    approval_copy.content = ""
+    approval_copy.embeds = [discord.Embed(title="Complete task")]
+    approval_copy.edit = AsyncMock()
+    approval_thread = _thread()
+    approval_thread.fetch_message = AsyncMock(return_value=approval_copy)
+    inbox = _inbox(thread=approval_thread)
+    inbox.client.get_channel.return_value = approval_thread
+    inbox.db.get_notification.return_value = {
+        "id": "approval-1",
+        "target_kind": "discord-project-task-completion",
+        "options": json.dumps(["approve", "decline"]),
+        "metadata": json.dumps({
+            "approval_dispatch": {"ok": True, "error": ""},
+            "discord_project_task_completion": {
+                "thread_id": str(THREAD_ID),
+                "message_id": str(MESSAGE_ID),
+            },
+            "discord_approval": {
+                "thread_id": str(THREAD_ID + 1),
+                "message_id": str(MESSAGE_ID + 1),
+            },
+        }),
+    }
+
+    assert await inbox.answer(
+        interaction=_interaction(source),
+        notification_id="approval-1",
+        decision="approve",
+        feedback="",
+        source_message=source,
+    )
+
+    for message in (source, approval_copy):
+        edited = message.edit.await_args.kwargs
+        assert [(field.name, field.value) for field in edited["embed"].fields] == [
+            ("Status", "✅ Completed"),
+        ]
+        assert all(item.disabled for item in edited["view"].children)
+
+
+@pytest.mark.asyncio
+async def test_task_completion_failure_records_reason_on_both_embed_cards():
+    source = MagicMock(spec=discord.Message)
+    source.id = MESSAGE_ID
+    source.content = ""
+    source.embeds = [discord.Embed(title="Complete task")]
+    source.edit = AsyncMock()
+    approval_copy = MagicMock(spec=discord.Message)
+    approval_copy.id = MESSAGE_ID + 1
+    approval_copy.content = ""
+    approval_copy.embeds = [discord.Embed(title="Complete task")]
+    approval_copy.edit = AsyncMock()
+    approval_thread = _thread()
+    approval_thread.fetch_message = AsyncMock(return_value=approval_copy)
+    inbox = _inbox(thread=approval_thread)
+    inbox.client.get_channel.return_value = approval_thread
+    inbox.db.get_notification.return_value = {
+        "id": "approval-1",
+        "target_kind": "discord-project-task-completion",
+        "options": json.dumps(["approve", "decline"]),
+        "metadata": json.dumps({
+            "approval_dispatch": {
+                "ok": False,
+                "error": "task thread was already archived",
+            },
+            "discord_project_task_completion": {
+                "thread_id": str(THREAD_ID),
+                "message_id": str(MESSAGE_ID),
+            },
+            "discord_approval": {
+                "thread_id": str(THREAD_ID + 1),
+                "message_id": str(MESSAGE_ID + 1),
+            },
+        }),
+    }
+
+    assert await inbox.answer(
+        interaction=_interaction(source),
+        notification_id="approval-1",
+        decision="approve",
+        feedback="",
+        source_message=source,
+    )
+
+    for message in (source, approval_copy):
+        status = message.edit.await_args.kwargs["embed"].fields[0]
+        assert status.name == "Status"
+        assert "Not completed: task thread was already archived" in status.value
+        assert all(
+            item.disabled for item in message.edit.await_args.kwargs["view"].children
+        )
 
 
 @pytest.mark.asyncio

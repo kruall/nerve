@@ -40,6 +40,7 @@ _APPROVAL_EMOJIS: dict[str, str] = {
 }
 
 _APPROVAL_CONTINUATION_KEY = "approval_continuation"
+_APPROVAL_DISPATCH_OUTCOME_KEY = "approval_dispatch"
 _CONTINUATION_CONTEXT_KEYS = ("channel_name", "target", "message_id")
 
 
@@ -673,6 +674,21 @@ class NotificationService:
                 )
 
         await self._append_approval_audit(result.audit_event)
+
+        # The approval row becomes terminal even when a dispatcher fails.
+        # Persist that actual outcome so delivery surfaces do not confuse a
+        # recorded button click with a completed protected action.
+        metadata = _notification_metadata(notif)
+        dispatch_error = str(result.audit_event.get("error") or "").strip()
+        metadata[_APPROVAL_DISPATCH_OUTCOME_KEY] = {
+            "ok": bool(result.ok),
+            "error": dispatch_error[:2000],
+        }
+        encoded_metadata = json.dumps(metadata)
+        await self.db.update_notification(
+            notification_id, metadata=encoded_metadata,
+        )
+        notif["metadata"] = encoded_metadata
 
         # Snooze keeps the row pending and stamps ``redeliver_at`` so
         # the periodic maintenance tick (:meth:`redeliver_due`) fans it

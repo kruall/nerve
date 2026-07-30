@@ -503,6 +503,10 @@ class TestHandleAnswerApproval:
         notif = await db.get_notification(nid)
         assert notif["status"] == "answered"
         assert notif["answer"] == "approve"
+        assert json.loads(notif["metadata"])["approval_dispatch"] == {
+            "ok": True,
+            "error": "",
+        }
 
         # Audit log: an ``approval-acted`` event arrived in the
         # state-dir-scoped audit log. The minimal helper honors
@@ -740,6 +744,9 @@ class TestHandleAnswerApproval:
         assert ok is True
         notif = await db.get_notification("orphan-1")
         assert notif["status"] == "answered"
+        outcome = json.loads(notif["metadata"])["approval_dispatch"]
+        assert outcome["ok"] is False
+        assert "no dispatcher registered" in outcome["error"]
 
     async def test_legacy_question_path_still_injects_answer(
         self,

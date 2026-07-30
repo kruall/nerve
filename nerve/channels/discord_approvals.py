@@ -35,6 +35,8 @@ _MAX_EMBED_TITLE_LENGTH = 256
 _MAX_EMBED_DESCRIPTION_LENGTH = 4096
 _MAX_EMBED_FIELD_VALUE_LENGTH = 1024
 _FEEDBACK_DECISIONS = frozenset({"decline", "revise", "request_changes"})
+_TASK_COMPLETION_TARGET_KIND = "discord-project-task-completion"
+_DISPATCH_OUTCOME_KEY = "approval_dispatch"
 
 _BUTTON_STYLES = {
     "approve": discord.ButtonStyle.success,
@@ -174,6 +176,8 @@ class ApprovalFeedbackModal(discord.ui.Modal):
         notification_id: str,
         decision: str,
         source_message: discord.Message,
+        *,
+        feedback_required: bool = False,
     ) -> None:
         label = (
             "Request changes"
@@ -194,10 +198,14 @@ class ApprovalFeedbackModal(discord.ui.Modal):
             placeholder=(
                 "Describe the required changes"
                 if decision != "decline"
-                else "Optional: explain why this is declined"
+                else (
+                    "Explain why this task should remain open"
+                    if feedback_required
+                    else "Optional: explain why this is declined"
+                )
             ),
             style=discord.TextStyle.paragraph,
-            required=decision != "decline",
+            required=decision != "decline" or feedback_required,
             max_length=2000,
         )
         self.add_item(self.feedback)
@@ -282,6 +290,10 @@ class ApprovalButton(discord.ui.Button["ApprovalView"]):
                 self.notification_id,
                 self.decision,
                 interaction.message,
+                feedback_required=(
+                    self.decision == "decline"
+                    and view.target_kind == _TASK_COMPLETION_TARGET_KIND
+                ),
             ))
             return
 
@@ -410,6 +422,7 @@ class ApprovalView(discord.ui.View):
         options: list[str],
         labels: dict[str, str],
         *,
+        target_kind: str = "",
         disabled: bool = False,
         show_plan: bool = False,
         show_describe: bool = False,
@@ -419,6 +432,7 @@ class ApprovalView(discord.ui.View):
         self.notification_id = notification_id
         self.options = list(options)
         self.labels = dict(labels)
+        self.target_kind = target_kind
         for value in options[:5]:
             self.add_item(ApprovalButton(
                 notification_id,
@@ -576,6 +590,7 @@ class DiscordApprovalInbox:
             row["id"],
             options,
             labels,
+            target_kind=str(row.get("target_kind") or "").strip(),
             show_plan=show_plan,
             show_describe=show_describe,
         )
@@ -631,6 +646,9 @@ class DiscordApprovalInbox:
                         row["id"],
                         options,
                         _option_labels(row),
+                        target_kind=str(
+                            row.get("target_kind") or "",
+                        ).strip(),
                         show_plan=self._has_plan_details(row),
                         show_describe=bool(_plan_summary(row)),
                     ),
@@ -663,55 +681,152 @@ class DiscordApprovalInbox:
                 return False
 
             row = await self.db.get_notification(notification_id)
-            options = _option_values(row or {})
-            labels = _option_labels(row or {})
-            status = _safe_label(decision, labels)
-            suffix = f"\n\n**Decision:** {status} by <@{interaction.user.id}>"
-            embed = _append_embed_status(
-                source_message,
-                "Decision",
-                f"{status} by <@{interaction.user.id}>",
+            await self._close_cards(
+                row or {},
+                notification_id=notification_id,
+                decision=decision,
+                feedback=feedback,
+                actor_id=int(interaction.user.id),
+                source_message=source_message,
             )
-            if embed is not None and feedback:
+            return True
+
+    async def _close_cards(
+        self,
+        row: dict[str, Any],
+        *,
+        notification_id: str,
+        decision: str,
+        feedback: str,
+        actor_id: int,
+        source_message: discord.Message,
+    ) -> None:
+        """Render a terminal outcome and deactivate every delivered copy."""
+        source_id = str(getattr(source_message, "id", "") or "")
+        await self._close_one_card(
+            source_message,
+            row,
+            notification_id=notification_id,
+            decision=decision,
+            feedback=feedback,
+            actor_id=actor_id,
+        )
+        for coords in _delivery_coordinates(row):
+            message_id = str(coords.get("message_id") or "")
+            if not message_id or message_id == source_id:
+                continue
+            try:
+                thread_id = int(coords["thread_id"])
+                thread = self.client.get_channel(thread_id)
+                if thread is None:
+                    thread = await self.client.fetch_channel(thread_id)
+                message = await thread.fetch_message(int(message_id))
+            except Exception as exc:  # one stale copy must not block another
+                logger.warning(
+                    "Could not fetch Discord approval copy %s/%s: %s",
+                    coords.get("thread_id"), message_id, exc,
+                )
+                continue
+            await self._close_one_card(
+                message,
+                row,
+                notification_id=notification_id,
+                decision=decision,
+                feedback=feedback,
+                actor_id=actor_id,
+            )
+
+    async def _close_one_card(
+        self,
+        message: discord.Message,
+        row: dict[str, Any],
+        *,
+        notification_id: str,
+        decision: str,
+        feedback: str,
+        actor_id: int,
+    ) -> None:
+        label, value, suffix = self._decision_outcome(
+            row,
+            decision=decision,
+            feedback=feedback,
+            actor_id=actor_id,
+        )
+        embed = _append_embed_status(message, label, value)
+        edit_kwargs: dict[str, Any] = {
+            "view": ApprovalView(
+                self,
+                notification_id,
+                _option_values(row),
+                _option_labels(row),
+                target_kind=str(row.get("target_kind") or "").strip(),
+                disabled=True,
+                show_plan=self._has_plan_details(row),
+                show_describe=bool(_plan_summary(row)),
+            ),
+            "allowed_mentions": discord.AllowedMentions.none(),
+        }
+        if embed is not None:
+            if feedback and label == "Decision":
                 embed.add_field(
                     name="Feedback",
                     value=feedback[:_MAX_EMBED_FIELD_VALUE_LENGTH] or "—",
                     inline=False,
                 )
-            edit_kwargs: dict[str, Any] = {
-                "view": ApprovalView(
-                    self,
-                    notification_id,
-                    options,
-                    labels,
-                    disabled=True,
-                    show_plan=self._has_plan_details(row or {}),
-                    show_describe=bool(_plan_summary(row or {})),
-                ),
-                "allowed_mentions": discord.AllowedMentions.none(),
-            }
-            if embed is None:
-                source_content = str(source_message.content or "")
-                if feedback:
-                    room = (
-                        _MAX_MESSAGE_LENGTH
-                        - len(source_content)
-                        - len(suffix)
-                        - len("\n**Feedback:** ")
-                    )
-                    if room > 0:
-                        rendered_feedback = feedback[:room]
-                        if len(rendered_feedback) < len(feedback):
-                            rendered_feedback = rendered_feedback[:-1] + "…"
-                        suffix += f"\n**Feedback:** {rendered_feedback}"
-                content = source_content
-                if "**Decision:**" not in content:
-                    content = content + suffix
-                edit_kwargs["content"] = content
+            edit_kwargs["embed"] = embed
+        else:
+            content = str(getattr(message, "content", "") or "")
+            if suffix not in content:
+                room = _MAX_MESSAGE_LENGTH - len(content)
+                if room > 0:
+                    edit_kwargs["content"] = content + suffix[:room]
+        try:
+            await message.edit(**edit_kwargs)
+        except Exception as exc:  # an archived task thread can reject edits
+            logger.warning(
+                "Could not close Discord approval card %s: %s",
+                getattr(message, "id", "unknown"), exc,
+            )
+
+    @staticmethod
+    def _decision_outcome(
+        row: dict[str, Any],
+        *,
+        decision: str,
+        feedback: str,
+        actor_id: int,
+    ) -> tuple[str, str, str]:
+        target_kind = str(row.get("target_kind") or "").strip()
+        if target_kind == _TASK_COMPLETION_TARGET_KIND:
+            outcome = _metadata(row).get(_DISPATCH_OUTCOME_KEY)
+            dispatch_ok = (
+                isinstance(outcome, dict) and bool(outcome.get("ok"))
+            )
+            if decision == "approve" and dispatch_ok:
+                return "Status", "✅ Completed", "\n\n✅ **Completed.**"
+            if decision == "decline":
+                reason = feedback or str(
+                    _metadata(row).get("decision_feedback") or "",
+                ).strip()
+                if not reason:
+                    reason = "Completion was declined."
+            elif isinstance(outcome, dict):
+                reason = str(outcome.get("error") or "").strip()
             else:
-                edit_kwargs["embed"] = embed
-            await source_message.edit(**edit_kwargs)
-            return True
+                reason = ""
+            if not reason:
+                reason = "The completion action failed."
+            return (
+                "Status",
+                f"❌ Not completed: {reason}",
+                f"\n\n❌ **Not completed:** {reason}",
+            )
+
+        status = _safe_label(decision, _option_labels(row))
+        suffix = f"\n\n**Decision:** {status} by <@{actor_id}>"
+        if feedback:
+            suffix += f"\n**Feedback:** {feedback}"
+        return "Decision", f"{status} by <@{actor_id}>", suffix
 
     @staticmethod
     def _has_plan_details(row: dict[str, Any]) -> bool:
@@ -781,6 +896,9 @@ class DiscordApprovalInbox:
             colour=_PRIORITY_COLOURS.get(priority, discord.Colour.blurple()),
         )
         target_id = str(row.get("target_id") or "").strip()
-        if target_kind or target_id:
+        if (
+            (target_kind or target_id)
+            and target_kind != _TASK_COMPLETION_TARGET_KIND
+        ):
             card.set_footer(text=f"{target_kind}:{target_id}"[:2048])
         return card
