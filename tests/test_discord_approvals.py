@@ -83,6 +83,7 @@ def _interaction(message=None, *, user_id: int = USER_ID):
     interaction.user = SimpleNamespace(id=user_id)
     interaction.message = message
     interaction.response.defer = AsyncMock()
+    interaction.response.edit_message = AsyncMock()
     interaction.response.send_modal = AsyncMock()
     interaction.response.send_message = AsyncMock()
     interaction.response.is_done.return_value = False
@@ -428,6 +429,74 @@ async def test_task_completion_decline_requires_a_reason():
     assert isinstance(modal, ApprovalFeedbackModal)
     assert modal.feedback.required is True
     assert "remain open" in modal.feedback.placeholder
+    assert modal.suppress_ephemeral_outcome is True
+
+
+@pytest.mark.asyncio
+async def test_task_completion_approve_edits_card_without_ephemeral_reply():
+    source = MagicMock(spec=discord.Message)
+    source.id = MESSAGE_ID
+    source.content = ""
+    source.embeds = [discord.Embed(title="Complete task")]
+    source.embeds[0].add_field(
+        name="Status", value="⏳ Completing", inline=False,
+    )
+    source.edit = AsyncMock()
+    inbox = _inbox(thread=_thread())
+    inbox.db.get_notification.return_value = {
+        "id": "approval-1",
+        "target_kind": "discord-project-task-completion",
+        "options": json.dumps(["approve", "decline"]),
+        "metadata": json.dumps({
+            "approval_dispatch": {"ok": True, "error": ""},
+            "discord_project_task_completion": {
+                "thread_id": str(THREAD_ID),
+                "message_id": str(MESSAGE_ID),
+            },
+        }),
+    }
+    view = ApprovalView(
+        inbox,
+        "approval-1",
+        ["approve"],
+        {"approve": "Complete & archive"},
+        target_kind="discord-project-task-completion",
+    )
+    interaction = _interaction(source)
+
+    await view.children[0].callback(interaction)
+
+    interaction.response.edit_message.assert_awaited_once()
+    edited = interaction.response.edit_message.await_args.kwargs
+    assert edited["view"] is None
+    assert [(field.name, field.value) for field in edited["embed"].fields] == [
+        ("Status", "✅ Completed"),
+    ]
+    interaction.response.defer.assert_not_awaited()
+    interaction.followup.send.assert_not_awaited()
+    source.edit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_task_completion_decline_modal_has_no_ephemeral_outcome():
+    source = MagicMock(spec=discord.Message)
+    inbox = _inbox(thread=_thread())
+    inbox.answer = AsyncMock(return_value=True)
+    modal = ApprovalFeedbackModal(
+        inbox,
+        "approval-1",
+        "decline",
+        source,
+        feedback_required=True,
+        suppress_ephemeral_outcome=True,
+    )
+    modal.feedback._value = "Keep it open"
+    interaction = _interaction(source)
+
+    await modal.on_submit(interaction)
+
+    interaction.response.defer.assert_awaited_once_with()
+    interaction.followup.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
