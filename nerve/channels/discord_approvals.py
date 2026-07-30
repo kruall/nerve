@@ -157,8 +157,15 @@ def _append_embed_status(
     if source is None:
         return None
     card = source.copy()
-    if any(field.name == label for field in card.fields):
-        return card
+    for index, field in enumerate(card.fields):
+        if field.name == label:
+            card.set_field_at(
+                index,
+                name=label,
+                value=str(value)[:_MAX_EMBED_FIELD_VALUE_LENGTH] or "—",
+                inline=False,
+            )
+            return card
     card.add_field(
         name=label,
         value=str(value)[:_MAX_EMBED_FIELD_VALUE_LENGTH] or "—",
@@ -178,6 +185,7 @@ class ApprovalFeedbackModal(discord.ui.Modal):
         source_message: discord.Message,
         *,
         feedback_required: bool = False,
+        suppress_ephemeral_outcome: bool = False,
     ) -> None:
         label = (
             "Request changes"
@@ -193,6 +201,7 @@ class ApprovalFeedbackModal(discord.ui.Modal):
         self.notification_id = notification_id
         self.decision = decision
         self.source_message = source_message
+        self.suppress_ephemeral_outcome = suppress_ephemeral_outcome
         self.feedback = discord.ui.TextInput(
             label="What should change?" if decision != "decline" else "Reason",
             placeholder=(
@@ -211,7 +220,10 @@ class ApprovalFeedbackModal(discord.ui.Modal):
         self.add_item(self.feedback)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
+        if self.suppress_ephemeral_outcome:
+            await interaction.response.defer()
+        else:
+            await interaction.response.defer(ephemeral=True)
         feedback = str(self.feedback.value or "").strip()
         success = await self.inbox.answer(
             interaction=interaction,
@@ -220,6 +232,8 @@ class ApprovalFeedbackModal(discord.ui.Modal):
             feedback=feedback,
             source_message=self.source_message,
         )
+        if self.suppress_ephemeral_outcome:
+            return
         if success:
             await interaction.followup.send(
                 "Decision recorded.", ephemeral=True,
@@ -294,7 +308,45 @@ class ApprovalButton(discord.ui.Button["ApprovalView"]):
                     self.decision == "decline"
                     and view.target_kind == _TASK_COMPLETION_TARGET_KIND
                 ),
+                suppress_ephemeral_outcome=(
+                    view.target_kind == _TASK_COMPLETION_TARGET_KIND
+                ),
             ))
+            return
+
+        if view.target_kind == _TASK_COMPLETION_TARGET_KIND:
+            completed = _append_embed_status(
+                interaction.message,
+                "Status",
+                "✅ Completed",
+            )
+            edit_kwargs: dict[str, Any] = {
+                "view": None,
+                "allowed_mentions": discord.AllowedMentions.none(),
+            }
+            if completed is not None:
+                edit_kwargs["embed"] = completed
+            await interaction.response.edit_message(**edit_kwargs)
+            success = await view.inbox.answer(
+                interaction=interaction,
+                notification_id=self.notification_id,
+                decision=self.decision,
+                feedback="",
+                source_message=interaction.message,
+                source_card_preclosed=True,
+            )
+            if not success:
+                failed = _append_embed_status(
+                    interaction.message,
+                    "Status",
+                    "❌ Not completed: approval is no longer pending",
+                )
+                if failed is not None:
+                    await interaction.message.edit(
+                        embed=failed,
+                        view=None,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
             return
 
         await interaction.response.defer(ephemeral=True)
@@ -663,6 +715,7 @@ class DiscordApprovalInbox:
         decision: str,
         feedback: str,
         source_message: discord.Message,
+        source_card_preclosed: bool = False,
     ) -> bool:
         """Serialize one decision, dispatch it, then close the card."""
         if not self.interaction_allowed(interaction):
@@ -688,6 +741,7 @@ class DiscordApprovalInbox:
                 feedback=feedback,
                 actor_id=int(interaction.user.id),
                 source_message=source_message,
+                source_card_preclosed=source_card_preclosed,
             )
             return True
 
@@ -700,20 +754,49 @@ class DiscordApprovalInbox:
         feedback: str,
         actor_id: int,
         source_message: discord.Message,
+        source_card_preclosed: bool,
     ) -> None:
         """Render a terminal outcome and deactivate every delivered copy."""
         source_id = str(getattr(source_message, "id", "") or "")
-        await self._close_one_card(
-            source_message,
-            row,
-            notification_id=notification_id,
-            decision=decision,
-            feedback=feedback,
-            actor_id=actor_id,
+        dispatch_outcome = _metadata(row).get(_DISPATCH_OUTCOME_KEY)
+        task_completion_succeeded = (
+            str(row.get("target_kind") or "").strip()
+            == _TASK_COMPLETION_TARGET_KIND
+            and decision == "approve"
+            and isinstance(dispatch_outcome, dict)
+            and bool(dispatch_outcome.get("ok"))
         )
+        task_card = _metadata(row).get("discord_project_task_completion")
+        source_is_task_card = (
+            isinstance(task_card, dict)
+            and str(task_card.get("message_id") or "") == source_id
+        )
+        source_was_preclosed_task_card = (
+            task_completion_succeeded
+            and source_card_preclosed
+            and source_is_task_card
+        )
+        if not source_was_preclosed_task_card:
+            await self._close_one_card(
+                source_message,
+                row,
+                notification_id=notification_id,
+                decision=decision,
+                feedback=feedback,
+                actor_id=actor_id,
+            )
         for coords in _delivery_coordinates(row):
             message_id = str(coords.get("message_id") or "")
             if not message_id or message_id == source_id:
+                continue
+            if (
+                source_was_preclosed_task_card
+                and isinstance(task_card, dict)
+                and str(task_card.get("message_id") or "") == message_id
+            ):
+                # The original interaction has already changed this card
+                # before the dispatcher archives its task thread. Never
+                # reopen a completed task only to edit it afterwards.
                 continue
             try:
                 thread_id = int(coords["thread_id"])
