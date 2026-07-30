@@ -918,6 +918,27 @@ DISCORD_PROJECT_TASK_STATUS_SCHEMA = {
     "required": ["status"],
 }
 
+DISCORD_PROJECT_TASK_CREATE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "project": {
+            "type": "string",
+            "description": "Configured Discord project forum name.",
+        },
+        "title": {
+            "type": "string",
+            "description": "Short task title (maximum 80 characters).",
+        },
+        "description": {
+            "type": "string",
+            "description": (
+                "Task description and expected outcome (maximum 2000 characters)."
+            ),
+        },
+    },
+    "required": ["project", "title", "description"],
+}
+
 DISCORD_FORUM_TAG_ACTION_SCHEMA = {
     "type": "object",
     "properties": {

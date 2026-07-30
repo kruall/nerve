@@ -10,14 +10,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 
 from nerve.agent.tools.registry import ToolContext, ToolResult, ToolSpec
 from nerve.agent.tools.schemas import (
     DISCORD_FORUM_TAG_ACTION_SCHEMA,
     DISCORD_FORUM_TAGS_SCHEMA,
+    DISCORD_PROJECT_TASK_CREATE_SCHEMA,
     DISCORD_PROJECT_TASK_STATUS_SCHEMA,
 )
+from nerve.channels.discord_project_tasks import DiscordProjectTaskCreateError
 from nerve.discord_tags import (
     DISCORD_FORUM_TAG_METADATA_KEY,
     DISCORD_FORUM_TAG_TARGET_KIND,
@@ -27,6 +30,8 @@ from nerve.discord_tags import (
     DiscordProjectTaskStatusError,
     transition_project_task_status,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _current_discord_target(ctx: ToolContext) -> str:
@@ -205,6 +210,58 @@ async def discord_project_task_status_handler(
     return ToolResult.text(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+async def discord_project_task_create_handler(
+    ctx: ToolContext,
+    args: dict,
+) -> ToolResult:
+    """Create a new untagged task in a configured Discord project forum."""
+    if ctx.config is None:
+        return ToolResult.text(
+            "discord_project_task_create: Nerve config is unavailable.",
+            is_error=True,
+        )
+    if not ctx.config.discord.enabled:
+        return ToolResult.text(
+            "discord_project_task_create: Discord integration is disabled.",
+            is_error=True,
+        )
+    if ctx.engine is None:
+        return ToolResult.text(
+            "discord_project_task_create: engine is unavailable.",
+            is_error=True,
+        )
+
+    create_task = getattr(
+        ctx.engine.router.get_channel("discord"), "create_project_task", None,
+    )
+    if not callable(create_task):
+        return ToolResult.text(
+            "discord_project_task_create: Discord channel is unavailable.",
+            is_error=True,
+        )
+
+    try:
+        task_id, _thread_id = await create_task(
+            project=str(args.get("project") or ""),
+            title=str(args.get("title") or ""),
+            description=str(args.get("description") or ""),
+        )
+    except DiscordProjectTaskCreateError as exc:
+        return ToolResult.text(
+            f"discord_project_task_create: {exc}",
+            is_error=True,
+        )
+    except Exception:
+        logger.exception("Discord project-task creation failed")
+        return ToolResult.text(
+            "discord_project_task_create: Discord could not create the task.",
+            is_error=True,
+        )
+    return ToolResult.text(
+        f"Created Discord project task {task_id} in its configured forum."
+    )
+
+
 DISCORD_FORUM_TAGS_SPEC = ToolSpec(
     name="discord_forum_tags",
     description=(
@@ -229,6 +286,17 @@ DISCORD_PROJECT_TASK_STATUS_SPEC = ToolSpec(
     handler=discord_project_task_status_handler,
 )
 
+DISCORD_PROJECT_TASK_CREATE_SPEC = ToolSpec(
+    name="discord_project_task_create",
+    description=(
+        "Create a new untagged task in a configured Discord project forum. "
+        "Use when the user asks to create a task or when an actionable problem "
+        "should be captured for follow-up. The task starts in the new-task state."
+    ),
+    input_schema=DISCORD_PROJECT_TASK_CREATE_SCHEMA,
+    handler=discord_project_task_create_handler,
+)
+
 DISCORD_FORUM_TAG_ACTION_SPEC = ToolSpec(
     name="discord_forum_tag_action",
     description=(
@@ -246,5 +314,6 @@ DISCORD_FORUM_TAG_ACTION_SPEC = ToolSpec(
 DISCORD_SPECS = [
     DISCORD_FORUM_TAGS_SPEC,
     DISCORD_PROJECT_TASK_STATUS_SPEC,
+    DISCORD_PROJECT_TASK_CREATE_SPEC,
     DISCORD_FORUM_TAG_ACTION_SPEC,
 ]

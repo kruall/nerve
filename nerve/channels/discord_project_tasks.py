@@ -79,8 +79,29 @@ class DiscordProjectTaskCreator:
                 "У вас нет доступа к созданию задач Nerve."
             )
 
+        return await self.create_for_agent(
+            project=project,
+            title=title,
+            description=description,
+            author_id=int(
+                getattr(getattr(interaction, "user", None), "id", 0) or 0
+            ),
+        )
+
+    async def create_for_agent(
+        self,
+        *,
+        project: str,
+        title: str,
+        description: str,
+        author_id: int | None = None,
+    ) -> tuple[str, int]:
+        """Create a task for a Nerve agent using the connected Discord client.
+
+        The caller is responsible for authorizing the external action. This
+        shares the same numbering lock and validation path as the slash command.
+        """
         project = self.project_name(project)
-        author_id = int(getattr(getattr(interaction, "user", None), "id", 0) or 0)
         title = " ".join(title.split())
         description = description.strip()
         if not title:
@@ -121,7 +142,13 @@ class DiscordProjectTaskCreator:
             number = max(maximum, self._last_created_number.get(forum_id, 0)) + 1
             task_id = f"{project}-{number}"
             thread_name = f"{task_id} {title}"
-            starter_content = f"<@{author_id}>\n\n{description}"
+            starter_content = description
+            allowed_mentions = discord.AllowedMentions.none()
+            if author_id:
+                starter_content = f"<@{author_id}>\n\n{description}"
+                allowed_mentions = discord.AllowedMentions(
+                    users=[discord.Object(id=author_id)],
+                )
             if len(thread_name) > _MAX_THREAD_NAME_LENGTH:
                 raise DiscordProjectTaskCreateError(
                     "Заголовок слишком длинный для имени Discord-треда."
@@ -131,9 +158,7 @@ class DiscordProjectTaskCreator:
                     name=thread_name,
                     content=starter_content,
                     auto_archive_duration=_AUTO_ARCHIVE_DURATION_MINUTES,
-                    allowed_mentions=discord.AllowedMentions(
-                        users=[discord.Object(id=author_id)],
-                    ),
+                    allowed_mentions=allowed_mentions,
                     reason=f"Create Nerve project task {task_id}",
                 )
             except discord.HTTPException as exc:

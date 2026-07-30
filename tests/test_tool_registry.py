@@ -164,6 +164,7 @@ class TestDefaultRegistry:
             "send_file",
             # discord project forums
             "discord_forum_tags", "discord_project_task_status",
+            "discord_project_task_create",
             "discord_forum_tag_action",
             # mcp admin
             "nerve_api", "mcp_reload",

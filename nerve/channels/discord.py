@@ -489,6 +489,20 @@ class DiscordChannel(BaseChannel):
             ProjectTaskCreateModal(self._project_task_creator, project_name),
         )
 
+    async def create_project_task(
+        self,
+        *,
+        project: str,
+        title: str,
+        description: str,
+    ) -> tuple[str, int]:
+        """Create a project task for an authorized agent tool call."""
+        return await self._project_task_creator.create_for_agent(
+            project=project,
+            title=title,
+            description=description,
+        )
+
     async def start(self) -> None:
         if self._client_task is not None:
             return
