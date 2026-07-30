@@ -209,11 +209,13 @@ async def test_create_task_command_opens_modal_and_uses_next_project_number():
 
     forum.create_thread.assert_awaited_once_with(
         name="NERVE-30 Добавить команду",
-        content="Открывать модальное окно для новой задачи.",
+        content="<@400>\n\nОткрывать модальное окно для новой задачи.",
         auto_archive_duration=10080,
         allowed_mentions=ANY,
         reason="Create Nerve project task NERVE-30",
     )
+    allowed_mentions = forum.create_thread.await_args.kwargs["allowed_mentions"]
+    assert allowed_mentions.users == [discord.Object(id=USER)]
     submit_interaction.followup.send.assert_awaited_once_with(
         "Создана задача **NERVE-30**: <#1003>", ephemeral=True,
     )

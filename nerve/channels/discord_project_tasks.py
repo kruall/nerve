@@ -80,6 +80,7 @@ class DiscordProjectTaskCreator:
             )
 
         project = self.project_name(project)
+        author_id = int(getattr(getattr(interaction, "user", None), "id", 0) or 0)
         title = " ".join(title.split())
         description = description.strip()
         if not title:
@@ -120,6 +121,7 @@ class DiscordProjectTaskCreator:
             number = max(maximum, self._last_created_number.get(forum_id, 0)) + 1
             task_id = f"{project}-{number}"
             thread_name = f"{task_id} {title}"
+            starter_content = f"<@{author_id}>\n\n{description}"
             if len(thread_name) > _MAX_THREAD_NAME_LENGTH:
                 raise DiscordProjectTaskCreateError(
                     "Заголовок слишком длинный для имени Discord-треда."
@@ -127,9 +129,11 @@ class DiscordProjectTaskCreator:
             try:
                 created = await forum.create_thread(
                     name=thread_name,
-                    content=description,
+                    content=starter_content,
                     auto_archive_duration=_AUTO_ARCHIVE_DURATION_MINUTES,
-                    allowed_mentions=discord.AllowedMentions.none(),
+                    allowed_mentions=discord.AllowedMentions(
+                        users=[discord.Object(id=author_id)],
+                    ),
                     reason=f"Create Nerve project task {task_id}",
                 )
             except discord.HTTPException as exc:

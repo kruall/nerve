@@ -428,8 +428,9 @@ running.
 projects, then opens a modal for the task title and description. Nerve creates
 an untagged forum thread named `PROJECT-N title`, where `N` is one greater than
 the largest existing number for that project (including archived threads). The
-new thread therefore starts in the normal `new-task` lifecycle state and does
-not start an agent session by itself.
+starter message mentions the command's author and contains the description.
+The new thread therefore starts in the normal `new-task` lifecycle state and
+does not start an agent session by itself.
 
 ### Discord forum-tag tools
 
