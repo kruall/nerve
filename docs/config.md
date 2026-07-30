@@ -270,6 +270,7 @@ WebSocket. It does not require an inbound listener or a public Nerve endpoint.
 | `discord.task_forums` | map[string, int] | `{}` | Project name to Discord forum-channel ID |
 | `discord.project_task_runner_enabled` | bool | `false` | Opt in to selecting and running one `ready-for-agent` project task at a time |
 | `discord.project_task_runner_poll_interval_seconds` | float | `60` | Delay between autonomous task scans; values below 10 seconds are clamped |
+| `discord.project_task_runner_instructions` | map[string, string] | `{}` | Trusted local policy injected only into autonomous planning and implementation sessions; keys must exist in `task_forums` |
 | `discord.project_model_tiers` | map[string, string] | `{}` | Initial Codex tier for ordinary project sessions and the legacy fallback for autonomous planning; keys must exist in `task_forums` |
 | `discord.project_planner_model_tiers` | map[string, string] | `{}` | Codex tier for the planning pass of autonomous tasks; overrides `project_model_tiers`; keys must exist in `task_forums` |
 | `discord.skills_forum_id` | int | `0` | Shared forum where Nerve publishes one managed thread per local skill |
@@ -306,6 +307,14 @@ across every configured forum, and the
 `in-progress` Discord tag is its durable restart-safe claim. It never starts a
 second task while the first task's turn is running, and it does not infer task
 completion or close threads after that turn.
+
+`project_task_runner_instructions` adds trusted, per-project operational policy
+to both the planner and implementation handoff for autonomous tasks. It is
+useful for a local release requirement such as integrating a verified change,
+restarting the local service, and checking the changed behavior before moving a
+task to `ready-for-user`. It does not affect ordinary Discord sessions and is
+not a server-enforced release-evidence gate; leave it empty for the existing
+behavior. Store no secrets in this setting.
 
 When `presence_enabled` is true, the bot activity shows a compact summary such
 as `Nerve · 2 active · Codex 73% left`. "Active" counts sessions currently

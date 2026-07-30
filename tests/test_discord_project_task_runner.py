@@ -176,6 +176,50 @@ def test_planner_uses_legacy_project_tier_without_override():
 
 
 @pytest.mark.asyncio
+async def test_project_task_policy_reaches_planner_and_implementation(monkeypatch):
+    runner, guild = _runner([_Thread(100)])
+    runner.nerve_config.discord.project_task_runner_instructions = {
+        "NERVE": "Integrate into the local live branch before ready-for-user.",
+    }
+    monkeypatch.setattr(
+        "nerve.channels.discord_project_task_runner.transition_project_task_status",
+        lambda *_args, **_kwargs: {"current_status": "in-progress"},
+    )
+
+    assert await runner.scan_once(guild) is True
+    task = runner._active_task
+    assert task is not None
+    await task
+
+    planner_message, implementation_message = [
+        call.args[0] for call in runner.router.handle_message.await_args_list
+    ]
+    policy = "[Trusted autonomous task policy for NERVE]"
+    requirement = "Integrate into the local live branch before ready-for-user."
+    assert policy in planner_message.text
+    assert requirement in planner_message.text
+    assert policy in implementation_message.text
+    assert requirement in implementation_message.text
+
+
+@pytest.mark.asyncio
+async def test_project_task_policy_is_omitted_when_not_configured(monkeypatch):
+    runner, guild = _runner([_Thread(100)])
+    monkeypatch.setattr(
+        "nerve.channels.discord_project_task_runner.transition_project_task_status",
+        lambda *_args, **_kwargs: {"current_status": "in-progress"},
+    )
+
+    assert await runner.scan_once(guild) is True
+    task = runner._active_task
+    assert task is not None
+    await task
+
+    for call in runner.router.handle_message.await_args_list:
+        assert "[Trusted autonomous task policy for NERVE]" not in call.args[0].text
+
+
+@pytest.mark.asyncio
 async def test_empty_planner_response_does_not_start_execution(monkeypatch):
     runner, guild = _runner([_Thread(100)])
     runner.router.handle_message.side_effect = [""]

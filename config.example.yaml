@@ -129,6 +129,15 @@ discord:
   # task session at a time.
   # project_task_runner_enabled: false
   # project_task_runner_poll_interval_seconds: 60
+  # Optional trusted local policy added only to autonomous planning and
+  # implementation sessions for the named project. It is not included in
+  # ordinary Discord conversations. Use it for project-specific release or
+  # handoff requirements; do not put secrets here. Keys must exist in
+  # task_forums.
+  # project_task_runner_instructions:
+  #   NERVE: |
+  #     Before ready-for-user, integrate the verified change and complete the
+  #     requested restart and live validation.
   # Nerve creates a pinned "Project prompt" thread in every configured project
   # forum. Split the working instructions across as many allowed-author messages
   # as needed; Nerve joins them chronologically and reflects edits or deletions

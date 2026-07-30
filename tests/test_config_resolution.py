@@ -246,6 +246,7 @@ class TestDiscordConfig:
         assert cfg.task_forums == {}
         assert cfg.project_task_runner_enabled is False
         assert cfg.project_task_runner_poll_interval_seconds == 60.0
+        assert cfg.project_task_runner_instructions == {}
         assert cfg.project_model_tiers == {}
         assert cfg.project_planner_model_tiers == {}
         assert cfg.skills_forum_id == 0
@@ -263,6 +264,9 @@ class TestDiscordConfig:
             "task_forums": {"YDB": "300"},
             "project_task_runner_enabled": True,
             "project_task_runner_poll_interval_seconds": "120",
+            "project_task_runner_instructions": {
+                "YDB": "Integrate before handoff.",
+            },
             "project_model_tiers": {"YDB": "sol-xhigh"},
             "project_planner_model_tiers": {"YDB": "sol-medium"},
             "skills_forum_id": "325",
@@ -277,6 +281,9 @@ class TestDiscordConfig:
         assert cfg.task_forums == {"YDB": 300}
         assert cfg.project_task_runner_enabled is True
         assert cfg.project_task_runner_poll_interval_seconds == 120.0
+        assert cfg.project_task_runner_instructions == {
+            "YDB": "Integrate before handoff.",
+        }
         assert cfg.project_model_tiers == {"YDB": "sol-xhigh"}
         assert cfg.project_planner_model_tiers == {"YDB": "sol-medium"}
         assert cfg.skills_forum_id == 325
@@ -296,6 +303,25 @@ class TestDiscordConfig:
         })
         assert cfg.project_planner_model_tiers == {}
 
+    def test_non_mapping_project_task_runner_instructions_are_ignored(self):
+        cfg = DiscordConfig.from_dict({
+            "project_task_runner_instructions": "Integrate before handoff.",
+        })
+        assert cfg.project_task_runner_instructions == {}
+
+    def test_invalid_project_task_runner_instruction_entries_are_ignored(self):
+        cfg = DiscordConfig.from_dict({
+            "project_task_runner_instructions": {
+                "YDB": 3,
+                "": "Ignored",
+                2: "Ignored",
+                "NERVE": "  Integrate before handoff.  ",
+            },
+        })
+        assert cfg.project_task_runner_instructions == {
+            "NERVE": "Integrate before handoff.",
+        }
+
     def test_known_keys_pass_validation(self):
         merged = {
             "discord": {
@@ -306,6 +332,9 @@ class TestDiscordConfig:
                 "task_forums": {"YDB": 300},
                 "project_task_runner_enabled": True,
                 "project_task_runner_poll_interval_seconds": 60,
+                "project_task_runner_instructions": {
+                    "YDB": "Integrate before handoff.",
+                },
                 "project_model_tiers": {"YDB": "sol-xhigh"},
                 "project_planner_model_tiers": {"YDB": "sol-medium"},
                 "skills_forum_id": 325,
@@ -343,6 +372,15 @@ class TestDiscordConfig:
             NerveConfig.from_dict({"discord": {
                 "task_forums": {"YDB": 300},
                 "project_planner_model_tiers": {"YDB": "not-a-tier"},
+            }})
+
+    def test_project_task_runner_instructions_require_configured_project(self):
+        with pytest.raises(ValueError, match="project_task_runner_instructions.*not configured"):
+            NerveConfig.from_dict({"discord": {
+                "task_forums": {"YDB": 300},
+                "project_task_runner_instructions": {
+                    "NERVE": "Integrate before handoff.",
+                },
             }})
 
 

@@ -288,6 +288,11 @@ class DiscordConfig:
     # Disabled by default: selecting work is an external action.
     project_task_runner_enabled: bool = False
     project_task_runner_poll_interval_seconds: float = 60.0
+    # Trusted local instructions for autonomous task sessions in one project.
+    # They are not added to ordinary Discord conversations.
+    project_task_runner_instructions: dict[str, str] = field(
+        default_factory=dict,
+    )
     # Optional initial Codex tier per project forum. These defaults apply only
     # when a new Discord session is created; a stored session tier is sticky.
     project_model_tiers: dict[str, str] = field(default_factory=dict)
@@ -309,6 +314,9 @@ class DiscordConfig:
         raw_project_planner_model_tiers = (
             d.get("project_planner_model_tiers", {}) or {}
         )
+        raw_project_task_runner_instructions = (
+            d.get("project_task_runner_instructions", {}) or {}
+        )
         if not isinstance(raw_project_model_tiers, dict):
             logger.warning(
                 "Ignoring non-mapping discord.project_model_tiers value"
@@ -319,6 +327,11 @@ class DiscordConfig:
                 "Ignoring non-mapping discord.project_planner_model_tiers value"
             )
             raw_project_planner_model_tiers = {}
+        if not isinstance(raw_project_task_runner_instructions, dict):
+            logger.warning(
+                "Ignoring non-mapping discord.project_task_runner_instructions value"
+            )
+            raw_project_task_runner_instructions = {}
         return cls(
             enabled=bool(d.get("enabled", False)),
             bot_token=str(d.get("bot_token") or ""),
@@ -338,6 +351,16 @@ class DiscordConfig:
             project_task_runner_poll_interval_seconds=float(
                 d.get("project_task_runner_poll_interval_seconds", 60.0)
             ),
+            project_task_runner_instructions={
+                project.strip(): instruction.strip()
+                for project, instruction in raw_project_task_runner_instructions.items()
+                if (
+                    isinstance(project, str)
+                    and project.strip()
+                    and isinstance(instruction, str)
+                    and instruction.strip()
+                )
+            },
             project_model_tiers={
                 str(project).strip(): str(tier).strip()
                 for project, tier in raw_project_model_tiers.items()
@@ -1997,6 +2020,16 @@ class NerveConfig:
                     f"discord.{setting_name} references unknown Codex tiers: "
                     + ", ".join(unknown_tiers)
                 )
+        unknown_projects = sorted(
+            set(self.discord.project_task_runner_instructions)
+            - set(self.discord.task_forums)
+        )
+        if unknown_projects:
+            raise ValueError(
+                "discord.project_task_runner_instructions contains projects "
+                "not configured in discord.task_forums: "
+                + ", ".join(unknown_projects)
+            )
         if codex_selected:
             if self.codex.model not in {
                 k for k in self.codex.pricing

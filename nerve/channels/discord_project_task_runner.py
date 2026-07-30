@@ -27,6 +27,16 @@ status. Do not infer task completion from a transient session ending.]
 """
 
 
+def _project_task_policy(project: str, instructions: str) -> str:
+    if not instructions:
+        return ""
+    return (
+        f"[Trusted autonomous task policy for {project}]\n"
+        + instructions
+        + "\n[End trusted autonomous task policy]"
+    )
+
+
 class DiscordProjectTaskRunner:
     """Plan then execute the oldest ready project task without parallel work.
 
@@ -288,6 +298,10 @@ class DiscordProjectTaskRunner:
             "`ready-for-agent`. It is now `in-progress`. Work only on this "
             "task and report intentionally through `discord_send` when useful.",
             _TASK_LIFECYCLE_CONTEXT,
+            _project_task_policy(
+                project,
+                self.config.project_task_runner_instructions.get(project, ""),
+            ),
             prompt,
             transcript,
         ]
