@@ -509,6 +509,38 @@ class DiscordChannel(BaseChannel):
             description=description,
         )
 
+    def _project_task_auditor(self) -> Any:
+        from nerve.channels.discord_project_task_audit import (
+            DiscordProjectTaskAuditor,
+        )
+
+        return DiscordProjectTaskAuditor(
+            client=self._client,
+            db=self.db,
+            guild_id=self.config.guild_id,
+            project_forums=self._project_forums,
+        )
+
+    async def audit_project_tasks(self, *, limit: int = 20) -> dict[str, Any]:
+        """Read the next bounded batch of completed project tasks."""
+        return await self._project_task_auditor().get_batch(limit=limit)
+
+    async def get_project_task_audit_batch(
+        self, *, limit: int = 20,
+    ) -> dict[str, Any]:
+        return await self.audit_project_tasks(limit=limit)
+
+    async def read_project_task_for_audit(
+        self, *, thread_id: str,
+    ) -> dict[str, Any] | None:
+        """Read one task only when the auditor currently considers it eligible."""
+        return await self._project_task_auditor().get_task(thread_id)
+
+    async def get_project_task_audit_task(
+        self, *, thread_id: str,
+    ) -> dict[str, Any] | None:
+        return await self.read_project_task_for_audit(thread_id=thread_id)
+
     async def start(self) -> None:
         if self._client_task is not None:
             return

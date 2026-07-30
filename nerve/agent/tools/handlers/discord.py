@@ -15,12 +15,15 @@ import uuid
 
 from nerve.agent.tools.registry import ToolContext, ToolResult, ToolSpec
 from nerve.agent.tools.schemas import (
+    COMPLETE_DISCORD_PROJECT_TASK_AUDIT_SCHEMA,
     DISCORD_FORUM_TAG_ACTION_SCHEMA,
     DISCORD_FORUM_TAGS_SCHEMA,
+    DISCORD_PROJECT_TASK_AUDIT_SCHEMA,
     DISCORD_PROJECT_TASK_CREATE_SCHEMA,
     DISCORD_PROJECT_TASK_STATUS_SCHEMA,
 )
 from nerve.channels.discord_project_tasks import DiscordProjectTaskCreateError
+from nerve.channels.discord_project_task_audit import DiscordProjectTaskAuditError
 from nerve.discord_tags import (
     DISCORD_FORUM_TAG_METADATA_KEY,
     DISCORD_FORUM_TAG_TARGET_KIND,
@@ -286,6 +289,142 @@ async def discord_project_task_create_handler(
     )
 
 
+async def _require_project_task_auditor(ctx: ToolContext) -> str | None:
+    if ctx.db is None or ctx.engine is None or ctx.config is None:
+        return "Discord project-task audit tools are unavailable: engine not wired."
+    session = await ctx.db.get_session(ctx.session_id)
+    if (
+        not session
+        or session.get("source") != "cron"
+        or not ctx.session_id.startswith("cron:project-task-auditor:")
+    ):
+        return (
+            "This tool is restricted to the project-task-auditor cron session."
+        )
+    return None
+
+
+def _discord_channel_for_audit(ctx: ToolContext):
+    if ctx.engine is None:
+        return None
+    return ctx.engine.router.get_channel("discord")
+
+
+async def discord_project_task_audit_handler(
+    ctx: ToolContext, args: dict,
+) -> ToolResult:
+    denied = await _require_project_task_auditor(ctx)
+    if denied:
+        return ToolResult.text(denied, is_error=True)
+    channel = _discord_channel_for_audit(ctx)
+    audit = getattr(channel, "audit_project_tasks", None)
+    if not callable(audit):
+        audit = getattr(channel, "get_project_task_audit_batch", None)
+    if not callable(audit):
+        return ToolResult.text(
+            "discord_project_task_audit: Discord channel is unavailable.",
+            is_error=True,
+        )
+    try:
+        result = await audit(
+            limit=max(1, min(int(args.get("limit", 20) or 20), 50)),
+        )
+    except DiscordProjectTaskAuditError as exc:
+        return ToolResult.text(
+            f"discord_project_task_audit: {exc}", is_error=True,
+        )
+    except Exception:
+        logger.exception("Discord project-task audit read failed")
+        return ToolResult.text(
+            "discord_project_task_audit: Discord state could not be read.",
+            is_error=True,
+        )
+    return ToolResult.text(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+async def complete_discord_project_task_audit_handler(
+    ctx: ToolContext, args: dict,
+) -> ToolResult:
+    denied = await _require_project_task_auditor(ctx)
+    if denied:
+        return ToolResult.text(denied, is_error=True)
+    thread_id = str(args.get("thread_id") or "").strip()
+    result_name = str(args.get("result") or args.get("outcome") or "").strip()
+    summary = str(args.get("summary") or "").strip()
+    follow_up_ids = [
+        str(item).strip()
+        for item in (args.get("follow_up_task_ids") or [])
+        if str(item).strip()
+    ]
+    if not thread_id or not thread_id.isdigit():
+        return ToolResult.text(
+            "thread_id must be a numeric Discord thread ID", is_error=True,
+        )
+    if result_name not in {"verified", "follow-up-created"}:
+        return ToolResult.text(
+            "result must be 'verified' or 'follow-up-created'", is_error=True,
+        )
+    if not summary:
+        return ToolResult.text("summary is required", is_error=True)
+    if result_name == "follow-up-created" and not follow_up_ids:
+        return ToolResult.text(
+            "follow_up_task_ids is required for follow-up-created",
+            is_error=True,
+        )
+
+    existing = await ctx.db.get_discord_project_task_audit(thread_id)
+    if existing is not None:
+        return ToolResult.text(json.dumps({
+            "completed": True,
+            "idempotent": True,
+            "audit": existing,
+        }, ensure_ascii=False))
+
+    channel = _discord_channel_for_audit(ctx)
+    read_task = getattr(channel, "read_project_task_for_audit", None)
+    if not callable(read_task):
+        read_task = getattr(channel, "get_project_task_audit_task", None)
+    if not callable(read_task):
+        return ToolResult.text(
+            "complete_discord_project_task_audit: Discord channel is unavailable.",
+            is_error=True,
+        )
+    try:
+        task = await read_task(thread_id=thread_id)
+    except DiscordProjectTaskAuditError as exc:
+        return ToolResult.text(
+            f"complete_discord_project_task_audit: {exc}", is_error=True,
+        )
+    except Exception:
+        logger.exception("Discord project-task audit validation failed")
+        return ToolResult.text(
+            "complete_discord_project_task_audit: Discord state could not be read.",
+            is_error=True,
+        )
+    if not task:
+        return ToolResult.text(
+            "complete_discord_project_task_audit: unknown or non-auditable task.",
+            is_error=True,
+        )
+
+    completion = task.get("completion") or {}
+    stored = await ctx.db.record_discord_project_task_audit(
+        thread_id=thread_id,
+        guild_id=ctx.config.discord.guild_id,
+        project=str(task.get("project") or ""),
+        completion_notification_id=str(completion.get("notification_id") or ""),
+        completion_record=completion,
+        result=result_name,
+        summary=summary,
+        follow_up_task_ids=follow_up_ids,
+    )
+    return ToolResult.text(json.dumps({
+        "completed": True,
+        "idempotent": False,
+        "audit": stored,
+    }, ensure_ascii=False))
+
+
 DISCORD_FORUM_TAGS_SPEC = ToolSpec(
     name="discord_forum_tags",
     description=(
@@ -321,6 +460,27 @@ DISCORD_PROJECT_TASK_CREATE_SPEC = ToolSpec(
     handler=discord_project_task_create_handler,
 )
 
+DISCORD_PROJECT_TASK_AUDIT_SPEC = ToolSpec(
+    name="discord_project_task_audit",
+    description=(
+        "Read the next bounded batch of completed Discord project tasks and "
+        "their actual tags, archive state, starter message, session binding, "
+        "and limited untrusted transcript evidence. Cron-only."
+    ),
+    input_schema=DISCORD_PROJECT_TASK_AUDIT_SCHEMA,
+    handler=discord_project_task_audit_handler,
+)
+
+COMPLETE_DISCORD_PROJECT_TASK_AUDIT_SPEC = ToolSpec(
+    name="complete_discord_project_task_audit",
+    description=(
+        "Record an evidence-based audit result for one task returned by "
+        "discord_project_task_audit. Cron-only and idempotent."
+    ),
+    input_schema=COMPLETE_DISCORD_PROJECT_TASK_AUDIT_SCHEMA,
+    handler=complete_discord_project_task_audit_handler,
+)
+
 DISCORD_FORUM_TAG_ACTION_SPEC = ToolSpec(
     name="discord_forum_tag_action",
     description=(
@@ -339,5 +499,7 @@ DISCORD_SPECS = [
     DISCORD_FORUM_TAGS_SPEC,
     DISCORD_PROJECT_TASK_STATUS_SPEC,
     DISCORD_PROJECT_TASK_CREATE_SPEC,
+    DISCORD_PROJECT_TASK_AUDIT_SPEC,
+    COMPLETE_DISCORD_PROJECT_TASK_AUDIT_SPEC,
     DISCORD_FORUM_TAG_ACTION_SPEC,
 ]

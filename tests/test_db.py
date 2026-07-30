@@ -88,6 +88,36 @@ class TestSchemaMigration:
             "session_id", "guild_id", "thread_id", "created_at",
         }.issubset(columns)
 
+    async def test_discord_project_task_audit_tables_exist(self, db: Database):
+        async with db.db.execute(
+            "PRAGMA table_info(discord_project_task_audit_state)"
+        ) as cur:
+            state_columns = {row[1] async for row in cur}
+        async with db.db.execute(
+            "PRAGMA table_info(discord_project_task_audits)"
+        ) as cur:
+            audit_columns = {row[1] async for row in cur}
+        assert {
+            "id", "activated_at", "baseline_initialized",
+            "baseline_thread_ids", "last_run_at", "last_summary",
+        }.issubset(state_columns)
+        assert {
+            "thread_id", "guild_id", "project", "completion_record",
+            "result", "summary", "follow_up_task_ids",
+        }.issubset(audit_columns)
+
+    async def test_discord_project_task_audit_migration_is_restart_safe(
+        self, db: Database,
+    ):
+        from nerve.db.migrations import v048_discord_project_task_audit as v048
+
+        before = await db.get_discord_project_task_audit_state()
+        await v048.up(db.db)
+        await db.db.commit()
+        after = await db.get_discord_project_task_audit_state()
+        assert after["activated_at"] == before["activated_at"]
+        assert after["baseline_initialized"] == before["baseline_initialized"]
+
 
 @pytest.mark.asyncio
 class TestDiscordThreadContext:

@@ -19,6 +19,7 @@ from nerve.db.audit import AuditStore
 from nerve.db.cron import CronStore
 from nerve.db.discord_context import DiscordContextStore
 from nerve.db.discord_mirror import DiscordMirrorStore
+from nerve.db.discord_project_task_audit import DiscordProjectTaskAuditStore
 from nerve.db.discord_project_prompts import DiscordProjectPromptStore
 from nerve.db.files import FileStore
 from nerve.db.long_commands import LongCommandStore
@@ -103,6 +104,7 @@ class Database(
     CronStore,
     DiscordContextStore,
     DiscordMirrorStore,
+    DiscordProjectTaskAuditStore,
     DiscordProjectPromptStore,
     SkillStore,
     McpStore,

@@ -19,6 +19,10 @@ Both files use the same format. On startup, CronService loads and merges both:
 
 Running `nerve init` on an existing install regenerates `system.yaml` (e.g., to pick up updated prompts from a Nerve update) without touching `jobs.yaml`.
 
+The built-in `project-task-auditor` is added to an existing installation only
+when `nerve init` regenerates `system.yaml`; changing the repository does not
+mutate the live cron file by itself.
+
 ## Job Definition
 
 ```yaml
@@ -317,10 +321,16 @@ These ship in `~/.nerve/cron/system.yaml` and are managed by `nerve init`. Runni
 | `task-planner` | Every 4 hours | persistent (168h rotation) | Reviews open tasks, explores codebases, proposes implementation plans via plan-approve workflow. Gated on `tasks` (status `pending`) — stays idle when there's nothing to plan. | ✅ default | ✅ default |
 | `skill-extractor` | Every 12 hours | persistent | Identifies repeated workflows from recent conversations, memory, and completed tasks. Proposes new skills via task+plan system. | ✅ optional | ✅ default |
 | `skill-reviser` | Weekly (Sun 3 AM) | persistent | Reviews existing skills for accuracy (outdated paths, credentials), completeness (missing steps), and quality (trigger phrases, examples). Proposes revisions via task+plan. | ✅ optional | ✅ default |
+| `project-task-auditor` | Every 4 hours | isolated, locked | Reads active and archived completed Discord project tasks, compares requested scope with transcript/git/API/runtime evidence, and records a verification or creates one precise untagged follow-up task. It never reopens or mutates the completed task. | ✅ default | ✅ default |
 
 **Mode defaults:**
-- **Personal** — `memory-maintenance` (always on) + `inbox-processor` + `task-planner` enabled by default. `model-routing-auditor`, `skill-extractor`, and `skill-reviser` are presented as optional during `nerve init`; enable the auditor only with a Codex backend and configured tiers.
-- **Worker** — `memory-maintenance` (always on) + `task-planner` + `skill-extractor` + `skill-reviser` enabled by default. `inbox-processor` is not included (workers don't have sync sources).
+- **Personal** — `memory-maintenance` (always on) + `inbox-processor` + `task-planner` + `project-task-auditor` enabled by default. `model-routing-auditor`, `skill-extractor`, and `skill-reviser` are presented as optional during `nerve init`.
+- **Worker** — `memory-maintenance` (always on) + `task-planner` + `skill-extractor` + `skill-reviser` + `project-task-auditor` enabled by default. `inbox-processor` is not included (workers don't have sync sources).
+
+The auditor's first scan treats already completed threads as a baseline. A
+successful completion approval after activation remains auditable even if the
+thread was already present in that baseline. Discord/session excerpts supplied
+to the auditor are explicitly untrusted data.
 
 Both skill jobs use `source="skill-extractor"` or `source="skill-reviser"` on created tasks. When their plans are approved, the plan approval handler creates/updates the skill directly from the plan content (which is a full SKILL.md file) instead of spawning an implementation session.
 

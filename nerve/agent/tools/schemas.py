@@ -1027,6 +1027,46 @@ DISCORD_PROJECT_TASK_CREATE_SCHEMA = {
     "required": ["project", "title", "description"],
 }
 
+DISCORD_PROJECT_TASK_AUDIT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 20,
+            "description": "Maximum number of completed tasks to return.",
+        },
+    },
+    "required": [],
+}
+
+COMPLETE_DISCORD_PROJECT_TASK_AUDIT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "thread_id": {
+            "type": "string",
+            "description": "Discord project-task thread ID from the audit batch.",
+        },
+        "result": {
+            "type": "string",
+            "enum": ["verified", "follow-up-created"],
+            "description": "Evidence-based audit outcome.",
+        },
+        "summary": {
+            "type": "string",
+            "description": "Short evidence-based audit summary.",
+        },
+        "follow_up_task_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "default": [],
+            "description": "IDs of follow-up Discord tasks created for this task.",
+        },
+    },
+    "required": ["thread_id", "result", "summary"],
+}
+
 DISCORD_FORUM_TAG_ACTION_SCHEMA = {
     "type": "object",
     "properties": {

@@ -160,6 +160,7 @@ class TestNonInteractiveSetup:
 
         assert "inbox-processor" in choices.enabled_crons
         assert "task-planner" in choices.enabled_crons
+        assert "project-task-auditor" in choices.enabled_crons
 
 
 class TestDeferredWrites:
@@ -204,6 +205,17 @@ class TestDeferredWrites:
         local = yaml.safe_load((tmp_path / "config.local.yaml").read_text())
         assert local["anthropic_api_key"] == "sk-ant-api03-test"
         assert local["openai_api_key"] == "sk-proj-test"
+
+        system = yaml.safe_load(
+            (tmp_path / "_nerve_state" / "cron" / "system.yaml").read_text()
+        )
+        auditor = next(
+            item for item in system["jobs"]
+            if item["id"] == "project-task-auditor"
+        )
+        assert auditor["schedule"] == "0 */4 * * *"
+        assert auditor["session_mode"] == "isolated"
+        assert auditor["lock"] is True
 
 
 class TestCliInit:
