@@ -214,6 +214,7 @@ def _discord_request(
     channel_id: int,
     payload: dict[str, Any] | None = None,
     *,
+    path_suffix: str = "",
     audit_reason: str = "",
 ) -> dict[str, Any]:
     """Perform one bounded Discord channel request without leaking the token."""
@@ -227,7 +228,7 @@ def _discord_request(
         response = _DISCORD_REQUEST_THROTTLE.request(
             lambda: httpx.request(
                 method,
-                f"{_API_BASE}/channels/{channel_id}",
+                f"{_API_BASE}/channels/{channel_id}{path_suffix}",
                 headers=headers,
                 json=payload,
                 timeout=15.0,
@@ -258,7 +259,7 @@ def _discord_request(
         data = response.json()
     except ValueError as exc:
         raise DiscordForumTagError(
-            "Discord API returned a non-JSON channel response"
+            "Discord API returned a non-JSON response"
         ) from exc
     if not isinstance(data, dict):
         raise DiscordForumTagError("Discord API returned an invalid channel response")
@@ -1218,6 +1219,7 @@ def dispatch_discord_project_task_recovery(
                 ),
                 "allowed_mentions": {"users": [str(actor_id)]},
             },
+            path_suffix="/messages",
             audit_reason="Nerve task recovery user mention",
         )
     except DiscordForumTagError as exc:

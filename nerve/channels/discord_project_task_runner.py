@@ -77,6 +77,7 @@ class DiscordProjectTaskRunner:
         project_forums: dict[int, str],
         project_prompt: Callable[[int, int], str] | None = None,
         notification_service: Any | None = None,
+        system_audit: Callable[..., Any] | None = None,
     ) -> None:
         self.nerve_config = config
         self.config: DiscordConfig = config.discord
@@ -85,6 +86,7 @@ class DiscordProjectTaskRunner:
         self.project_forums = project_forums
         self.project_prompt = project_prompt
         self.notification_service = notification_service
+        self.system_audit = system_audit
         self._worker_task: asyncio.Task[None] | None = None
         self._active_task: asyncio.Task[None] | None = None
         self._active_session_id: str | None = None
@@ -469,6 +471,33 @@ class DiscordProjectTaskRunner:
             "Recovery action offered for blocked Discord task %s/%s",
             project, thread_id,
         )
+        await self._emit_system_audit(
+            "Discord task runner recovery action offered",
+            details=(
+                f"Project: `{project}`\n"
+                f"Task: **{getattr(thread, 'name', thread_id)}**\n"
+                f"Reason: {reason}\n"
+                "Choices: close, backlog, or ready-for-user."
+            ),
+            level="warning",
+        )
+
+    async def _emit_system_audit(
+        self,
+        title: str,
+        *,
+        details: str,
+        level: str = "info",
+    ) -> None:
+        callback = self.system_audit
+        if not callable(callback):
+            return
+        try:
+            result = callback(title, details=details, level=level)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.exception("Discord task runner System audit failed")
 
     async def _saved_plan(self, planning_session_id: str) -> str | None:
         messages = await self.db.get_messages(planning_session_id, limit=50)

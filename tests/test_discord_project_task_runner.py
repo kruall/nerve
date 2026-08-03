@@ -439,6 +439,8 @@ async def test_unrecoverable_in_progress_task_offers_one_release_action():
         "status": "sent",
     })
     runner.notification_service = service
+    audit = AsyncMock()
+    runner.system_audit = audit
 
     assert await runner.scan_once(guild) is True
     task = runner._active_task
@@ -452,6 +454,8 @@ async def test_unrecoverable_in_progress_task_offers_one_release_action():
     assert [option["value"] for option in call["options"]] == [
         "cancelled", "backlog", "ready-for-user",
     ]
+    audit.assert_awaited_once()
+    assert audit.await_args.args[0] == "Discord task runner recovery action offered"
 
 
 @pytest.mark.asyncio

@@ -89,8 +89,11 @@ def _thread(applied: list[str]) -> dict:
 def _fake_api(monkeypatch, *, applied: list[str]) -> list[tuple]:
     calls: list[tuple] = []
 
-    def request(config, method, channel_id, payload=None, *, audit_reason=""):
-        calls.append((method, channel_id, payload, audit_reason))
+    def request(
+        config, method, channel_id, payload=None, *,
+        path_suffix="", audit_reason="",
+    ):
+        calls.append((method, channel_id, payload, path_suffix, audit_reason))
         if method == "GET" and channel_id == THREAD_ID:
             return _thread(applied)
         if method == "GET" and channel_id == FORUM_ID:
@@ -335,6 +338,7 @@ def test_recovery_action_changes_status_and_mentions_the_actor(monkeypatch):
         "content": "<@400> Task runner claim released: `ready-for-user`.",
         "allowed_mentions": {"users": ["400"]},
     }
+    assert calls[-1][3] == "/messages"
     assert result.audit_event["user_mentioned"] is True
 
 

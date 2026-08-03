@@ -986,6 +986,7 @@ class DiscordChannel(BaseChannel):
                     db=self.db,
                     project_forums=self._project_forums,
                     notification_service=self._notification_service,
+                    system_audit=self.emit_system_event,
                     project_prompt=(
                         prompts.prompt_for_thread if prompts is not None else None
                     ),
