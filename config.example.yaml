@@ -128,7 +128,8 @@ discord:
   # forums, claims the oldest `ready-for-agent` task, and runs only one such
   # task session at a time. Existing in-progress tasks have priority over new
   # ready-for-agent tasks and are resumed through their bound session after a
-  # restart.
+  # restart. If a task cannot be resumed safely, Nerve posts one decision card
+  # with buttons to cancel it, move it to backlog, or hand it to the user.
   # project_task_runner_enabled: false
   # project_task_runner_poll_interval_seconds: 60
   # Optional trusted local policy added only to autonomous planning and

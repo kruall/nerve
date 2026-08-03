@@ -11,7 +11,11 @@ from typing import Any
 
 from nerve.channels.base import InboundMessage
 from nerve.config import DiscordConfig, NerveConfig
-from nerve.discord_tags import PROJECT_TASK_STATUSES, transition_project_task_status
+from nerve.discord_tags import (
+    DISCORD_PROJECT_TASK_RECOVERY_TARGET_KIND,
+    PROJECT_TASK_STATUSES,
+    transition_project_task_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +24,11 @@ _IN_PROGRESS_STATUS = "in-progress"
 _MAX_TRANSCRIPT_MESSAGES = 10
 _MAX_TRANSCRIPT_CHARS = 12_000
 _MAX_PLAN_CHARS = 20_000
+_RECOVERY_ACTIONS = (
+    {"label": "Закрыть задачу", "value": "cancelled"},
+    {"label": "Переместить в backlog", "value": "backlog"},
+    {"label": "Передать пользователю", "value": "ready-for-user"},
+)
 
 _TASK_LIFECYCLE_CONTEXT = """[Discord project-task lifecycle]
 Discord forum tags are the sole source of task state; do not use Plane or
@@ -67,6 +76,7 @@ class DiscordProjectTaskRunner:
         db: Any,
         project_forums: dict[int, str],
         project_prompt: Callable[[int, int], str] | None = None,
+        notification_service: Any | None = None,
     ) -> None:
         self.nerve_config = config
         self.config: DiscordConfig = config.discord
@@ -74,9 +84,11 @@ class DiscordProjectTaskRunner:
         self.db = db
         self.project_forums = project_forums
         self.project_prompt = project_prompt
+        self.notification_service = notification_service
         self._worker_task: asyncio.Task[None] | None = None
         self._active_task: asyncio.Task[None] | None = None
         self._active_session_id: str | None = None
+        self._last_recovery_error = ""
 
     @property
     def active_session_id(self) -> str | None:
@@ -270,6 +282,7 @@ class DiscordProjectTaskRunner:
         """
         session = await self.db.get_session(session_id)
         if not isinstance(session, dict):
+            self._last_recovery_error = "saved session does not exist"
             logger.error(
                 "Cannot resume in-progress Discord task %s/%s: session %s "
                 "does not exist",
@@ -279,6 +292,7 @@ class DiscordProjectTaskRunner:
             )
             return None
         if session.get("source") == "external":
+            self._last_recovery_error = "saved session belongs to an external runtime"
             logger.error(
                 "Cannot resume in-progress Discord task %s/%s: session %s "
                 "belongs to an external runtime",
@@ -288,6 +302,7 @@ class DiscordProjectTaskRunner:
             )
             return None
         if str(session.get("status") or "") == "archived":
+            self._last_recovery_error = "saved session is archived"
             logger.error(
                 "Cannot resume in-progress Discord task %s/%s: session %s "
                 "is archived",
@@ -298,6 +313,7 @@ class DiscordProjectTaskRunner:
             return None
         binding = await self.db.get_discord_session_binding(session_id)
         if not isinstance(binding, dict):
+            self._last_recovery_error = "saved session has no immutable Discord binding"
             logger.error(
                 "Cannot resume in-progress Discord task %s/%s: session %s "
                 "has no immutable Discord binding",
@@ -310,6 +326,7 @@ class DiscordProjectTaskRunner:
             str(binding.get("guild_id")) != str(guild_id)
             or str(binding.get("thread_id")) != str(thread_id)
         ):
+            self._last_recovery_error = "saved session binding conflicts with the task thread"
             logger.error(
                 "Cannot resume in-progress Discord task %s/%s: session %s "
                 "binding conflicts with the task thread (guild=%s, thread=%s)",
@@ -322,6 +339,7 @@ class DiscordProjectTaskRunner:
             return None
         stage = self._session_stage(session, session_id)
         if not stage:
+            self._last_recovery_error = "saved session has no recognized task stage"
             logger.error(
                 "Cannot resume in-progress Discord task %s/%s: session %s "
                 "has no recognized task stage",
@@ -339,6 +357,7 @@ class DiscordProjectTaskRunner:
         project: str,
     ) -> tuple[str, str] | None:
         """Resolve the mapping first, then deterministic crash-window IDs."""
+        self._last_recovery_error = ""
         guild_id = int(guild.id)
         thread_id = int(thread.id)
         channel_key = f"discord:{guild_id}:{thread_id}"
@@ -374,7 +393,82 @@ class DiscordProjectTaskRunner:
             project,
             thread_id,
         )
+        self._last_recovery_error = (
+            "no existing implementation or planning session was found"
+        )
         return None
+
+    async def _offer_recovery_action(
+        self, guild: Any, thread: Any, project: str,
+    ) -> None:
+        """Ask the user how to release a task that cannot be resumed safely."""
+        service = self.notification_service
+        if service is None:
+            service = getattr(self.router.engine, "notification_service", None)
+        if not callable(getattr(service, "propose_action", None)):
+            logger.error(
+                "Cannot offer recovery action for Discord task %s/%s: "
+                "notification service is unavailable",
+                project, thread.id,
+            )
+            return
+
+        guild_id = int(guild.id)
+        thread_id = int(thread.id)
+        channel_key = f"discord:{guild_id}:{thread_id}"
+        mapping = await self.db.get_channel_session(channel_key)
+        session_id = str((mapping or {}).get("session_id") or "").strip()
+        if not session_id:
+            session_id = f"discord-task:{guild_id}:{thread_id}"
+        notification_id = (
+            f"discord-task-recovery:{guild_id}:{thread_id}"
+        )
+        existing = await self.db.get_notification(notification_id)
+        if isinstance(existing, dict):
+            logger.info(
+                "Recovery action for Discord task %s/%s already exists "
+                "(status=%s)",
+                project, thread_id, existing.get("status") or "unknown",
+            )
+            return
+
+        reason = self._last_recovery_error or "session cannot be resumed safely"
+        title = f"Runner blocked on {project} task"
+        body = (
+            f"The task **{getattr(thread, 'name', thread_id)}** is still "
+            "`in-progress`, but Nerve cannot safely continue its existing "
+            f"session: {reason}. Choose how to release this queue claim."
+        )
+        try:
+            await service.propose_action(
+                notification_id=notification_id,
+                session_id=session_id,
+                target_kind=DISCORD_PROJECT_TASK_RECOVERY_TARGET_KIND,
+                target_id=str(thread_id),
+                title=title,
+                body=body,
+                options=list(_RECOVERY_ACTIONS),
+                priority="high",
+                channels=["discord"],
+                metadata={
+                    "discord_project_task_recovery": {
+                        "project": project,
+                        "guild_id": str(guild_id),
+                        "thread_id": str(thread_id),
+                        "reason": reason,
+                    },
+                },
+            )
+        except Exception:
+            logger.exception(
+                "Failed to offer recovery action for Discord task %s/%s",
+                project, thread_id,
+            )
+            return
+        logger.warning(
+            "Recovery action offered for blocked Discord task %s/%s",
+            project, thread_id,
+        )
 
     async def _saved_plan(self, planning_session_id: str) -> str | None:
         messages = await self.db.get_messages(planning_session_id, limit=50)
@@ -484,6 +578,7 @@ class DiscordProjectTaskRunner:
     ) -> None:
         resolved = await self._resolve_existing_task_session(guild, thread, project)
         if resolved is None:
+            await self._offer_recovery_action(guild, thread, project)
             return
         session_id, stage = resolved
         task_context = await self._task_prompt(thread, project, recovering=True)

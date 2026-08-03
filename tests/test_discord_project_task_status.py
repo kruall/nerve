@@ -14,8 +14,10 @@ from nerve.agent.tools.registry import ToolContext
 from nerve.config import DiscordConfig, NerveConfig, NotificationsConfig
 from nerve.discord_tags import (
     DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND,
+    DISCORD_PROJECT_TASK_RECOVERY_TARGET_KIND,
     DiscordProjectTaskStatusError,
     dispatch_discord_project_task_completion,
+    dispatch_discord_project_task_recovery,
     resume_project_task,
     transition_project_task_status,
 )
@@ -98,6 +100,8 @@ def _fake_api(monkeypatch, *, applied: list[str]) -> list[tuple]:
                 return _thread(payload["applied_tags"])
             assert payload == {"archived": True}
             return _thread(applied)
+        if method == "POST" and channel_id == THREAD_ID:
+            return {"id": "900"}
         raise AssertionError((method, channel_id, payload))
 
     monkeypatch.setattr("nerve.discord_tags._discord_request", request)
@@ -131,6 +135,21 @@ def test_transition_replaces_only_the_managed_status_tag(monkeypatch):
 
     assert result["previous_status"] == "ready-for-agent"
     assert calls[-1][2] == {"applied_tags": [OTHER_TAG_ID, "302"]}
+
+
+def test_in_progress_task_can_be_returned_to_backlog(monkeypatch):
+    calls = _fake_api(monkeypatch, applied=["302"])
+
+    result = transition_project_task_status(
+        _config(),
+        thread_id=THREAD_ID,
+        target_status="backlog",
+        audit_reason="recovery",
+    )
+
+    assert result["previous_status"] == "in-progress"
+    assert result["current_status"] == "backlog"
+    assert calls[-1][2] == {"applied_tags": ["300"]}
 
 
 def test_transition_rejects_skipped_or_terminal_paths(monkeypatch):
@@ -294,6 +313,31 @@ def test_approved_completion_changes_tag_then_archives(monkeypatch):
     assert calls[3][2] == {"archived": True}
 
 
+def test_recovery_action_changes_status_and_mentions_the_actor(monkeypatch):
+    calls = _fake_api(monkeypatch, applied=["302"])
+
+    result = dispatch_discord_project_task_recovery(
+        {"id": "recovery-1"},
+        str(THREAD_ID),
+        "ready-for-user",
+        _config(),
+        answered_by="discord:400",
+    )
+
+    assert result.ok is True
+    assert [call[:2] for call in calls] == [
+        ("GET", THREAD_ID),
+        ("GET", FORUM_ID),
+        ("PATCH", THREAD_ID),
+        ("POST", THREAD_ID),
+    ]
+    assert calls[-1][2] == {
+        "content": "<@400> Task runner claim released: `ready-for-user`.",
+        "allowed_mentions": {"users": ["400"]},
+    }
+    assert result.audit_event["user_mentioned"] is True
+
+
 def test_declined_completion_does_not_contact_discord(monkeypatch):
     calls = _fake_api(monkeypatch, applied=["303"])
 
@@ -338,6 +382,37 @@ async def test_confirmation_click_completes_and_archives_without_model(
         ("PATCH", THREAD_ID),
         ("PATCH", THREAD_ID),
     ]
+    engine.run.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_recovery_choice_changes_status_mentions_user_without_model_turn(
+    db, monkeypatch,
+):
+    calls = _fake_api(monkeypatch, applied=["302"])
+    config = _config()
+    config.notifications = NotificationsConfig(channels=["web"])
+    engine = MagicMock()
+    service = NotificationService(config, db, engine)
+    service._append_approval_audit = AsyncMock()
+    await db.create_session("s1")
+    await db.create_notification(
+        notification_id="recovery-approval",
+        session_id="s1",
+        type="approval",
+        title="Release blocked task",
+        options=["cancelled", "backlog", "ready-for-user"],
+        target_kind=DISCORD_PROJECT_TASK_RECOVERY_TARGET_KIND,
+        target_id=str(THREAD_ID),
+    )
+
+    assert await service.handle_answer(
+        "recovery-approval", "ready-for-user", "discord:400",
+    )
+
+    notification = await db.get_notification("recovery-approval")
+    assert notification["status"] == "answered"
+    assert calls[-1][0:2] == ("POST", THREAD_ID)
     engine.run.assert_not_called()
 
 

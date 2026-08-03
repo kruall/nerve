@@ -427,6 +427,56 @@ async def test_missing_or_conflicting_binding_never_creates_parallel_session():
 
 
 @pytest.mark.asyncio
+async def test_unrecoverable_in_progress_task_offers_one_release_action():
+    runner, guild, thread, _sessions = _recovery_runner(
+        mapped_session_id="discord-task:1:100",
+    )
+    runner.db.get_discord_session_binding = AsyncMock(return_value=None)
+    runner.db.get_notification = AsyncMock(return_value=None)
+    service = MagicMock()
+    service.propose_action = AsyncMock(return_value={
+        "notification_id": "discord-task-recovery:1:100",
+        "status": "sent",
+    })
+    runner.notification_service = service
+
+    assert await runner.scan_once(guild) is True
+    task = runner._active_task
+    assert task is not None
+    await task
+
+    service.propose_action.assert_awaited_once()
+    call = service.propose_action.await_args.kwargs
+    assert call["notification_id"] == "discord-task-recovery:1:100"
+    assert call["target_id"] == str(thread.id)
+    assert [option["value"] for option in call["options"]] == [
+        "cancelled", "backlog", "ready-for-user",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pending_release_action_is_not_duplicated_on_next_poll():
+    runner, guild, _thread, _sessions = _recovery_runner(
+        mapped_session_id="discord-task:1:100",
+    )
+    runner.db.get_discord_session_binding = AsyncMock(return_value=None)
+    runner.db.get_notification = AsyncMock(return_value={
+        "id": "discord-task-recovery:1:100",
+        "status": "pending",
+    })
+    service = MagicMock()
+    service.propose_action = AsyncMock()
+    runner.notification_service = service
+
+    assert await runner.scan_once(guild) is True
+    task = runner._active_task
+    assert task is not None
+    await task
+
+    service.propose_action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_saved_planning_output_hands_off_without_new_planner():
     runner, guild, thread, _sessions = _recovery_runner(
         stage="planning",

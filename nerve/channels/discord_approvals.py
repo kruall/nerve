@@ -36,6 +36,7 @@ _MAX_EMBED_DESCRIPTION_LENGTH = 4096
 _MAX_EMBED_FIELD_VALUE_LENGTH = 1024
 _FEEDBACK_DECISIONS = frozenset({"decline", "revise", "request_changes"})
 _TASK_COMPLETION_TARGET_KIND = "discord-project-task-completion"
+_TASK_RECOVERY_TARGET_KIND = "discord-project-task-recovery"
 _DISPATCH_OUTCOME_KEY = "approval_dispatch"
 
 _BUTTON_STYLES = {
@@ -101,7 +102,11 @@ def _delivery_coordinates(row: dict[str, Any]) -> list[dict[str, Any]]:
     """Return every persisted Discord card for one approval notification."""
     metadata = _metadata(row)
     coordinates = []
-    for key in ("discord_approval", "discord_project_task_completion"):
+    for key in (
+        "discord_approval",
+        "discord_project_task_completion",
+        "discord_project_task_recovery",
+    ):
         value = metadata.get(key)
         if isinstance(value, dict):
             coordinates.append(value)

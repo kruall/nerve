@@ -21,7 +21,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from nerve.notifications import handlers as _handlers
-from nerve.discord_tags import DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND
+from nerve.discord_tags import (
+    DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND,
+    DISCORD_PROJECT_TASK_RECOVERY_TARGET_KIND,
+)
 
 if TYPE_CHECKING:
     from nerve.agent.engine import AgentEngine
@@ -353,6 +356,7 @@ class NotificationService:
         channels: list[str] | None = None,
         continuation_prompt: str | None = None,
         defer_discord_until_turn_end: bool = False,
+        notification_id: str | None = None,
     ) -> dict:
         """File an actionable ``approval``-kind notification.
 
@@ -373,7 +377,11 @@ class NotificationService:
 
         Returns ``{"notification_id": <id>, "status": "sent"}``.
         """
-        notification_id = f"approval-{uuid.uuid4().hex[:8]}"
+        notification_id = str(
+            notification_id or f"approval-{uuid.uuid4().hex[:8]}"
+        ).strip()
+        if not notification_id:
+            raise ValueError("propose_action: notification_id must not be empty")
         continuation_prompt = str(continuation_prompt or "").strip()
 
         # Resolve options. Default to the registered dispatcher's
@@ -682,11 +690,23 @@ class NotificationService:
         session_id = notif["session_id"]
         target_kind = notif.get("target_kind") or ""
         target_id = notif.get("target_id") or ""
+        notif["_answered_by"] = answered_by
 
         dispatcher = _handlers.get(target_kind) if target_kind else None
         if target_kind == "plan":
             result = await self._dispatch_plan_approval(
                 notif, target_id, answer,
+            )
+        elif target_kind == DISCORD_PROJECT_TASK_RECOVERY_TARGET_KIND:
+            from nerve.discord_tags import dispatch_discord_project_task_recovery
+
+            result = await asyncio.to_thread(
+                dispatch_discord_project_task_recovery,
+                notif,
+                target_id,
+                answer,
+                self.config,
+                answered_by=notif.get("_answered_by", ""),
             )
         elif dispatcher is None:
             logger.warning(

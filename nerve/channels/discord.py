@@ -40,6 +40,7 @@ from nerve.channels.discord_project_tasks import (
 from nerve.config import NerveConfig
 from nerve.discord_tags import (
     DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND,
+    DISCORD_PROJECT_TASK_RECOVERY_TARGET_KIND,
     DiscordForumTagError,
     complete_project_task,
     resume_project_task,
@@ -66,7 +67,7 @@ changes, call `mcp__nerve__discord_project_task_status` exactly once with the
 next allowed status:
 `new-task` -> `ready-for-agent` / `blocked` / `cancelled`;
 `ready-for-agent` -> `in-progress`;
-`in-progress` -> `ready-for-user` / `blocked` / `cancelled`;
+`in-progress` -> `ready-for-user` / `backlog` / `blocked` / `cancelled`;
 `ready-for-user` -> `blocked` / `cancelled`;
 `blocked` -> `ready-for-agent`.
 Do not infer task completion from a transient session ending. The agent hands
@@ -984,6 +985,7 @@ class DiscordChannel(BaseChannel):
                     router=self.router,
                     db=self.db,
                     project_forums=self._project_forums,
+                    notification_service=self._notification_service,
                     project_prompt=(
                         prompts.prompt_for_thread if prompts is not None else None
                     ),
@@ -1611,6 +1613,8 @@ class DiscordChannel(BaseChannel):
         """Deliver an actionable notification to the pinned audit thread."""
         if row.get("target_kind") == DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND:
             return await self._deliver_project_task_completion(row)
+        if row.get("target_kind") == DISCORD_PROJECT_TASK_RECOVERY_TARGET_KIND:
+            return await self._deliver_project_task_recovery(row)
         inbox = self._approval_inbox
         if inbox is None:
             raise RuntimeError("Discord approval inbox is not available")
@@ -1622,7 +1626,10 @@ class DiscordChannel(BaseChannel):
             status="pending", type="approval", limit=500,
         )
         for row in rows:
-            if row.get("target_kind") != DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND:
+            if row.get("target_kind") not in {
+                DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND,
+                DISCORD_PROJECT_TASK_RECOVERY_TARGET_KIND,
+            }:
                 continue
             try:
                 metadata = json.loads(row.get("metadata") or "{}")
@@ -1638,9 +1645,14 @@ class DiscordChannel(BaseChannel):
                 if await self.db.get_session_run_recovery(row["session_id"]):
                     continue
             try:
-                await self._deliver_project_task_completion(
-                    row, duplicate_to_audit=False,
-                )
+                if row.get("target_kind") == DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND:
+                    await self._deliver_project_task_completion(
+                        row, duplicate_to_audit=False,
+                    )
+                else:
+                    await self._deliver_project_task_recovery(
+                        row, duplicate_to_audit=False,
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -1678,6 +1690,39 @@ class DiscordChannel(BaseChannel):
             refreshed = await self.db.get_notification(row["id"])
             if refreshed is None:
                 raise RuntimeError("Completion approval disappeared after task delivery")
+            await inbox.deliver(refreshed)
+        return message_id
+
+    async def _deliver_project_task_recovery(
+        self,
+        row: dict[str, Any],
+        *,
+        duplicate_to_audit: bool = True,
+    ) -> str:
+        """Deliver a blocked-task decision card in its source thread."""
+        inbox = self._approval_inbox
+        if inbox is None:
+            raise RuntimeError("Discord approval inbox is not available")
+        target = str(row.get("target_id") or "").strip()
+        if not target:
+            raise ValueError("Project task recovery target has no thread target")
+        thread = await self._resolve_messageable(target)
+        if (
+            not isinstance(thread, discord.Thread)
+            or int(getattr(thread, "parent_id", 0) or 0)
+            not in self._project_forums
+        ):
+            raise ValueError("Project task recovery target is not a project thread")
+
+        message_id = await inbox.deliver_to_thread(
+            row,
+            thread,
+            metadata_key="discord_project_task_recovery",
+        )
+        if duplicate_to_audit:
+            refreshed = await self.db.get_notification(row["id"])
+            if refreshed is None:
+                raise RuntimeError("Recovery action disappeared after delivery")
             await inbox.deliver(refreshed)
         return message_id
 

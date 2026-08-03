@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 DISCORD_FORUM_TAG_TARGET_KIND = "discord-forum-tag"
 DISCORD_FORUM_TAG_METADATA_KEY = "discord_forum_tag_action"
 DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND = "discord-project-task-completion"
+DISCORD_PROJECT_TASK_RECOVERY_TARGET_KIND = "discord-project-task-recovery"
 DISCORD_AUDIT_FORUM_PROJECT = "AUDIT"
 
 # Project forums use one of these tags as the durable task state.  An
@@ -48,7 +49,9 @@ _PROJECT_TASK_TRANSITIONS = {
     PROJECT_TASK_NEW: frozenset({"ready-for-agent", "blocked", "cancelled"}),
     "backlog": frozenset({"ready-for-agent", "blocked", "cancelled"}),
     "ready-for-agent": frozenset({"in-progress"}),
-    "in-progress": frozenset({"ready-for-user", "blocked", "cancelled"}),
+    "in-progress": frozenset({
+        "ready-for-user", "backlog", "blocked", "cancelled",
+    }),
     "ready-for-user": frozenset({"completed", "blocked", "cancelled"}),
     "blocked": frozenset({"ready-for-agent"}),
     "completed": frozenset(),
@@ -1130,6 +1133,112 @@ def dispatch_discord_project_task_completion(
             "executed": True,
             "project": result["project"],
             "archived": True,
+        },
+    )
+
+
+def dispatch_discord_project_task_recovery(
+    notification: dict[str, Any],
+    target_id: str,
+    decision: str,
+    config: NerveConfig | None,
+    *,
+    answered_by: str = "",
+) -> notification_handlers.DispatchResult:
+    """Release a blocked task and mention the user who chose the action."""
+    base_event: dict[str, Any] = {
+        "event": "approval-acted",
+        "notification_id": notification.get("id", ""),
+        "target_kind": DISCORD_PROJECT_TASK_RECOVERY_TARGET_KIND,
+        "target_id": target_id,
+        "decision": decision,
+    }
+    if decision not in {"cancelled", "backlog", "ready-for-user"}:
+        return notification_handlers.DispatchResult(
+            ok=False,
+            audit_event={
+                **base_event,
+                "ok": False,
+                "executed": False,
+                "error": f"unsupported decision: {decision}",
+            },
+        )
+    if config is None:
+        return notification_handlers.DispatchResult(
+            ok=False,
+            audit_event={
+                **base_event,
+                "ok": False,
+                "executed": False,
+                "error": "Nerve config unavailable",
+            },
+        )
+    actor_prefix, separator, actor_value = str(answered_by).partition(":")
+    if actor_prefix != "discord" or not separator:
+        return notification_handlers.DispatchResult(
+            ok=False,
+            audit_event={
+                **base_event,
+                "ok": False,
+                "executed": False,
+                "error": "recovery action has no Discord user actor",
+            },
+        )
+    try:
+        actor_id = _snowflake(actor_value, "Discord actor id")
+    except DiscordForumTagError as exc:
+        return notification_handlers.DispatchResult(
+            ok=False,
+            audit_event={
+                **base_event,
+                "ok": False,
+                "executed": False,
+                "error": str(exc),
+            },
+        )
+
+    try:
+        result = transition_project_task_status(
+            config,
+            thread_id=target_id,
+            target_status=decision,
+            audit_reason=(
+                "Nerve blocked Discord task recovery approval "
+                f"{notification.get('id', '')}"
+            ),
+        )
+        _discord_request(
+            config.discord,
+            "POST",
+            _snowflake(target_id, "thread id"),
+            {
+                "content": (
+                    f"<@{actor_id}> Task runner claim released: "
+                    f"`{decision}`."
+                ),
+                "allowed_mentions": {"users": [str(actor_id)]},
+            },
+            audit_reason="Nerve task recovery user mention",
+        )
+    except DiscordForumTagError as exc:
+        logger.warning("Blocked project task recovery failed: %s", exc)
+        return notification_handlers.DispatchResult(
+            ok=False,
+            audit_event={
+                **base_event,
+                "ok": False,
+                "executed": False,
+                "error": str(exc),
+            },
+        )
+    return notification_handlers.DispatchResult(
+        ok=True,
+        audit_event={
+            **base_event,
+            "ok": True,
+            "executed": True,
+            "current_status": result["current_status"],
+            "user_mentioned": True,
         },
     )
 

@@ -311,8 +311,12 @@ scans active threads once per poll and always gives the oldest thread carrying
 `in-progress` tag is both the durable work claim and a restart-safe source of
 continuation; the runner resumes the existing, immutably bound planning or
 implementation session and never creates a parallel recovery session. If the
-session mapping or binding is missing or conflicts, the runner fails closed and
-keeps the task ahead of the ready queue. A planning session whose final
+session mapping or binding is missing or conflicts, the runner fails closed,
+keeps the task ahead of the ready queue, and posts one restart-safe decision
+card in the task thread and the approval inbox. The card lets an authorized
+user close the claim as `cancelled`, move it to `backlog`, or hand it to the
+user as `ready-for-user`; after a choice Nerve mentions the user in the task
+thread. A planning session whose final
 assistant message contains a valid plan is handed to the existing
 implementation session; otherwise the same planning session is woken for the
 next poll. The planning session uses the project's configured Codex tier; its
