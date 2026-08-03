@@ -750,6 +750,49 @@ class DiscordApprovalInbox:
             )
             return True
 
+    async def retire(
+        self,
+        *,
+        notification_id: str,
+        reason: str,
+    ) -> bool:
+        """Withdraw an approval that became unnecessary before any choice.
+
+        The durable status changes first, so a concurrent component click is
+        rejected even if an optional Discord card edit subsequently fails.
+        """
+        row = await self.db.get_notification(notification_id)
+        if not isinstance(row, dict):
+            return False
+        if not await self.db.dismiss_notification(notification_id):
+            return False
+        await self._retire_cards(row, reason=reason)
+        return True
+
+    async def _retire_cards(self, row: dict[str, Any], *, reason: str) -> None:
+        """Remove controls from every delivered copy of a withdrawn approval."""
+        for coords in _delivery_coordinates(row):
+            try:
+                thread_id = int(coords["thread_id"])
+                message_id = int(coords["message_id"])
+                thread = self.client.get_channel(thread_id)
+                if thread is None:
+                    thread = await self.client.fetch_channel(thread_id)
+                message = await thread.fetch_message(message_id)
+                embed = _append_embed_status(message, "Status", f"↪ {reason}")
+                edit_kwargs: dict[str, Any] = {
+                    "view": None,
+                    "allowed_mentions": discord.AllowedMentions.none(),
+                }
+                if embed is not None:
+                    edit_kwargs["embed"] = embed
+                await message.edit(**edit_kwargs)
+            except Exception as exc:  # durable dismissal must remain fail-open
+                logger.warning(
+                    "Could not withdraw Discord approval card %s/%s: %s",
+                    coords.get("thread_id"), coords.get("message_id"), exc,
+                )
+
     async def _close_cards(
         self,
         row: dict[str, Any],

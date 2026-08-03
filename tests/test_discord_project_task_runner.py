@@ -309,7 +309,7 @@ async def test_stop_cancels_the_current_task_dispatch(monkeypatch):
 
 def _recovery_runner(
     *,
-    stage: str = "implementation",
+    stage: str | None = "implementation",
     mapped_session_id: str | None = None,
     plan: str | None = None,
     fetched_thread: _Thread | None = None,
@@ -321,7 +321,11 @@ def _recovery_runner(
         SimpleNamespace(id=READY_USER_TAG_ID, name="ready-for-user"),
     )
     session_id = mapped_session_id or f"discord-task:{GUILD_ID}:{thread.id}"
-    metadata = {"discord_task_stage": stage}
+    metadata = (
+        {"discord_task_stage": stage}
+        if stage is not None
+        else {}
+    )
     session = {
         "id": session_id,
         "source": "discord",
@@ -353,6 +357,7 @@ def _recovery_runner(
     runner.db.list_pending_long_command_resumes = AsyncMock(return_value=[])
     runner.db.list_running_long_commands = AsyncMock(return_value=[])
     runner.db.list_notifications_by_target = AsyncMock(return_value=[])
+    runner.db.dismiss_notification = AsyncMock(return_value=True)
     planning_id = f"discord-task-plan:{GUILD_ID}:{thread.id}"
     runner.db.get_messages = AsyncMock(return_value=(
         [{"role": "assistant", "content": plan}] if plan else []
@@ -377,6 +382,72 @@ async def test_in_progress_wakes_the_same_idle_implementation_session():
     assert call["source"] == "wakeup"
     assert call["internal"] is True
     sessions.register_task.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_bound_generic_discord_session_without_stage_is_woken():
+    runner, guild, _thread, sessions = _recovery_runner(
+        stage=None,
+        mapped_session_id="ordinary-discord-session",
+    )
+
+    assert await runner.scan_once(guild) is True
+    task = runner._active_task
+    assert task is not None
+    await task
+
+    call = runner.router.engine.run.await_args.kwargs
+    assert call["session_id"] == "ordinary-discord-session"
+    assert call["source"] == "wakeup"
+    assert call["internal"] is True
+    sessions.register_task.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_resuming_bound_session_withdraws_pending_recovery_action():
+    runner, guild, _thread, _sessions = _recovery_runner(
+        stage=None,
+        mapped_session_id="ordinary-discord-session",
+    )
+    runner.db.list_notifications_by_target = AsyncMock(return_value=[{
+        "id": "discord-task-recovery:1:100:2",
+        "status": "pending",
+    }])
+    audit = AsyncMock()
+    runner.system_audit = audit
+
+    assert await runner.scan_once(guild) is True
+    task = runner._active_task
+    assert task is not None
+    await task
+
+    runner.db.dismiss_notification.assert_awaited_once_with(
+        "discord-task-recovery:1:100:2",
+    )
+    assert "Discord task runner withdrew obsolete recovery action" in [
+        call.args[0] for call in audit.await_args_list
+    ]
+
+
+@pytest.mark.asyncio
+async def test_non_discord_session_is_not_adopted_without_task_stage():
+    runner, guild, _thread, _sessions = _recovery_runner(
+        stage=None,
+        mapped_session_id="ordinary-web-session",
+    )
+    runner.db.get_session = AsyncMock(return_value={
+        "id": "ordinary-web-session",
+        "source": "web",
+        "status": "idle",
+        "metadata": {},
+    })
+
+    assert await runner.scan_once(guild) is True
+    task = runner._active_task
+    assert task is not None
+    await task
+
+    runner.router.engine.run.assert_not_awaited()
 
 
 @pytest.mark.asyncio

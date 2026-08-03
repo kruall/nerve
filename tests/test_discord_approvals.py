@@ -63,6 +63,7 @@ def _inbox(*, thread=None):
     db.list_notifications = AsyncMock(return_value=[])
     db.update_notification = AsyncMock()
     db.get_notification = AsyncMock()
+    db.dismiss_notification = AsyncMock(return_value=True)
     service = MagicMock()
     service.handle_answer = AsyncMock(return_value=True)
     inbox = DiscordApprovalInbox(
@@ -75,6 +76,35 @@ def _inbox(*, thread=None):
     )
     inbox._thread = thread
     return inbox
+
+
+@pytest.mark.asyncio
+async def test_retire_dismisses_notification_and_removes_card_controls():
+    inbox = _inbox()
+    message = MagicMock(spec=discord.Message)
+    message.embeds = []
+    message.edit = AsyncMock()
+    thread = MagicMock()
+    thread.fetch_message = AsyncMock(return_value=message)
+    inbox.client.get_channel.return_value = thread
+    inbox.db.get_notification.return_value = {
+        "id": "recovery-1",
+        "metadata": json.dumps({
+            "discord_project_task_recovery": {
+                "thread_id": str(THREAD_ID),
+                "message_id": str(MESSAGE_ID),
+            },
+        }),
+    }
+
+    assert await inbox.retire(
+        notification_id="recovery-1",
+        reason="Existing Discord session is safe to resume.",
+    )
+
+    inbox.db.dismiss_notification.assert_awaited_once_with("recovery-1")
+    message.edit.assert_awaited_once()
+    assert message.edit.await_args.kwargs["view"] is None
 
 
 def _interaction(message=None, *, user_id: int = USER_ID):

@@ -987,6 +987,10 @@ class DiscordChannel(BaseChannel):
                     project_forums=self._project_forums,
                     notification_service=self._notification_service,
                     system_audit=self.emit_system_event,
+                    retire_recovery_action=(
+                        self._approval_inbox.retire
+                        if self._approval_inbox is not None else None
+                    ),
                     project_prompt=(
                         prompts.prompt_for_thread if prompts is not None else None
                     ),

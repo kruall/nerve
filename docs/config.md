@@ -310,7 +310,10 @@ scans active threads once per poll and always gives the oldest thread carrying
 `in-progress` priority over any new `ready-for-agent` thread. The
 `in-progress` tag is both the durable work claim and a restart-safe source of
 continuation; the runner resumes the existing, immutably bound planning or
-implementation session and never creates a parallel recovery session. If the
+implementation session and never creates a parallel recovery session. A
+pre-existing ordinary Discord session with the same immutable binding is also
+resumed as implementation, so adopting the runner does not invalidate tasks
+already in progress. If the
 session mapping or binding is missing or conflicts, the runner fails closed,
 keeps the task ahead of the ready queue, and posts a restart-safe decision
 card in the task thread and the approval inbox. The card lets an authorized

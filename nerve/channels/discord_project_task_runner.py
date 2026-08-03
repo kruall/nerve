@@ -81,6 +81,7 @@ class DiscordProjectTaskRunner:
         project_prompt: Callable[[int, int], str] | None = None,
         notification_service: Any | None = None,
         system_audit: Callable[..., Any] | None = None,
+        retire_recovery_action: Callable[..., Any] | None = None,
     ) -> None:
         self.nerve_config = config
         self.config: DiscordConfig = config.discord
@@ -90,6 +91,7 @@ class DiscordProjectTaskRunner:
         self.project_prompt = project_prompt
         self.notification_service = notification_service
         self.system_audit = system_audit
+        self.retire_recovery_action = retire_recovery_action
         self._worker_task: asyncio.Task[None] | None = None
         self._active_task: asyncio.Task[None] | None = None
         self._active_session_id: str | None = None
@@ -286,7 +288,12 @@ class DiscordProjectTaskRunner:
         return status
 
     @staticmethod
-    def _session_stage(session: dict[str, Any], session_id: str) -> str:
+    def _session_stage(
+        session: dict[str, Any],
+        session_id: str,
+        *,
+        allow_bound_discord_fallback: bool = False,
+    ) -> str:
         raw_metadata = session.get("metadata")
         if isinstance(raw_metadata, str):
             try:
@@ -300,6 +307,12 @@ class DiscordProjectTaskRunner:
         if session_id.startswith("discord-task-plan:"):
             return "planning"
         if session_id.startswith("discord-task:"):
+            return "implementation"
+        if allow_bound_discord_fallback and session.get("source") == "discord":
+            # A task can already be in progress when its ordinary Discord
+            # session predates the autonomous runner. Its exact immutable
+            # binding has been validated by the caller, so resuming that
+            # same session as implementation is safe and creates no peer.
             return "implementation"
         return ""
 
@@ -328,11 +341,11 @@ class DiscordProjectTaskRunner:
                 session_id,
             )
             return None
-        if session.get("source") == "external":
-            self._last_recovery_error = "saved session belongs to an external runtime"
+        if session.get("source") != "discord":
+            self._last_recovery_error = "saved session is not a Discord session"
             logger.error(
                 "Cannot resume in-progress Discord task %s/%s: session %s "
-                "belongs to an external runtime",
+                "is not a Discord session",
                 project,
                 thread_id,
                 session_id,
@@ -374,7 +387,11 @@ class DiscordProjectTaskRunner:
                 binding.get("thread_id"),
             )
             return None
-        stage = self._session_stage(session, session_id)
+        stage = self._session_stage(
+            session,
+            session_id,
+            allow_bound_discord_fallback=True,
+        )
         if not stage:
             self._last_recovery_error = "saved session has no recognized task stage"
             logger.error(
@@ -572,6 +589,56 @@ class DiscordProjectTaskRunner:
         existing = await self.db.get_notification(notification_base)
         return [existing] if isinstance(existing, dict) else []
 
+    async def _retire_obsolete_recovery_actions(
+        self,
+        guild: Any,
+        thread: Any,
+        project: str,
+    ) -> None:
+        """Withdraw stale recovery controls once a session is safe to resume."""
+        thread_id = int(thread.id)
+        notification_base = f"discord-task-recovery:{int(guild.id)}:{thread_id}"
+        rows = await self._recovery_notifications(notification_base, thread_id)
+        retired = 0
+        for row in rows:
+            if str(row.get("status") or "pending") != "pending":
+                continue
+            notification_id = str(row.get("id") or "").strip()
+            if not notification_id:
+                continue
+            try:
+                retire = self.retire_recovery_action
+                if callable(retire):
+                    result = retire(
+                        notification_id=notification_id,
+                        reason="Existing Discord session is safe to resume.",
+                    )
+                else:
+                    result = self.db.dismiss_notification(notification_id)
+                if inspect.isawaitable(result):
+                    result = await result
+            except Exception:
+                logger.exception(
+                    "Could not withdraw obsolete recovery action for Discord "
+                    "task %s/%s",
+                    project,
+                    thread_id,
+                )
+                continue
+            if result:
+                retired += 1
+        if retired:
+            await self._emit_system_action(
+                thread,
+                project,
+                "Discord task runner withdrew obsolete recovery action",
+                details=(
+                    f"Task: **{getattr(thread, 'name', thread_id)}**\n"
+                    f"Withdrawn recovery cards: `{retired}`."
+                ),
+                state=f"recovery-withdrawn:{retired}",
+            )
+
     async def _emit_system_action(
         self,
         thread: Any,
@@ -722,6 +789,7 @@ class DiscordProjectTaskRunner:
             await self._offer_recovery_action(guild, thread, project)
             return
         session_id, stage = resolved
+        await self._retire_obsolete_recovery_actions(guild, thread, project)
         task_context = await self._task_prompt(thread, project, recovering=True)
         if stage == "planning":
             plan = await self._saved_plan(session_id)
