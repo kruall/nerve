@@ -12,6 +12,7 @@ import pytest
 
 from nerve.channels.base import OutboundMessage
 from nerve.channels.discord import DiscordChannel, split_discord_message
+from nerve.discord_tags import DiscordProjectTaskStatusError
 from nerve.config import NerveConfig
 
 GUILD = 100
@@ -102,6 +103,18 @@ def _channel(
     return channel
 
 
+@pytest.fixture(autouse=True)
+def _stub_project_task_resume(monkeypatch):
+    """Keep unrelated channel tests off the real Discord REST endpoint."""
+    monkeypatch.setattr(
+        "nerve.channels.discord.resume_project_task",
+        lambda *_args, **_kwargs: {
+            "status": "no_op",
+            "current_status": "in-progress",
+        },
+    )
+
+
 def _interaction(
     *, guild_id: int = GUILD, channel_id: int = YDB_THREAD, user_id: int = USER,
 ):
@@ -114,6 +127,10 @@ def _interaction(
     interaction.response.defer = AsyncMock()
     interaction.response.is_done.return_value = True
     interaction.followup.send = AsyncMock()
+    interaction.channel = SimpleNamespace(
+        id=channel_id,
+        parent_id=YDB_FORUM if channel_id == YDB_THREAD else None,
+    )
     return interaction
 
 
@@ -160,7 +177,9 @@ def test_model_command_is_registered_for_configured_guild_only():
     commands = channel._command_tree.get_commands(
         guild=discord.Object(id=GUILD),
     )
-    assert [command.name for command in commands] == ["model", "create-task"]
+    assert [command.name for command in commands] == [
+        "model", "create-task", "close_task",
+    ]
     command = commands[0]
     tier = command.parameters[0]
     assert [choice.value for choice in tier.choices] == [
@@ -168,6 +187,7 @@ def test_model_command_is_registered_for_configured_guild_only():
     ]
     create_task = commands[1]
     assert [parameter.name for parameter in create_task.parameters] == ["project"]
+    assert commands[2].parameters == []
 
 
 @pytest.mark.asyncio
@@ -252,6 +272,75 @@ async def test_create_task_command_rejects_unknown_project_before_modal():
     interaction.response.send_modal.assert_not_awaited()
     interaction.response.send_message.assert_awaited_once_with(
         "Неизвестный проект 'unknown'. Доступны: YDB.", ephemeral=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_close_task_defers_completes_archives_and_retires_bound_session(
+    monkeypatch,
+):
+    channel = _channel()
+    interaction = _interaction()
+    complete = MagicMock(return_value={"current_status": "completed"})
+    monkeypatch.setattr("nerve.channels.discord.complete_project_task", complete)
+    channel.db.get_discord_session_binding_by_thread = AsyncMock(
+        return_value={"session_id": "task-session"},
+    )
+    channel._notification_service = MagicMock()
+    channel._notification_service.retire_completed_project_task_session = (
+        AsyncMock()
+    )
+
+    await channel._handle_close_task_command(interaction)
+
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    complete.assert_called_once_with(
+        channel._nerve_config,
+        thread_id=YDB_THREAD,
+        audit_reason=f"Nerve /close_task by {USER}",
+    )
+    channel._notification_service.retire_completed_project_task_session.assert_awaited_once_with(
+        "task-session",
+    )
+    interaction.followup.send.assert_awaited_once_with(
+        "Задача закрыта и тема архивирована (статус: completed).",
+        ephemeral=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_close_task_rejects_wrong_stage_without_discord_mutation(monkeypatch):
+    channel = _channel()
+    interaction = _interaction()
+    complete = MagicMock(
+        side_effect=DiscordProjectTaskStatusError(
+            "Project task can be closed only from ready-for-user; current status is in-progress",
+        ),
+    )
+    monkeypatch.setattr("nerve.channels.discord.complete_project_task", complete)
+    channel._notification_service = MagicMock()
+
+    await channel._handle_close_task_command(interaction)
+
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    interaction.followup.send.assert_awaited_once_with(
+        "Задача не закрыта: Project task can be closed only from ready-for-user; current status is in-progress",
+        ephemeral=True,
+    )
+    channel._notification_service.retire_completed_project_task_session.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_close_task_rejects_foreign_thread_before_defer():
+    channel = _channel()
+    interaction = _interaction(channel_id=CONVERSATION_THREAD)
+
+    await channel._handle_close_task_command(interaction)
+
+    interaction.response.defer.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once_with(
+        "Откройте /close_task внутри темы задачи проекта Nerve.",
+        ephemeral=True,
     )
 
 
@@ -585,6 +674,94 @@ async def test_conversation_thread_follow_up_dispatches_without_mention():
     assert inbound.channel_key == f"discord:{GUILD}:{CONVERSATION_THREAD}"
     assert inbound.text.endswith("I have more context")
     assert "публичный ответ нужен только когда он полезен" in inbound.text
+
+
+@pytest.mark.asyncio
+async def test_project_mention_resumes_ready_for_user_before_dispatch(monkeypatch):
+    channel = _channel()
+    channel.router.handle_message = AsyncMock()
+    order: list[str] = []
+
+    def resume(*_args, **_kwargs):
+        order.append("resume")
+        return {"current_status": "in-progress"}
+
+    async def dispatch(_message):
+        order.append("dispatch")
+
+    monkeypatch.setattr("nerve.channels.discord.resume_project_task", resume)
+    channel.router.handle_message.side_effect = dispatch
+
+    await channel._ingest(_message(
+        channel_id=YDB_THREAD,
+        parent_id=YDB_FORUM,
+        content=f"<@{DOGGY}> continue implementation",
+    ))
+
+    assert order == ["resume", "dispatch"]
+
+
+@pytest.mark.asyncio
+async def test_project_reply_resumes_ready_for_user_before_dispatch(monkeypatch):
+    channel = _channel()
+    channel.router.handle_message = AsyncMock()
+    resume = MagicMock(return_value={"current_status": "in-progress"})
+    monkeypatch.setattr("nerve.channels.discord.resume_project_task", resume)
+    message = _message(
+        channel_id=YDB_THREAD,
+        parent_id=YDB_FORUM,
+        content="continue implementation",
+        mentions=[],
+        reply_author_id=DOGGY,
+    )
+
+    await channel._ingest(message)
+
+    resume.assert_called_once_with(
+        channel._nerve_config,
+        thread_id=YDB_THREAD,
+        audit_reason=f"Nerve Discord project-task mention/reply {message.id}",
+    )
+    channel.router.handle_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_project_terminal_message_does_not_start_new_turn(monkeypatch):
+    channel = _channel()
+    channel.router.handle_message = AsyncMock()
+    monkeypatch.setattr(
+        "nerve.channels.discord.resume_project_task",
+        lambda *_args, **_kwargs: {"current_status": "completed"},
+    )
+
+    await channel._ingest(_message(
+        channel_id=YDB_THREAD,
+        parent_id=YDB_FORUM,
+    ))
+
+    channel.router.handle_message.assert_not_awaited()
+    channel.db.set_sync_cursor.assert_awaited_once_with(
+        f"discord:{GUILD}:{YDB_THREAD}", "700",
+    )
+
+
+@pytest.mark.asyncio
+async def test_project_resume_failure_keeps_message_retryable(monkeypatch):
+    channel = _channel()
+    channel.router.handle_message = AsyncMock()
+    monkeypatch.setattr(
+        "nerve.channels.discord.resume_project_task",
+        MagicMock(side_effect=RuntimeError("Discord unavailable")),
+    )
+
+    with pytest.raises(RuntimeError, match="Discord unavailable"):
+        await channel._ingest(_message(
+            channel_id=YDB_THREAD,
+            parent_id=YDB_FORUM,
+        ))
+
+    channel.router.handle_message.assert_not_awaited()
+    channel.db.set_sync_cursor.assert_not_awaited()
 
 
 @pytest.mark.asyncio

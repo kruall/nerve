@@ -755,7 +755,7 @@ class NotificationService:
             and result.ok
         )
         if completed_project_task:
-            await self._retire_completed_project_task_session(session_id)
+            await self.retire_completed_project_task_session(session_id)
 
         # Snooze keeps the row pending and stamps ``redeliver_at`` so
         # the periodic maintenance tick (:meth:`redeliver_due`) fans it
@@ -816,7 +816,7 @@ class NotificationService:
 
         return True
 
-    async def _retire_completed_project_task_session(self, session_id: str) -> None:
+    async def retire_completed_project_task_session(self, session_id: str) -> None:
         """Make a completed task session inert before its thread is archived.
 
         A completion dispatcher is mechanical and must never be followed by a

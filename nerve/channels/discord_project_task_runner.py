@@ -23,7 +23,11 @@ Discord forum tags are the sole source of task state; do not use Plane or
 Backlog.md. This task has already been moved to `in-progress` by the
 autonomous task runner. When the task state actually changes, call
 `mcp__nerve__discord_project_task_status` exactly once with the next allowed
-status. Do not infer task completion from a transient session ending.]
+status. The implementation agent hands work back with `ready-for-user`; it
+does not create a completion approval and cannot set `completed`. The user
+closes the task with `/close_task`, which changes it to `completed` and
+archives the thread without another model turn. Do not infer task completion
+from a transient session ending.]
 """
 
 

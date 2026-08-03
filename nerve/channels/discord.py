@@ -38,7 +38,12 @@ from nerve.channels.discord_project_tasks import (
     ProjectTaskCreateModal,
 )
 from nerve.config import NerveConfig
-from nerve.discord_tags import DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND
+from nerve.discord_tags import (
+    DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND,
+    DiscordForumTagError,
+    complete_project_task,
+    resume_project_task,
+)
 
 if TYPE_CHECKING:
     from nerve.channels.router import ChannelRouter
@@ -62,12 +67,14 @@ next allowed status:
 `new-task` -> `ready-for-agent` / `blocked` / `cancelled`;
 `ready-for-agent` -> `in-progress`;
 `in-progress` -> `ready-for-user` / `blocked` / `cancelled`;
-`ready-for-user` -> `completed` / `blocked` / `cancelled`;
+`ready-for-user` -> `blocked` / `cancelled`;
 `blocked` -> `ready-for-agent`.
-Do not infer task completion from a transient session ending. Moving a task to
-`ready-for-user` queues a user confirmation card after this turn's messages;
-only its accepted button changes the task to `completed` and archives the
-thread, without another model turn.]
+Do not infer task completion from a transient session ending. The agent hands
+work back with `ready-for-user`; it does not create a completion approval and
+cannot set `completed`. The user closes the task with `/close_task`, which
+changes it to `completed` and archives the thread without another model turn.
+A direct mention or true reply in `ready-for-user` first changes the task back
+to `in-progress`; other states are not automatically claimed.]
 """
 _TERMINAL_PROJECT_TASK_STATUSES = frozenset({"completed", "cancelled"})
 
@@ -339,6 +346,14 @@ class DiscordChannel(BaseChannel):
                 return []
             return self._project_task_creator.project_choices(current)
 
+        @tree.command(
+            name="close_task",
+            description="Закрыть готовую задачу Nerve и архивировать тему",
+            guild=guild,
+        )
+        async def close_task_command(interaction: discord.Interaction) -> None:
+            await self._handle_close_task_command(interaction)
+
         @client.event
         async def on_ready() -> None:
             await self._on_ready()
@@ -493,6 +508,97 @@ class DiscordChannel(BaseChannel):
                 self._project_task_creator,
                 project_name,
             ),
+        )
+
+    async def _handle_close_task_command(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        """Close the current ready-for-user project task mechanically."""
+        guild_id = int(getattr(interaction, "guild_id", 0) or 0)
+        user_id = int(getattr(getattr(interaction, "user", None), "id", 0) or 0)
+        channel_id = int(getattr(interaction, "channel_id", 0) or 0)
+        if guild_id != self.config.guild_id:
+            await self._respond_to_interaction(
+                interaction,
+                "Эта команда доступна только в настроенном сервере Nerve.",
+            )
+            return
+        if user_id not in self._allowed_authors:
+            await self._respond_to_interaction(
+                interaction,
+                "У вас нет доступа к закрытию задач Nerve.",
+            )
+            return
+
+        channel = getattr(interaction, "channel", None)
+        if channel is None and self._client is not None:
+            channel = self._client.get_channel(channel_id)
+        parent_id = getattr(channel, "parent_id", None)
+        try:
+            parent_id = int(parent_id)
+        except (TypeError, ValueError):
+            parent_id = 0
+        if (
+            not channel_id
+            or not parent_id
+            or parent_id not in self._project_forums
+        ):
+            await self._respond_to_interaction(
+                interaction,
+                "Откройте /close_task внутри темы задачи проекта Nerve.",
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            result = await asyncio.to_thread(
+                complete_project_task,
+                self._nerve_config,
+                thread_id=channel_id,
+                audit_reason=f"Nerve /close_task by {user_id}",
+            )
+        except DiscordForumTagError as exc:
+            await interaction.followup.send(
+                f"Задача не закрыта: {exc}", ephemeral=True,
+            )
+            return
+        except Exception:
+            logger.exception(
+                "Unexpected /close_task failure for Discord thread %s",
+                channel_id,
+            )
+            await interaction.followup.send(
+                "Задача не закрыта из-за внутренней ошибки Nerve.",
+                ephemeral=True,
+            )
+            return
+
+        binding = None
+        try:
+            binding = await self.db.get_discord_session_binding_by_thread(
+                guild_id, channel_id,
+            )
+        except Exception:
+            logger.exception(
+                "Could not resolve the session bound to closed Discord task %s",
+                channel_id,
+            )
+        session_id = str((binding or {}).get("session_id") or "").strip()
+        if session_id and self._notification_service is not None:
+            try:
+                await self._notification_service.retire_completed_project_task_session(
+                    session_id,
+                )
+            except Exception:
+                logger.exception(
+                    "Could not retire session %s after closing Discord task %s",
+                    session_id[:8], channel_id,
+                )
+        await interaction.followup.send(
+            f"Задача закрыта и тема архивирована (статус: "
+            f"{result['current_status']}).",
+            ephemeral=True,
         )
 
     async def create_project_task(
@@ -1008,6 +1114,30 @@ class DiscordChannel(BaseChannel):
                 target = message.channel
                 if int(message.channel.id) in self._text_channels:
                     target = await self._ensure_conversation_thread(message)
+                if (
+                    self._message_scope(message) == "project_forum_thread"
+                    and (
+                        self._has_direct_mention(message)
+                        or self._is_reply_to_bot(message)
+                    )
+                ):
+                    resume_result = await asyncio.to_thread(
+                        resume_project_task,
+                        self._nerve_config,
+                        thread_id=int(message.channel.id),
+                        audit_reason=(
+                            "Nerve Discord project-task mention/reply "
+                            f"{message.id}"
+                        ),
+                    )
+                    if (
+                        resume_result.get("current_status")
+                        in _TERMINAL_PROJECT_TASK_STATUSES
+                    ):
+                        await self._advance_cursor(
+                            int(message.channel.id), message_id,
+                        )
+                        return
                 await self._dispatch(
                     message,
                     target=target,

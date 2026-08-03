@@ -306,7 +306,14 @@ changing the normal implementation model. The worker has one in-memory flight
 across every configured forum, and the
 `in-progress` Discord tag is its durable restart-safe claim. It never starts a
 second task while the first task's turn is running, and it does not infer task
-completion or close threads after that turn.
+completion or close threads after that turn. The implementation agent moves a
+finished task to `ready-for-user`; this does not create an approval card. The
+authorized user closes the task with the guild-scoped `/close_task` command in
+that task thread. Nerve then changes the tag to `completed`, archives the
+thread, and retires the bound session without another model turn. A direct
+mention or true reply to Nerve in `ready-for-user` first returns the task to
+`in-progress`; ordinary context messages and `ready-for-agent` tasks are not
+automatically claimed by that path.
 
 `project_task_runner_instructions` adds trusted, per-project operational policy
 to both the planner and implementation handoff for autonomous tasks. It is
@@ -515,6 +522,15 @@ starter
 message mentions the command's author and contains the description. An
 unmarked task starts in the normal `new-task` lifecycle state. Neither form
 choice starts an agent session directly.
+
+`/close_task` is available in the same guild to `discord.allowed_author_ids`,
+without arguments, but only inside a configured project-task thread whose
+current tag is `ready-for-user`. It changes the tag to `completed`, archives
+the thread, and retires the bound session without creating a model turn. The
+agent status tool can hand work back with `ready-for-user`, but cannot set
+`completed` directly. A mention or true reply to the bot in that state resumes
+the task as `in-progress` before dispatch; unmentioned context does not change
+the lifecycle tag.
 
 ### Discord project-forum tools
 

@@ -16,6 +16,7 @@ from nerve.discord_tags import (
     DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND,
     DiscordProjectTaskStatusError,
     dispatch_discord_project_task_completion,
+    resume_project_task,
     transition_project_task_status,
 )
 from nerve.notifications.service import NotificationService
@@ -188,11 +189,7 @@ async def test_tool_rejects_non_discord_sessions():
 
 
 @pytest.mark.asyncio
-async def test_completed_status_queues_confirmation_instead_of_mutating():
-    service = MagicMock()
-    service.propose_action = AsyncMock(
-        return_value={"notification_id": "approval-complete"},
-    )
+async def test_completed_status_is_rejected_for_agents():
     engine = MagicMock()
     engine.get_active_channel.return_value = "discord"
     engine.router.get_message_context.return_value = {
@@ -203,32 +200,17 @@ async def test_completed_status_queues_confirmation_instead_of_mutating():
     result = await discord_project_task_status_handler(
         ToolContext(
             session_id="s1", config=_config(), engine=engine,
-            notification_service=service,
         ),
         {"status": "completed"},
     )
 
-    assert result.is_error is False
-    assert "No Discord task state changed" in result.content[0]["text"]
-    kwargs = service.propose_action.await_args.kwargs
-    assert kwargs["target_kind"] == DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND
-    assert kwargs["target_id"] == str(THREAD_ID)
-    assert kwargs["defer_discord_until_turn_end"] is True
-    assert kwargs["options"] == [
-        {"label": "Complete & archive", "value": "approve"},
-        {"label": "Keep task open", "value": "decline"},
-    ]
+    assert result.is_error is True
+    assert "/close_task" in result.content[0]["text"]
 
 
 @pytest.mark.asyncio
-async def test_ready_for_user_queues_completion_confirmation_after_handoff(
-    monkeypatch,
-):
+async def test_ready_for_user_handoff_does_not_create_approval(monkeypatch):
     calls = _fake_api(monkeypatch, applied=["302"])
-    service = MagicMock()
-    service.propose_action = AsyncMock(
-        return_value={"notification_id": "approval-complete"},
-    )
     engine = MagicMock()
     engine.get_active_channel.return_value = "discord"
     engine.router.get_message_context.return_value = {
@@ -239,7 +221,6 @@ async def test_ready_for_user_queues_completion_confirmation_after_handoff(
     result = await discord_project_task_status_handler(
         ToolContext(
             session_id="s1", config=_config(), engine=engine,
-            notification_service=service,
         ),
         {"status": "ready-for-user"},
     )
@@ -247,41 +228,52 @@ async def test_ready_for_user_queues_completion_confirmation_after_handoff(
     assert result.is_error is False
     payload = json.loads(result.content[0]["text"])
     assert payload["current_status"] == "ready-for-user"
-    assert payload["completion_confirmation"] == {
-        "notification_id": "approval-complete",
-        "status": "pending",
-    }
     assert [call[:2] for call in calls] == [
         ("GET", THREAD_ID),
         ("GET", FORUM_ID),
         ("PATCH", THREAD_ID),
     ]
-    kwargs = service.propose_action.await_args.kwargs
-    assert kwargs["target_kind"] == DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND
-    assert kwargs["target_id"] == str(THREAD_ID)
-    assert kwargs["defer_discord_until_turn_end"] is True
 
 
-@pytest.mark.asyncio
-async def test_ready_for_user_requires_confirmation_service_before_handoff(
-    monkeypatch,
-):
-    calls = _fake_api(monkeypatch, applied=["302"])
-    engine = MagicMock()
-    engine.get_active_channel.return_value = "discord"
-    engine.router.get_message_context.return_value = {
-        "channel_name": "discord",
-        "target": str(THREAD_ID),
-    }
+def test_resume_only_reclaims_ready_for_user(monkeypatch):
+    calls = _fake_api(monkeypatch, applied=["303"])
 
-    result = await discord_project_task_status_handler(
-        ToolContext(session_id="s1", config=_config(), engine=engine),
-        {"status": "ready-for-user"},
+    result = resume_project_task(
+        _config(), thread_id=THREAD_ID, audit_reason="reply",
     )
 
-    assert result.is_error is True
-    assert "notification service is unavailable" in result.content[0]["text"]
-    assert calls == []
+    assert result["previous_status"] == "ready-for-user"
+    assert result["current_status"] == "in-progress"
+    assert calls[-1][2] == {"applied_tags": ["302"]}
+
+
+def test_resume_does_not_claim_terminal_task(monkeypatch):
+    calls = _fake_api(monkeypatch, applied=["304"])
+
+    result = resume_project_task(
+        _config(), thread_id=THREAD_ID, audit_reason="mention",
+    )
+
+    assert result["status"] == "no_op"
+    assert result["current_status"] == "completed"
+    assert [call[:2] for call in calls] == [
+        ("GET", THREAD_ID), ("GET", FORUM_ID),
+    ]
+
+
+def test_close_rejects_task_not_ready_for_user(monkeypatch):
+    calls = _fake_api(monkeypatch, applied=["301"])
+
+    with pytest.raises(DiscordProjectTaskStatusError, match="only from ready-for-user"):
+        from nerve.discord_tags import complete_project_task
+
+        complete_project_task(
+            _config(), thread_id=THREAD_ID, audit_reason="close",
+        )
+
+    assert [call[:2] for call in calls] == [
+        ("GET", THREAD_ID), ("GET", FORUM_ID),
+    ]
 
 
 def test_approved_completion_changes_tag_then_archives(monkeypatch):

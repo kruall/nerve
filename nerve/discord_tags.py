@@ -830,6 +830,124 @@ class DiscordForumTagManager:
         )
 
 
+def _project_task_state(
+    manager: DiscordForumTagManager,
+    thread_id: Any,
+) -> tuple[str, dict[str, Any], dict[str, str], list[str], str]:
+    """Read and validate one project task while the mutation lock is held."""
+    project, forum_id, thread = manager.fetch_thread(thread_id)
+    if project == DISCORD_AUDIT_FORUM_PROJECT:
+        raise DiscordProjectTaskStatusError(
+            "Task lifecycle statuses apply only to configured project forums"
+        )
+    _, resolved_forum_id, forum = manager.fetch_forum(project)
+    if resolved_forum_id != forum_id:
+        raise DiscordProjectTaskStatusError(
+            "Thread moved outside its configured project forum"
+        )
+
+    available = _forum_tags(forum)
+    by_name: dict[str, list[dict[str, Any]]] = {}
+    for tag in available:
+        by_name.setdefault(str(tag.get("name") or "").casefold(), []).append(tag)
+    missing_or_ambiguous = [
+        status
+        for status in sorted(PROJECT_TASK_STATUSES)
+        if len(by_name.get(status, [])) != 1
+    ]
+    if missing_or_ambiguous:
+        raise DiscordProjectTaskStatusError(
+            "Project forum must contain exactly one tag for every task status; "
+            "invalid: " + ", ".join(missing_or_ambiguous)
+        )
+
+    status_tag_ids = {
+        str(by_name[status][0]["id"]): status
+        for status in PROJECT_TASK_STATUSES
+    }
+    current_ids = list(dict.fromkeys(
+        str(_snowflake(value, "applied tag id"))
+        for value in thread.get("applied_tags", []) or []
+    ))
+    current_statuses = [
+        status_tag_ids[tag_id]
+        for tag_id in current_ids
+        if tag_id in status_tag_ids
+    ]
+    if len(current_statuses) > 1:
+        raise DiscordProjectTaskStatusError(
+            "Project thread has more than one task-status tag: "
+            + ", ".join(sorted(current_statuses))
+        )
+    current = current_statuses[0] if current_statuses else PROJECT_TASK_NEW
+    return project, thread, status_tag_ids, current_ids, current
+
+
+def _apply_project_task_status(
+    manager: DiscordForumTagManager,
+    *,
+    project: str,
+    thread: dict[str, Any],
+    status_tag_ids: dict[str, str],
+    current_ids: list[str],
+    current: str,
+    target: str,
+    audit_reason: str,
+    allow_reopen: bool = False,
+) -> dict[str, Any]:
+    thread_id = str(_snowflake(thread.get("id"), "thread id"))
+    if current == target:
+        return {
+            "status": "already_applied",
+            "project": project,
+            "thread_id": thread_id,
+            "previous_status": current,
+            "current_status": target,
+        }
+    if target not in _PROJECT_TASK_TRANSITIONS[current] and not (
+        allow_reopen
+        and current == "ready-for-user"
+        and target == "in-progress"
+    ):
+        allowed = ", ".join(sorted(_PROJECT_TASK_TRANSITIONS[current])) or "(none)"
+        raise DiscordProjectTaskStatusError(
+            f"Invalid project task transition {current} -> {target}; "
+            f"allowed next statuses: {allowed}"
+        )
+
+    desired_ids = [
+        tag_id for tag_id in current_ids if tag_id not in status_tag_ids
+    ]
+    target_tag_id = next(
+        (tag_id for tag_id, status in status_tag_ids.items() if status == target),
+        None,
+    )
+    if target_tag_id is None:
+        raise DiscordProjectTaskStatusError(
+            f"Project forum has no unique tag for status {target}"
+        )
+    desired_ids.append(target_tag_id)
+    if len(desired_ids) > 5:
+        raise DiscordProjectTaskStatusError(
+            "Discord threads support at most 5 applied tags"
+        )
+    _discord_request(
+        manager.config,
+        "PATCH",
+        int(thread_id),
+        {"applied_tags": desired_ids},
+        audit_reason=audit_reason,
+    )
+    return {
+        "status": "executed",
+        "project": project,
+        "thread_id": thread_id,
+        "previous_status": current,
+        "current_status": target,
+        "applied_tag_ids": desired_ids,
+    }
+
+
 def transition_project_task_status(
     config: NerveConfig,
     *,
@@ -837,13 +955,7 @@ def transition_project_task_status(
     target_status: str,
     audit_reason: str,
 ) -> dict[str, Any]:
-    """Apply one validated lifecycle transition to a project-thread tag.
-
-    The status exists only in Discord: no local task row mirrors or guesses
-    it. The operation re-fetches both the thread and its configured forum,
-    keeps non-status tags intact, and fails closed if the managed tag set is
-    missing, ambiguous, or already inconsistent.
-    """
+    """Apply one validated lifecycle transition to a project-thread tag."""
     target = str(target_status or "").strip().casefold()
     if target not in PROJECT_TASK_STATUSES:
         valid = ", ".join(sorted(PROJECT_TASK_STATUSES))
@@ -853,89 +965,52 @@ def transition_project_task_status(
 
     manager = DiscordForumTagManager(config)
     with _DISCORD_MUTATION_LOCK:
-        project, forum_id, thread = manager.fetch_thread(thread_id)
-        if project == DISCORD_AUDIT_FORUM_PROJECT:
-            raise DiscordProjectTaskStatusError(
-                "Task lifecycle statuses apply only to configured project forums"
-            )
-        _, resolved_forum_id, forum = manager.fetch_forum(project)
-        if resolved_forum_id != forum_id:
-            raise DiscordProjectTaskStatusError(
-                "Thread moved outside its configured project forum"
-            )
+        project, thread, status_tag_ids, current_ids, current = (
+            _project_task_state(manager, thread_id)
+        )
+        return _apply_project_task_status(
+            manager,
+            project=project,
+            thread=thread,
+            status_tag_ids=status_tag_ids,
+            current_ids=current_ids,
+            current=current,
+            target=target,
+            audit_reason=audit_reason,
+        )
 
-        available = _forum_tags(forum)
-        by_name: dict[str, list[dict[str, Any]]] = {}
-        for tag in available:
-            by_name.setdefault(str(tag.get("name") or "").casefold(), []).append(tag)
-        missing_or_ambiguous = [
-            status
-            for status in sorted(PROJECT_TASK_STATUSES)
-            if len(by_name.get(status, [])) != 1
-        ]
-        if missing_or_ambiguous:
-            raise DiscordProjectTaskStatusError(
-                "Project forum must contain exactly one tag for every task status; "
-                "invalid: " + ", ".join(missing_or_ambiguous)
-            )
 
-        status_tag_ids = {
-            str(by_name[status][0]["id"]): status
-            for status in PROJECT_TASK_STATUSES
-        }
-        current_ids = list(dict.fromkeys(
-            str(_snowflake(value, "applied tag id"))
-            for value in thread.get("applied_tags", []) or []
-        ))
-        current_statuses = [
-            status_tag_ids[tag_id]
-            for tag_id in current_ids
-            if tag_id in status_tag_ids
-        ]
-        if len(current_statuses) > 1:
-            raise DiscordProjectTaskStatusError(
-                "Project thread has more than one task-status tag: "
-                + ", ".join(sorted(current_statuses))
-            )
-        current = current_statuses[0] if current_statuses else PROJECT_TASK_NEW
-        if current == target:
+def resume_project_task(
+    config: NerveConfig,
+    *,
+    thread_id: Any,
+    audit_reason: str,
+) -> dict[str, Any]:
+    """Resume only a task handed back by the user for more implementation."""
+    manager = DiscordForumTagManager(config)
+    with _DISCORD_MUTATION_LOCK:
+        project, thread, status_tag_ids, current_ids, current = (
+            _project_task_state(manager, thread_id)
+        )
+        if current != "ready-for-user":
             return {
-                "status": "already_applied",
+                "status": "no_op",
                 "project": project,
                 "thread_id": str(_snowflake(thread.get("id"), "thread id")),
                 "previous_status": current,
-                "current_status": target,
+                "current_status": current,
             }
-        if target not in _PROJECT_TASK_TRANSITIONS[current]:
-            allowed = ", ".join(sorted(_PROJECT_TASK_TRANSITIONS[current])) or "(none)"
-            raise DiscordProjectTaskStatusError(
-                f"Invalid project task transition {current} -> {target}; "
-                f"allowed next statuses: {allowed}"
-            )
-
-        desired_ids = [
-            tag_id for tag_id in current_ids if tag_id not in status_tag_ids
-        ]
-        desired_ids.append(str(by_name[target][0]["id"]))
-        if len(desired_ids) > 5:
-            raise DiscordProjectTaskStatusError(
-                "Discord threads support at most 5 applied tags"
-            )
-        _discord_request(
-            manager.config,
-            "PATCH",
-            _snowflake(thread.get("id"), "thread id"),
-            {"applied_tags": desired_ids},
+        return _apply_project_task_status(
+            manager,
+            project=project,
+            thread=thread,
+            status_tag_ids=status_tag_ids,
+            current_ids=current_ids,
+            current=current,
+            target="in-progress",
             audit_reason=audit_reason,
+            allow_reopen=True,
         )
-        return {
-            "status": "executed",
-            "project": project,
-            "thread_id": str(_snowflake(thread.get("id"), "thread id")),
-            "previous_status": current,
-            "current_status": target,
-            "applied_tag_ids": desired_ids,
-        }
 
 
 def complete_project_task(
@@ -952,21 +1027,35 @@ def complete_project_task(
     appears ready for user review. Repeating the operation is safe because a
     completed tag is accepted idempotently and archiving is idempotent.
     """
-    status_result = transition_project_task_status(
-        config,
-        thread_id=thread_id,
-        target_status="completed",
-        audit_reason=audit_reason,
-    )
-    resolved_thread_id = _snowflake(status_result["thread_id"], "thread id")
-    _discord_request(
-        config.discord,
-        "PATCH",
-        resolved_thread_id,
-        {"archived": True},
-        audit_reason=audit_reason,
-    )
-    return {**status_result, "archived": True}
+    manager = DiscordForumTagManager(config)
+    with _DISCORD_MUTATION_LOCK:
+        project, thread, status_tag_ids, current_ids, current = (
+            _project_task_state(manager, thread_id)
+        )
+        if current not in {"ready-for-user", "completed"}:
+            raise DiscordProjectTaskStatusError(
+                "Project task can be closed only from ready-for-user; "
+                f"current status is {current}"
+            )
+        status_result = _apply_project_task_status(
+            manager,
+            project=project,
+            thread=thread,
+            status_tag_ids=status_tag_ids,
+            current_ids=current_ids,
+            current=current,
+            target="completed",
+            audit_reason=audit_reason,
+        )
+        if not bool(thread.get("archived")):
+            _discord_request(
+                config.discord,
+                "PATCH",
+                _snowflake(status_result["thread_id"], "thread id"),
+                {"archived": True},
+                audit_reason=audit_reason,
+            )
+        return {**status_result, "archived": True}
 
 
 def dispatch_discord_project_task_completion(

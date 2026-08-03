@@ -984,7 +984,6 @@ DISCORD_PROJECT_TASK_STATUS_SCHEMA = {
                 "ready-for-agent",
                 "in-progress",
                 "ready-for-user",
-                "completed",
                 "blocked",
                 "cancelled",
             ],

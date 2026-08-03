@@ -27,7 +27,6 @@ from nerve.channels.discord_project_task_audit import DiscordProjectTaskAuditErr
 from nerve.discord_tags import (
     DISCORD_FORUM_TAG_METADATA_KEY,
     DISCORD_FORUM_TAG_TARGET_KIND,
-    DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND,
     DiscordForumTagError,
     DiscordForumTagManager,
     DiscordProjectTaskStatusError,
@@ -159,49 +158,11 @@ async def discord_project_task_status_handler(
             is_error=True,
         )
     target_status = str(args.get("status") or "").strip().casefold()
-    if target_status in {"completed", "ready-for-user"}:
-        if ctx.notification_service is None:
-            return ToolResult.text(
-                "discord_project_task_status: notification service is unavailable "
-                "to request completion confirmation.",
-                is_error=True,
-            )
-
-    async def request_completion_confirmation() -> dict:
-        assert ctx.notification_service is not None
-        try:
-            return await ctx.notification_service.propose_action(
-                session_id=ctx.session_id,
-                target_kind=DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND,
-                target_id=thread_id,
-                title="Complete and archive project task",
-                body=(
-                    "Mark this task as completed and archive its Discord thread. "
-                    "Nothing changes until this confirmation is accepted."
-                ),
-                options=[
-                    {"label": "Complete & archive", "value": "approve"},
-                    {"label": "Keep task open", "value": "decline"},
-                ],
-                priority="high",
-                defer_discord_until_turn_end=True,
-            )
-        except Exception as exc:
-            raise RuntimeError(
-                "failed to request completion confirmation"
-            ) from exc
-
     if target_status == "completed":
-        try:
-            approval = await request_completion_confirmation()
-        except RuntimeError as exc:
-            return ToolResult.text(
-                f"discord_project_task_status: {exc}",
-                is_error=True,
-            )
         return ToolResult.text(
-            "Project task completion confirmation requested "
-            f"({approval['notification_id']}). No Discord task state changed."
+            "discord_project_task_status: agents cannot complete project tasks "
+            "directly; ask the user to run /close_task in the task thread.",
+            is_error=True,
         )
     try:
         result = await asyncio.to_thread(
@@ -221,19 +182,6 @@ async def discord_project_task_status_handler(
             f"discord_project_task_status: {exc}",
             is_error=True,
         )
-    if target_status == "ready-for-user":
-        try:
-            approval = await request_completion_confirmation()
-        except RuntimeError as exc:
-            return ToolResult.text(
-                "discord_project_task_status: task moved to ready-for-user, but "
-                f"{exc}.",
-                is_error=True,
-            )
-        result["completion_confirmation"] = {
-            "notification_id": approval["notification_id"],
-            "status": "pending",
-        }
     return ToolResult.text(json.dumps(result, ensure_ascii=False, indent=2))
 
 
