@@ -569,11 +569,12 @@ the lifecycle tag.
 
 ### Discord project-forum tools
 
-`discord_project_task_create` lets an agent create an untagged follow-up task
+`discord_project_task_create` lets an agent create a backlog follow-up task
 in a configured `discord.task_forums` project. It accepts the project, title,
 and description, then uses the same validated numbering and Discord creation
-path as `/create-task`. The new thread starts in the `new-task` lifecycle
-state and does not itself trigger an agent session.
+path as `/create-task`. The forum must have exactly one `backlog` lifecycle
+tag; otherwise creation fails before a thread is created. The new thread starts
+in the `backlog` lifecycle state and does not itself trigger an agent session.
 
 Two agent tools expose tag management for forums listed in
 `discord.task_forums` and for `discord.audit_forum_id` under the reserved

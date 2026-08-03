@@ -88,7 +88,9 @@ class DiscordProjectTaskCreator:
             author_id=int(
                 getattr(getattr(interaction, "user", None), "id", 0) or 0
             ),
-            ready_for_agent=ready_for_agent,
+            initial_lifecycle_tag=(
+                _READY_FOR_AGENT_TAG_NAME if ready_for_agent else None
+            ),
         )
 
     async def create_for_agent(
@@ -98,7 +100,7 @@ class DiscordProjectTaskCreator:
         title: str,
         description: str,
         author_id: int | None = None,
-        ready_for_agent: bool = False,
+        initial_lifecycle_tag: str | None = None,
     ) -> tuple[str, int]:
         """Create a task for a Nerve agent using the connected Discord client.
 
@@ -137,8 +139,10 @@ class DiscordProjectTaskCreator:
             raise DiscordProjectTaskCreateError(
                 "Nerve не видит форум выбранного проекта."
             )
-        ready_for_agent_tag = (
-            self._ready_for_agent_tag(forum) if ready_for_agent else None
+        lifecycle_tag = (
+            self._lifecycle_tag(forum, initial_lifecycle_tag)
+            if initial_lifecycle_tag is not None
+            else None
         )
 
         lock = self._forum_locks.setdefault(forum_id, asyncio.Lock())
@@ -161,8 +165,8 @@ class DiscordProjectTaskCreator:
                     "Заголовок слишком длинный для имени Discord-треда."
                 )
             create_kwargs: dict[str, Any] = {}
-            if ready_for_agent_tag is not None:
-                create_kwargs["applied_tags"] = [ready_for_agent_tag]
+            if lifecycle_tag is not None:
+                create_kwargs["applied_tags"] = [lifecycle_tag]
             try:
                 created = await forum.create_thread(
                     name=thread_name,
@@ -185,16 +189,17 @@ class DiscordProjectTaskCreator:
             return task_id, int(created.thread.id)
 
     @staticmethod
-    def _ready_for_agent_tag(forum: Any) -> Any:
+    def _lifecycle_tag(forum: Any, name: str) -> Any:
+        tag_name = name.strip().casefold()
         matches = [
             tag
             for tag in list(getattr(forum, "available_tags", []) or [])
             if str(getattr(tag, "name", "") or "").casefold()
-            == _READY_FOR_AGENT_TAG_NAME
+            == tag_name
         ]
         if len(matches) != 1:
             raise DiscordProjectTaskCreateError(
-                "Форум проекта должен содержать ровно один тег ready-for-agent."
+                f"Форум проекта должен содержать ровно один тег {tag_name}."
             )
         return matches[0]
 

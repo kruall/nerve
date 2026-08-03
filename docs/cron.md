@@ -321,7 +321,7 @@ These ship in `~/.nerve/cron/system.yaml` and are managed by `nerve init`. Runni
 | `task-planner` | Every 4 hours | persistent (168h rotation) | Reviews open tasks, explores codebases, proposes implementation plans via plan-approve workflow. Gated on `tasks` (status `pending`) — stays idle when there's nothing to plan. | ✅ default | ✅ default |
 | `skill-extractor` | Every 12 hours | persistent | Identifies repeated workflows from recent conversations, memory, and completed tasks. Proposes new skills via task+plan system. | ✅ optional | ✅ default |
 | `skill-reviser` | Weekly (Sun 3 AM) | persistent | Reviews existing skills for accuracy (outdated paths, credentials), completeness (missing steps), and quality (trigger phrases, examples). Proposes revisions via task+plan. | ✅ optional | ✅ default |
-| `project-task-auditor` | Every 4 hours | isolated, locked | Reads active and archived completed Discord project tasks, compares requested scope with transcript/git/API/runtime evidence, and records a verification or creates one precise untagged follow-up task. It never reopens or mutates the completed task. | ✅ default | ✅ default |
+| `project-task-auditor` | Every 4 hours | isolated, locked | Reads active and archived completed Discord project tasks, compares requested scope with transcript/git/API/runtime evidence, and records a verification or creates one precise backlog follow-up task. It never reopens or mutates the completed task. | ✅ default | ✅ default |
 
 **Mode defaults:**
 - **Personal** — `memory-maintenance` (always on) + `inbox-processor` + `task-planner` + `project-task-auditor` enabled by default. `model-routing-auditor`, `skill-extractor`, and `skill-reviser` are presented as optional during `nerve init`.

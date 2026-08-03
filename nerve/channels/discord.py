@@ -624,6 +624,7 @@ class DiscordChannel(BaseChannel):
             project=project,
             title=title,
             description=description,
+            initial_lifecycle_tag="backlog",
         )
 
     def _project_task_auditor(self) -> Any:

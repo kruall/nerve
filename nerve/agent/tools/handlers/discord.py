@@ -189,7 +189,7 @@ async def discord_project_task_create_handler(
     ctx: ToolContext,
     args: dict,
 ) -> ToolResult:
-    """Create a new untagged task in a configured Discord project forum."""
+    """Create a new backlog task in a configured Discord project forum."""
     if ctx.config is None:
         return ToolResult.text(
             "discord_project_task_create: Nerve config is unavailable.",
@@ -400,9 +400,10 @@ DISCORD_PROJECT_TASK_STATUS_SPEC = ToolSpec(
 DISCORD_PROJECT_TASK_CREATE_SPEC = ToolSpec(
     name="discord_project_task_create",
     description=(
-        "Create a new untagged task in a configured Discord project forum. "
+        "Create a new backlog task in a configured Discord project forum. "
         "Use when the user asks to create a task or when an actionable problem "
-        "should be captured for follow-up. The task starts in the new-task state."
+        "should be captured for follow-up. The forum must contain exactly one "
+        "backlog lifecycle tag. The task does not start an autonomous agent."
     ),
     input_schema=DISCORD_PROJECT_TASK_CREATE_SCHEMA,
     handler=discord_project_task_create_handler,

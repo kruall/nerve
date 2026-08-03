@@ -44,11 +44,12 @@ def _creator(*, tags):
 
 
 @pytest.mark.asyncio
-async def test_ready_for_agent_task_starts_with_lifecycle_tag():
+async def test_create_task_with_checkbox_starts_with_ready_for_agent_tag():
     ready_tag = SimpleNamespace(id=301, name="ready-for-agent")
     creator, forum = _creator(tags=[ready_tag])
 
-    task_id, thread_id = await creator.create_for_agent(
+    task_id, thread_id = await creator.create(
+        SimpleNamespace(guild_id=GUILD_ID, user=SimpleNamespace(id=10)),
         project="NERVE",
         title="Record an actionable problem",
         description="Create a follow-up task when the agent finds it.",
@@ -60,32 +61,59 @@ async def test_ready_for_agent_task_starts_with_lifecycle_tag():
 
 
 @pytest.mark.asyncio
-async def test_unmarked_task_remains_new_task():
+async def test_create_task_without_checkbox_remains_new_task():
     creator, forum = _creator(tags=[SimpleNamespace(id=301, name="ready-for-agent")])
 
-    await creator.create_for_agent(
+    await creator.create(
+        SimpleNamespace(guild_id=GUILD_ID, user=SimpleNamespace(id=10)),
         project="NERVE",
         title="Human task",
         description="Keep the task in triage.",
-        author_id=10,
     )
 
     assert "applied_tags" not in forum.create_thread.await_args.kwargs
 
 
 @pytest.mark.asyncio
-async def test_ready_for_agent_task_requires_one_lifecycle_tag():
+@pytest.mark.parametrize(
+    "tags",
+    [
+        [],
+        [
+            SimpleNamespace(id=301, name="backlog"),
+            SimpleNamespace(id=302, name="BACKLOG"),
+        ],
+    ],
+)
+async def test_backlog_task_requires_one_lifecycle_tag(tags):
     creator, forum = _creator(tags=[])
+    forum.available_tags = tags
 
     with pytest.raises(
         DiscordProjectTaskCreateError,
-        match="ровно один тег ready-for-agent",
+        match="ровно один тег backlog",
     ):
         await creator.create_for_agent(
             project="NERVE",
             title="Record an actionable problem",
             description="Create a follow-up task when the agent finds it.",
-            ready_for_agent=True,
+            initial_lifecycle_tag="backlog",
         )
 
     forum.create_thread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_backlog_task_starts_with_only_backlog_tag():
+    ready_tag = SimpleNamespace(id=301, name="ready-for-agent")
+    backlog_tag = SimpleNamespace(id=302, name="backlog")
+    creator, forum = _creator(tags=[ready_tag, backlog_tag])
+
+    await creator.create_for_agent(
+        project="NERVE",
+        title="Agent follow-up",
+        description="Put the follow-up in the backlog.",
+        initial_lifecycle_tag="backlog",
+    )
+
+    assert forum.create_thread.await_args.kwargs["applied_tags"] == [backlog_tag]

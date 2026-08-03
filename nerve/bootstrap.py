@@ -91,7 +91,7 @@ PRODUCTIVITY_CRONS = [
             "complete_discord_project_task_audit(result=\"verified\") exactly "
             "once for it.\n"
             "4. For a concrete defect, a missing required proof, or a material "
-            "improvement, create exactly one precise untagged task with "
+            "improvement, create exactly one precise backlog task with "
             "discord_project_task_create in the same project, then call "
             "complete_discord_project_task_audit(result=\"follow-up-created\") "
             "with its returned task ID. Never reopen or retag the completed task "

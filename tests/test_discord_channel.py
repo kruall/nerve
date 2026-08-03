@@ -191,6 +191,28 @@ def test_model_command_is_registered_for_configured_guild_only():
 
 
 @pytest.mark.asyncio
+async def test_agent_project_task_create_starts_in_backlog():
+    channel = _channel(task_forums={"NERVE": NERVE_FORUM})
+    channel._project_task_creator.create_for_agent = AsyncMock(
+        return_value=("NERVE-30", NERVE_THREAD),
+    )
+
+    result = await channel.create_project_task(
+        project="NERVE",
+        title="Create backlog follow-up",
+        description="A tool-created task must not be ready for an agent.",
+    )
+
+    assert result == ("NERVE-30", NERVE_THREAD)
+    channel._project_task_creator.create_for_agent.assert_awaited_once_with(
+        project="NERVE",
+        title="Create backlog follow-up",
+        description="A tool-created task must not be ready for an agent.",
+        initial_lifecycle_tag="backlog",
+    )
+
+
+@pytest.mark.asyncio
 async def test_create_task_command_opens_modal_and_uses_next_project_number():
     channel = _channel(task_forums={"YDB": YDB_FORUM, "NERVE": NERVE_FORUM})
     forum = MagicMock()
