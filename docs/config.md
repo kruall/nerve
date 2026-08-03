@@ -297,17 +297,24 @@ sent to the individual thread.
 
 When `project_task_runner_enabled` is enabled, completed Discord post-ready
 initialization starts one polling worker for all configured project forums. It
-selects the oldest active thread carrying exactly one `ready-for-agent` tag,
-changes that tag to `in-progress`, and first starts a planning session bound to
-that thread. The planning session uses the project's configured Codex tier;
-its plan is handed to a separate implementation session, which uses the
-ordinary global default tier. This lets a stronger model plan the work without
-changing the normal implementation model. The worker has one in-memory flight
-across every configured forum, and the
-`in-progress` Discord tag is its durable restart-safe claim. It never starts a
-second task while the first task's turn is running, and it does not infer task
-completion or close threads after that turn. The implementation agent moves a
-finished task to `ready-for-user`; this does not create an approval card. The
+scans active threads once per poll and always gives the oldest thread carrying
+`in-progress` priority over any new `ready-for-agent` thread. The
+`in-progress` tag is both the durable work claim and a restart-safe source of
+continuation; the runner resumes the existing, immutably bound planning or
+implementation session and never creates a parallel recovery session. If the
+session mapping or binding is missing or conflicts, the runner fails closed and
+keeps the task ahead of the ready queue. A planning session whose final
+assistant message contains a valid plan is handed to the existing
+implementation session; otherwise the same planning session is woken for the
+next poll. The planning session uses the project's configured Codex tier; its
+plan is handed to a separate implementation session, which uses the ordinary
+global default tier. This lets a stronger model plan the work without changing
+the normal implementation model. The worker has one in-memory flight across
+every configured forum, avoids duplicate running, restart, wakeup, and
+detached-command continuations, and re-reads the task tag after each internal
+turn. It does not infer task completion or close threads after that turn. The
+implementation agent moves a finished task to `ready-for-user`; this does not
+create an approval card. The
 authorized user closes the task with the guild-scoped `/close_task` command in
 that task thread. Nerve then changes the tag to `completed`, archives the
 thread, and retires the bound session without another model turn. A direct

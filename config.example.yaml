@@ -126,7 +126,9 @@ discord:
   #   NERVE: 123456789012345681
   # Opt-in autonomous task selection. Nerve scans all configured project
   # forums, claims the oldest `ready-for-agent` task, and runs only one such
-  # task session at a time.
+  # task session at a time. Existing in-progress tasks have priority over new
+  # ready-for-agent tasks and are resumed through their bound session after a
+  # restart.
   # project_task_runner_enabled: false
   # project_task_runner_poll_interval_seconds: 60
   # Optional trusted local policy added only to autonomous planning and

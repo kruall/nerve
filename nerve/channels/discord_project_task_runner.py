@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import json
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -14,6 +16,7 @@ from nerve.discord_tags import PROJECT_TASK_STATUSES, transition_project_task_st
 logger = logging.getLogger(__name__)
 
 _READY_STATUS = "ready-for-agent"
+_IN_PROGRESS_STATUS = "in-progress"
 _MAX_TRANSCRIPT_MESSAGES = 10
 _MAX_TRANSCRIPT_CHARS = 12_000
 _MAX_PLAN_CHARS = 20_000
@@ -42,12 +45,13 @@ def _project_task_policy(project: str, instructions: str) -> str:
 
 
 class DiscordProjectTaskRunner:
-    """Plan then execute the oldest ready project task without parallel work.
+    """Plan, resume, and execute one Discord project task at a time.
 
     The Discord lifecycle tag is the durable work claim. The in-memory task is
     set before that claim is attempted, so overlapping polls do not start two
-    sessions while Discord is being updated. After a restart an already-claimed
-    task remains ``in-progress`` and is not picked a second time.
+    sessions while Discord is being updated. An ``in-progress`` task is also a
+    durable restart-safe continuation claim: it always takes precedence over a
+    new ready task and is resumed only through its existing bound session.
 
     A project-specific Codex tier is reserved for the planning session. The
     execution session is created without that override, so it receives the
@@ -109,18 +113,25 @@ class DiscordProjectTaskRunner:
             await asyncio.sleep(interval)
 
     async def scan_once(self, guild: Any) -> bool:
-        """Launch at most one ready task; return whether one was launched."""
+        """Launch at most one task continuation; return whether it was launched."""
         if self._active_task is not None and not self._active_task.done():
             return False
         self._active_task = None
         self._active_session_id = None
 
-        candidates = await self._ready_threads(guild)
+        in_progress, ready = await self._task_threads(guild)
+        # An old claim blocks the queue even when its session is damaged. This
+        # makes the failure visible and prevents a newer task from overtaking
+        # work that the user already entrusted to the runner.
+        candidates = in_progress or ready
         if not candidates:
             return False
         thread, project = candidates[0]
         task = asyncio.create_task(
-            self._run_candidate(guild, thread, project),
+            self._run_candidate(
+                guild, thread, project,
+                recovering=bool(in_progress),
+            ),
             name=f"discord-project-task:{int(thread.id)}",
         )
         self._active_task = task
@@ -133,25 +144,52 @@ class DiscordProjectTaskRunner:
             self._active_session_id = None
 
     async def _run_candidate(
-        self, guild: Any, thread: Any, project: str,
+        self,
+        guild: Any,
+        thread: Any,
+        project: str,
+        *,
+        recovering: bool,
     ) -> None:
         try:
-            await self._claim_and_dispatch(guild, thread, project)
+            if recovering:
+                await self._resume_in_progress(guild, thread, project)
+                await self._reread_status(guild, thread)
+            else:
+                await self._claim_and_dispatch(guild, thread, project)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("Discord project-task dispatch failed")
 
-    async def _ready_threads(self, guild: Any) -> list[tuple[Any, str]]:
+    async def _task_threads(
+        self, guild: Any,
+    ) -> tuple[list[tuple[Any, str]], list[tuple[Any, str]]]:
+        """Read task statuses from one active-thread snapshot.
+
+        Discord task IDs are snowflakes, so sorting by ID is deterministic and
+        matches the creation order used by the project-task creator.
+        """
         threads = await guild.active_threads()
-        candidates: list[tuple[Any, str]] = []
+        in_progress: list[tuple[Any, str]] = []
+        ready: list[tuple[Any, str]] = []
         for thread in threads:
             parent_id = int(getattr(thread, "parent_id", 0) or 0)
             project = self.project_forums.get(parent_id)
-            if not project or self._task_status(guild, thread) != _READY_STATUS:
+            if not project:
                 continue
-            candidates.append((thread, project))
-        return sorted(candidates, key=lambda item: int(item[0].id))
+            status = self._task_status(guild, thread)
+            if status == _IN_PROGRESS_STATUS:
+                in_progress.append((thread, project))
+            elif status == _READY_STATUS:
+                ready.append((thread, project))
+        key = lambda item: int(item[0].id)
+        return sorted(in_progress, key=key), sorted(ready, key=key)
+
+    async def _ready_threads(self, guild: Any) -> list[tuple[Any, str]]:
+        """Compatibility helper for callers that only need ready tasks."""
+        _in_progress, ready = await self._task_threads(guild)
+        return ready
 
     def _task_status(self, guild: Any, thread: Any) -> str:
         parent_id = int(getattr(thread, "parent_id", 0) or 0)
@@ -173,6 +211,324 @@ class DiscordProjectTaskRunner:
                 statuses.add(name)
         return next(iter(statuses)) if len(statuses) == 1 else ""
 
+    async def _reread_status(self, guild: Any, thread: Any) -> str:
+        """Re-read the task tag after a continuation, when Discord supports it."""
+        current = thread
+        fetch_channel = getattr(guild, "fetch_channel", None)
+        if callable(fetch_channel):
+            try:
+                fetched = fetch_channel(int(thread.id))
+                if inspect.isawaitable(fetched):
+                    fetched = await fetched
+                if fetched is not None and hasattr(fetched, "applied_tags"):
+                    current = fetched
+            except Exception:
+                logger.warning(
+                    "Failed to re-read Discord task status for thread %s",
+                    thread.id,
+                    exc_info=True,
+                )
+        status = self._task_status(guild, current)
+        logger.info(
+            "Discord project task %s status after continuation: %s",
+            thread.id,
+            status or "unknown",
+        )
+        return status
+
+    @staticmethod
+    def _session_stage(session: dict[str, Any], session_id: str) -> str:
+        raw_metadata = session.get("metadata")
+        if isinstance(raw_metadata, str):
+            try:
+                raw_metadata = json.loads(raw_metadata)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                raw_metadata = {}
+        metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+        stage = str(metadata.get("discord_task_stage") or "").strip()
+        if stage in {"planning", "implementation"}:
+            return stage
+        if session_id.startswith("discord-task-plan:"):
+            return "planning"
+        if session_id.startswith("discord-task:"):
+            return "implementation"
+        return ""
+
+    async def _validate_existing_session(
+        self,
+        session_id: str,
+        *,
+        guild_id: int,
+        thread_id: int,
+        project: str,
+    ) -> tuple[dict[str, Any], str] | None:
+        """Resolve only an existing, correctly-bound Nerve session.
+
+        Recovery must never repair an ambiguous mapping by creating another
+        session. A missing binding is as unsafe as a conflicting one because
+        the session could otherwise write into a different Discord thread.
+        """
+        session = await self.db.get_session(session_id)
+        if not isinstance(session, dict):
+            logger.error(
+                "Cannot resume in-progress Discord task %s/%s: session %s "
+                "does not exist",
+                project,
+                thread_id,
+                session_id,
+            )
+            return None
+        if session.get("source") == "external":
+            logger.error(
+                "Cannot resume in-progress Discord task %s/%s: session %s "
+                "belongs to an external runtime",
+                project,
+                thread_id,
+                session_id,
+            )
+            return None
+        if str(session.get("status") or "") == "archived":
+            logger.error(
+                "Cannot resume in-progress Discord task %s/%s: session %s "
+                "is archived",
+                project,
+                thread_id,
+                session_id,
+            )
+            return None
+        binding = await self.db.get_discord_session_binding(session_id)
+        if not isinstance(binding, dict):
+            logger.error(
+                "Cannot resume in-progress Discord task %s/%s: session %s "
+                "has no immutable Discord binding",
+                project,
+                thread_id,
+                session_id,
+            )
+            return None
+        if (
+            str(binding.get("guild_id")) != str(guild_id)
+            or str(binding.get("thread_id")) != str(thread_id)
+        ):
+            logger.error(
+                "Cannot resume in-progress Discord task %s/%s: session %s "
+                "binding conflicts with the task thread (guild=%s, thread=%s)",
+                project,
+                thread_id,
+                session_id,
+                binding.get("guild_id"),
+                binding.get("thread_id"),
+            )
+            return None
+        stage = self._session_stage(session, session_id)
+        if not stage:
+            logger.error(
+                "Cannot resume in-progress Discord task %s/%s: session %s "
+                "has no recognized task stage",
+                project,
+                thread_id,
+                session_id,
+            )
+            return None
+        return session, stage
+
+    async def _resolve_existing_task_session(
+        self,
+        guild: Any,
+        thread: Any,
+        project: str,
+    ) -> tuple[str, str] | None:
+        """Resolve the mapping first, then deterministic crash-window IDs."""
+        guild_id = int(guild.id)
+        thread_id = int(thread.id)
+        channel_key = f"discord:{guild_id}:{thread_id}"
+        mapping = await self.db.get_channel_session(channel_key)
+        mapped_id = str((mapping or {}).get("session_id") or "").strip()
+        if mapped_id:
+            validated = await self._validate_existing_session(
+                mapped_id,
+                guild_id=guild_id,
+                thread_id=thread_id,
+                project=project,
+            )
+            return (mapped_id, validated[1]) if validated else None
+
+        candidates = (
+            f"discord-task:{guild_id}:{thread_id}",
+            f"discord-task-plan:{guild_id}:{thread_id}",
+        )
+        for session_id in candidates:
+            session = await self.db.get_session(session_id)
+            if session is None:
+                continue
+            validated = await self._validate_existing_session(
+                session_id,
+                guild_id=guild_id,
+                thread_id=thread_id,
+                project=project,
+            )
+            return (session_id, validated[1]) if validated else None
+        logger.error(
+            "Cannot resume in-progress Discord task %s/%s: no existing "
+            "implementation or planning session was found",
+            project,
+            thread_id,
+        )
+        return None
+
+    async def _saved_plan(self, planning_session_id: str) -> str | None:
+        messages = await self.db.get_messages(planning_session_id, limit=50)
+        if not messages:
+            return None
+        last = messages[-1]
+        if str(last.get("role") or "") != "assistant":
+            return None
+        plan = str(last.get("content") or "").strip()
+        if not plan or len(plan) > _MAX_PLAN_CHARS:
+            return None
+        return plan
+
+    async def _has_pending_continuation(self, session_id: str) -> bool:
+        engine = self.router.engine
+        sessions = engine.sessions
+        if sessions.is_running(session_id):
+            logger.info(
+                "In-progress Discord task session %s is already running",
+                session_id,
+            )
+            return True
+        running_tasks = getattr(sessions, "_running_tasks", {})
+        registered = (
+            running_tasks.get(session_id)
+            if isinstance(running_tasks, dict) else None
+        )
+        if registered is not None and not registered.done():
+            logger.info(
+                "In-progress Discord task session %s already has a "
+                "registered continuation",
+                session_id,
+            )
+            return True
+        recovery_sessions = getattr(engine, "_restart_recovery_sessions", set())
+        if (
+            isinstance(recovery_sessions, (set, frozenset, list, tuple))
+            and session_id in recovery_sessions
+        ):
+            logger.info(
+                "In-progress Discord task session %s has pending restart recovery",
+                session_id,
+            )
+            return True
+        recovery = getattr(self.db, "get_session_run_recovery", None)
+        if callable(recovery):
+            row = recovery(session_id)
+            if inspect.isawaitable(row):
+                row = await row
+            if row:
+                logger.info(
+                    "In-progress Discord task session %s has a recovery checkpoint",
+                    session_id,
+                )
+                return True
+        for method_name in (
+            "list_pending_wakeups",
+            "list_pending_long_command_resumes",
+            "list_running_long_commands",
+        ):
+            method = getattr(self.db, method_name, None)
+            if not callable(method):
+                continue
+            rows = (
+                method()
+                if "list_pending_wakeups" not in method_name
+                else method(session_id)
+            )
+            if inspect.isawaitable(rows):
+                rows = await rows
+            if not isinstance(rows, (list, tuple)):
+                rows = ()
+            if any(
+                isinstance(row, dict) and str(row.get("session_id")) == session_id
+                for row in rows
+            ):
+                logger.info(
+                    "In-progress Discord task session %s has pending %s",
+                    session_id,
+                    method_name,
+                )
+                return True
+        pending_model = getattr(engine, "_pending_model_tier_continuations", {})
+        return isinstance(pending_model, dict) and session_id in pending_model
+
+    async def _run_internal_continuation(
+        self, session_id: str, prompt: str,
+    ) -> None:
+        """Run a recovery turn through engine single-flight/stop tracking."""
+        engine = self.router.engine
+        self._active_session_id = session_id
+        task = asyncio.create_task(
+            engine.run(
+                session_id=session_id,
+                user_message=prompt,
+                source="wakeup",
+                channel="discord",
+                internal=True,
+            ),
+            name=f"discord-project-task-wakeup:{session_id}",
+        )
+        engine.sessions.register_task(session_id, task)
+        await task
+
+    async def _resume_in_progress(
+        self, guild: Any, thread: Any, project: str,
+    ) -> None:
+        resolved = await self._resolve_existing_task_session(guild, thread, project)
+        if resolved is None:
+            return
+        session_id, stage = resolved
+        task_context = await self._task_prompt(thread, project, recovering=True)
+        if stage == "planning":
+            plan = await self._saved_plan(session_id)
+            if plan is None:
+                if await self._has_pending_continuation(session_id):
+                    return
+                await self._run_internal_continuation(
+                    session_id,
+                    self._planning_recovery_prompt(task_context),
+                )
+                return
+            implementation_id = f"discord-task:{int(guild.id)}:{int(thread.id)}"
+            existing = await self.db.get_session(implementation_id)
+            if existing is not None:
+                validated = await self._validate_existing_session(
+                    implementation_id,
+                    guild_id=int(guild.id),
+                    thread_id=int(thread.id),
+                    project=project,
+                )
+                if validated is None:
+                    return
+            await self._start_implementation(
+                guild,
+                thread,
+                project,
+                task_context,
+                plan,
+                session_id=implementation_id,
+                internal=True,
+            )
+            return
+
+        plan = await self._saved_plan(
+            f"discord-task-plan:{int(guild.id)}:{int(thread.id)}",
+        )
+        if await self._has_pending_continuation(session_id):
+            return
+        await self._run_internal_continuation(
+            session_id,
+            self._implementation_recovery_prompt(task_context, plan),
+        )
+
     async def _claim_and_dispatch(
         self,
         guild: Any,
@@ -190,11 +546,6 @@ class DiscordProjectTaskRunner:
             return
 
         metadata = self._metadata(guild, thread, project)
-        execution_create_args: dict[str, Any] = {
-            "source": "discord",
-            "title": f"Discord · {project} · {getattr(thread, 'name', channel_id)}",
-            "metadata": metadata,
-        }
         planning_session_id = f"discord-task-plan:{int(guild.id)}:{channel_id}"
         planning_metadata = {**metadata, "discord_task_stage": "planning"}
         planning_create_args: dict[str, Any] = {
@@ -242,25 +593,60 @@ class DiscordProjectTaskRunner:
                 "Discord task planner returned a plan exceeding the handoff limit"
             )
 
-        execution_metadata = {**metadata, "discord_task_stage": "implementation"}
-        execution_create_args["metadata"] = execution_metadata
-        await self.router.engine.sessions.get_or_create(
-            session_id, **execution_create_args,
+        await self._start_implementation(
+            guild,
+            thread,
+            project,
+            task_context,
+            plan,
+            session_id=session_id,
+            internal=False,
         )
+
+    async def _start_implementation(
+        self,
+        guild: Any,
+        thread: Any,
+        project: str,
+        task_context: str,
+        plan: str,
+        *,
+        session_id: str,
+        internal: bool,
+    ) -> None:
+        """Create/reuse the implementation session and launch its first turn."""
+        channel_id = int(thread.id)
+        channel_key = f"discord:{int(guild.id)}:{channel_id}"
+        metadata = {
+            **self._metadata(guild, thread, project),
+            "discord_task_stage": "implementation",
+        }
+        title = f"Discord · {project} · {getattr(thread, 'name', channel_id)}"
+        create_args: dict[str, Any] = {
+            "source": "discord",
+            "title": title,
+            "metadata": metadata,
+        }
+        await self.router.engine.sessions.get_or_create(session_id, **create_args)
         await self.router.engine.sessions.set_active_session(channel_key, session_id)
         await self.db.bind_discord_session(
             session_id, guild_id=int(guild.id), thread_id=channel_id,
         )
-
+        prompt = self._implementation_prompt(task_context, plan)
+        if internal:
+            if await self._has_pending_continuation(session_id):
+                return
+            await self._run_internal_continuation(session_id, prompt)
+            return
         self._active_session_id = session_id
         await self.router.handle_message(InboundMessage(
             channel_name="discord",
             channel_key=channel_key,
             sender_id=str(channel_id),
             session_id=session_id,
-            session_title=execution_create_args["title"],
-            text=self._implementation_prompt(task_context, plan),
-            metadata=execution_metadata,
+            session_title=title,
+            text=prompt,
+            metadata=metadata,
             steer_if_busy=True,
         ))
 
@@ -290,17 +676,31 @@ class DiscordProjectTaskRunner:
             "reasoning_effort": tier.effort,
         }
 
-    async def _task_prompt(self, thread: Any, project: str) -> str:
+    async def _task_prompt(
+        self, thread: Any, project: str, *, recovering: bool = False,
+    ) -> str:
         prompt = (
             self.project_prompt(int(thread.parent_id), int(thread.id))
             if self.project_prompt is not None else ""
         )
         transcript = await self._thread_transcript(thread)
+        if recovering:
+            task_header = (
+                "[Autonomous Discord project task recovery]\n"
+                f"The task in project {project} is still `in-progress` after a "
+                "restart or interrupted turn. Continue from the actual session "
+                "and workspace state."
+            )
+        else:
+            task_header = (
+                "[Autonomous Discord project task]\n"
+                f"The task in project {project} was selected because its tag was "
+                "`ready-for-agent`. It is now `in-progress`."
+            )
         sections = [
-            "[Autonomous Discord project task]\n"
-            f"The task in project {project} was selected because its tag was "
-            "`ready-for-agent`. It is now `in-progress`. Work only on this "
-            "task and report intentionally through `discord_send` when useful.",
+            task_header
+            + " Work only on this task and report intentionally through "
+            "`discord_send` when useful.",
             _TASK_LIFECYCLE_CONTEXT,
             _project_task_policy(
                 project,
@@ -310,6 +710,39 @@ class DiscordProjectTaskRunner:
             transcript,
         ]
         return "\n\n".join(section for section in sections if section)
+
+    @staticmethod
+    def _planning_recovery_prompt(task_context: str) -> str:
+        return "\n\n".join((
+            "[Discord autonomous task planning recovery]\n"
+            "Continue the existing planning session from its actual saved state. "
+            "Do not start implementation or create another planner. Inspect the "
+            "task and repository as needed, then return one complete, self-contained "
+            "implementation plan only. Preserve completed analysis and do not repeat "
+            "external or destructive actions.",
+            task_context,
+        ))
+
+    @staticmethod
+    def _implementation_recovery_prompt(
+        task_context: str, plan: str | None,
+    ) -> str:
+        sections = [
+            "[Discord autonomous task implementation recovery]\n"
+            "Continue the existing implementation session from the actual workspace "
+            "and conversation state. Inspect what already completed before acting; "
+            "do not repeat completed external or destructive actions. Leave the task "
+            "`in-progress` only while work is genuinely continuing. When the work is "
+            "ready or blocked, perform exactly one allowed lifecycle transition.",
+        ]
+        if plan:
+            sections.append(
+                "[Saved planner handoff]\n"
+                + plan
+                + "\n[End saved planner handoff]",
+            )
+        sections.append(task_context)
+        return "\n\n".join(sections)
 
     @staticmethod
     def _planning_prompt(task_context: str) -> str:
