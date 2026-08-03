@@ -324,7 +324,9 @@ resumed, a new recovery card is offered rather than leaving the answered card
 to block the queue forever. When `audit_forum_id` is configured, every material
 runner decision—claim, dispatch, continuation, recovery state, lifecycle
 observation, and failure—is appended to its `System` thread. Repeated polls
-with unchanged state remain quiet. A planning session whose final
+with unchanged state remain quiet: after its initial recovery, the runner
+dispatches again only after a Discord task-status change, while timer polls
+only detect a missed Gateway update. A planning session whose final
 assistant message contains a valid plan is handed to the existing
 implementation session; otherwise the same planning session is woken for the
 next poll. The planning session uses the project's configured Codex tier; its

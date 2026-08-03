@@ -385,6 +385,60 @@ async def test_in_progress_wakes_the_same_idle_implementation_session():
 
 
 @pytest.mark.asyncio
+async def test_unchanged_in_progress_poll_does_not_rewake_or_reaudit():
+    runner, guild, _thread, _sessions = _recovery_runner(
+        mapped_session_id="discord-task:1:100",
+    )
+    audit = AsyncMock()
+    runner.system_audit = audit
+
+    assert await runner.scan_once(guild) is True
+    task = runner._active_task
+    assert task is not None
+    await task
+    assert await runner.scan_once(guild, force=False) is False
+
+    runner.router.engine.run.assert_awaited_once()
+    assert len(audit.await_args_list) == 3
+
+
+@pytest.mark.asyncio
+async def test_status_change_rearms_in_progress_recovery_once():
+    runner, guild, thread, _sessions = _recovery_runner(
+        mapped_session_id="discord-task:1:100",
+    )
+
+    assert await runner.scan_once(guild) is True
+    task = runner._active_task
+    assert task is not None
+    await task
+
+    ready_for_user = _Thread(thread.id, tag_id=READY_USER_TAG_ID)
+    guild.active_threads.return_value = [ready_for_user]
+    assert await runner.scan_once(guild, force=False) is False
+
+    guild.active_threads.return_value = [thread]
+    assert await runner.scan_once(guild, force=False) is True
+    task = runner._active_task
+    assert task is not None
+    await task
+
+    assert runner.router.engine.run.await_count == 2
+
+
+def test_project_thread_update_wakes_status_observer():
+    runner, _guild = _runner([])
+    runner.notify_thread_update(_Thread(100))
+    assert runner._status_change_event.is_set()
+
+    runner._status_change_event.clear()
+    unrelated = _Thread(101)
+    unrelated.parent_id = 999
+    runner.notify_thread_update(unrelated)
+    assert not runner._status_change_event.is_set()
+
+
+@pytest.mark.asyncio
 async def test_bound_generic_discord_session_without_stage_is_woken():
     runner, guild, _thread, sessions = _recovery_runner(
         stage=None,

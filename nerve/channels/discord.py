@@ -374,6 +374,15 @@ class DiscordChannel(BaseChannel):
         async def on_message_delete(message: discord.Message) -> None:
             await self._on_message_delete(message)
 
+        @client.event
+        async def on_thread_update(
+            _before: discord.Thread,
+            after: discord.Thread,
+        ) -> None:
+            runner = self._project_task_runner
+            if runner is not None:
+                runner.notify_thread_update(after)
+
         return client
 
     async def _sync_application_commands(self) -> None:

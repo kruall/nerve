@@ -97,6 +97,9 @@ class DiscordProjectTaskRunner:
         self._active_session_id: str | None = None
         self._last_recovery_error = ""
         self._system_audit_states: dict[str, str] = {}
+        self._observed_task_statuses: dict[int, str] = {}
+        self._task_statuses_changed = False
+        self._status_change_event = asyncio.Event()
 
     @property
     def active_session_id(self) -> str | None:
@@ -123,16 +126,37 @@ class DiscordProjectTaskRunner:
 
     async def _run(self, guild: Any) -> None:
         interval = max(10.0, self.config.project_task_runner_poll_interval_seconds)
+        initial = True
         while True:
             try:
-                await self.scan_once(guild)
+                if initial:
+                    # Startup has no prior observation, so recover one
+                    # existing claim once.
+                    initial = False
+                    await self.scan_once(guild, force=True)
+                    continue
+                try:
+                    await asyncio.wait_for(
+                        self._status_change_event.wait(), timeout=interval,
+                    )
+                except TimeoutError:
+                    pass
+                self._status_change_event.clear()
+                # The timer only catches a missed Gateway update.  A stable
+                # in-progress tag must not re-dispatch work or spam System.
+                await self.scan_once(guild, force=False)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("Discord project-task scan failed")
-            await asyncio.sleep(interval)
 
-    async def scan_once(self, guild: Any) -> bool:
+    def notify_thread_update(self, thread: Any) -> None:
+        """Wake the observer when a configured project thread changes."""
+        parent_id = int(getattr(thread, "parent_id", 0) or 0)
+        if parent_id in self.project_forums:
+            self._status_change_event.set()
+
+    async def scan_once(self, guild: Any, *, force: bool = True) -> bool:
         """Launch at most one task continuation; return whether it was launched."""
         if self._active_task is not None and not self._active_task.done():
             return False
@@ -140,6 +164,8 @@ class DiscordProjectTaskRunner:
         self._active_session_id = None
 
         in_progress, ready = await self._task_threads(guild)
+        if not force and not self._task_statuses_changed:
+            return False
         # An old claim blocks the queue even when its session is damaged. This
         # makes the failure visible and prevents a newer task from overtaking
         # work that the user already entrusted to the runner.
@@ -211,17 +237,21 @@ class DiscordProjectTaskRunner:
         threads = await guild.active_threads()
         in_progress: list[tuple[Any, str]] = []
         ready: list[tuple[Any, str]] = []
+        observed: dict[int, str] = {}
         for thread in threads:
             parent_id = int(getattr(thread, "parent_id", 0) or 0)
             project = self.project_forums.get(parent_id)
             if not project:
                 continue
             status = self._task_status(guild, thread)
+            observed[int(thread.id)] = status
             if status == _IN_PROGRESS_STATUS:
                 in_progress.append((thread, project))
             elif status == _READY_STATUS:
                 ready.append((thread, project))
         key = lambda item: int(item[0].id)
+        self._task_statuses_changed = observed != self._observed_task_statuses
+        self._observed_task_statuses = observed
         return sorted(in_progress, key=key), sorted(ready, key=key)
 
     async def _ready_threads(self, guild: Any) -> list[tuple[Any, str]]:
