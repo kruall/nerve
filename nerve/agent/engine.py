@@ -87,9 +87,36 @@ _LONG_COMMAND_EXECUTABLES = {
     "bazel", "cargo", "cmake", "go", "gradle", "make", "mvn", "ninja",
     "npm", "pnpm", "pytest", "uv", "ya", "yarn", "ssh_ya",
 }
+_LONG_COMMAND_ENV_WRAPPER = "/usr/bin/env"
+_ENVIRONMENT_VARIABLE_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_ENVIRONMENT_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 _LONG_COMMAND_POLL_SECONDS = 2.0
 _LONG_COMMAND_OUTPUT_TAIL_BYTES = 12_000
 _DISCORD_PROJECT_TASK_TERMINAL_METADATA_KEY = "discord_project_task_terminal"
+
+
+def _long_command_executable(command: list[str]) -> str | None:
+    """Return the allowlisted executable, unwrapping the safe env form."""
+    if command[0] != _LONG_COMMAND_ENV_WRAPPER:
+        return Path(command[0]).name
+
+    index = 1
+    while index < len(command):
+        argument = command[index]
+        if argument in ("-u", "--unset"):
+            index += 1
+            if (
+                index == len(command)
+                or _ENVIRONMENT_VARIABLE_RE.fullmatch(command[index]) is None
+            ):
+                return None
+        elif _ENVIRONMENT_ASSIGNMENT_RE.fullmatch(argument) is not None:
+            pass
+        else:
+            return Path(argument).name
+        index += 1
+    return None
+
 
 def _sanitize_surrogates(s: str) -> str:
     """Remove orphaned UTF-16 surrogates that break JSON serialization.
@@ -3958,14 +3985,14 @@ adjacent tier is a better fit:
         writes a terminal JSON file. That lets a replacement gateway resume
         monitoring without depending on an inherited asyncio subprocess.
         """
-        executable = Path(command[0]).name
+        if any("\x00" in part for part in command):
+            raise ValueError("command arguments must not contain NUL bytes")
+        executable = _long_command_executable(command)
         if executable not in _LONG_COMMAND_EXECUTABLES:
             raise ValueError(
                 "run_long_command only permits build/test executables: "
                 + ", ".join(sorted(_LONG_COMMAND_EXECUTABLES)),
             )
-        if any("\x00" in part for part in command):
-            raise ValueError("command arguments must not contain NUL bytes")
         requested_cwd = Path(cwd)
         if requested_cwd.is_absolute():
             raise ValueError("cwd must be relative to the configured workspace")

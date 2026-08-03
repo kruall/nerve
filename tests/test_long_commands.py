@@ -104,6 +104,38 @@ async def test_detached_command_state_lives_beside_database(tmp_path):
     assert not (engine.config.config_dir / "long-commands").exists()
 
 
+@pytest.mark.asyncio
+async def test_env_wrapped_pytest_starts_asynchronously(tmp_path):
+    engine = AgentEngine.__new__(AgentEngine)
+    engine.config = SimpleNamespace(workspace=tmp_path)
+    engine._start_detached_long_command = AsyncMock(return_value={
+        "id": "job-1", "output_path": str(tmp_path / "job.log"),
+    })
+    command = [
+        "/usr/bin/env", "-u", "NERVE_CODEX_MCP_EXTERNAL_TOKEN",
+        "HOME=/tmp/test-home", "NERVE_CONFIG_DIR=/tmp/test-config",
+        ".venv/bin/pytest", "-q", "tests",
+    ]
+
+    result = await engine.start_long_command(
+        session_id="s1", command=command, cwd=".", timeout_seconds=60, prompt="continue",
+    )
+
+    assert result["id"] == "job-1"
+    assert engine._start_detached_long_command.await_args.kwargs["command"] == command
+
+
+@pytest.mark.asyncio
+async def test_env_wrapper_rejects_non_allowlisted_executable(tmp_path):
+    engine = AgentEngine.__new__(AgentEngine)
+    engine.config = SimpleNamespace(workspace=tmp_path, config_dir=tmp_path / "state")
+
+    with pytest.raises(ValueError, match="only permits build/test executables"):
+        await engine.start_long_command(
+            session_id="s1", command=["/usr/bin/env", "HOME=/tmp", "sh"],
+            cwd=".", timeout_seconds=60, prompt="continue",
+        )
+
 class _Db:
     def __init__(self, session):
         self.session = session
