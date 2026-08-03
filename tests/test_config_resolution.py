@@ -138,6 +138,98 @@ class TestLoadConfigDir:
         config = load_config()
         assert config.anthropic_api_key == "sk-ant-test"
 
+    def test_loads_only_selected_config_dir_dotenv(self, tmp_path, monkeypatch):
+        selected = tmp_path / "selected"
+        elsewhere = tmp_path / "elsewhere"
+        selected.mkdir()
+        elsewhere.mkdir()
+        (selected / ".env").write_text(
+            "LANGFUSE_PUBLIC_KEY=pk-selected\n"
+            "LANGFUSE_SECRET_KEY=sk-selected\n"
+        )
+        (elsewhere / ".env").write_text("LANGFUSE_PUBLIC_KEY=pk-wrong\n")
+        monkeypatch.chdir(elsewhere)
+        monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
+        monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
+
+        config = load_config(selected)
+
+        assert config.langfuse.public_key == "pk-selected"
+        assert config.langfuse.secret_key == "sk-selected"
+
+    def test_process_environment_wins_over_dotenv_and_yaml(
+        self, tmp_path, monkeypatch,
+    ):
+        (tmp_path / ".env").write_text(
+            "LANGFUSE_PUBLIC_KEY=pk-dotenv\n"
+            "LANGFUSE_BASE_URL=https://dotenv.example\n"
+        )
+        (tmp_path / "config.yaml").write_text(
+            "langfuse:\n"
+            "  public_key: pk-yaml\n"
+            "  secret_key: sk-yaml\n"
+            "  base_url: https://yaml.example\n"
+        )
+        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-process")
+        monkeypatch.setenv("LANGFUSE_BASE_URL", "https://process.example/")
+
+        config = load_config(tmp_path)
+
+        assert config.langfuse.public_key == "pk-process"
+        assert config.langfuse.secret_key == "sk-yaml"
+        assert config.langfuse.effective_base_url == "https://process.example"
+
+
+class TestLangfuseConfig:
+    def test_yaml_and_legacy_host_fallback(self, monkeypatch):
+        for name in (
+            "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY",
+            "LANGFUSE_BASE_URL", "LANGFUSE_HOST", "TRACE_TO_LANGFUSE",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        config = NerveConfig.from_dict({
+            "langfuse": {
+                "public_key": "pk-yaml",
+                "secret_key": "sk-yaml",
+                "host": "https://legacy.example/",
+            },
+        })
+        assert config.langfuse.public_key == "pk-yaml"
+        assert config.langfuse.effective_base_url == "https://legacy.example"
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [("true", True), ("false", False), ("1", True), ("off", False)],
+    )
+    def test_trace_to_langfuse_overrides_yaml(
+        self, monkeypatch, value, expected,
+    ):
+        monkeypatch.setenv("TRACE_TO_LANGFUSE", value)
+        config = NerveConfig.from_dict({
+            "langfuse": {"codex": {"enabled": not expected}},
+        })
+        assert config.langfuse.codex.enabled is expected
+
+    def test_trace_to_langfuse_rejects_ambiguous_boolean(self, monkeypatch):
+        monkeypatch.setenv("TRACE_TO_LANGFUSE", "sometimes")
+        with pytest.raises(ValueError, match="must be a boolean"):
+            NerveConfig.from_dict({})
+
+    def test_codex_pin_validation(self, monkeypatch):
+        monkeypatch.delenv("TRACE_TO_LANGFUSE", raising=False)
+        with pytest.raises(ValueError, match="40-char git SHA"):
+            NerveConfig.from_dict({
+                "langfuse": {"codex": {"revision": "main"}},
+            })
+
+    def test_codex_uses_reviewed_default_pin(self, monkeypatch):
+        monkeypatch.delenv("TRACE_TO_LANGFUSE", raising=False)
+        config = NerveConfig.from_dict({})
+
+        assert config.langfuse.codex.revision == (
+            "33bc50ba75ef82ed1f3718df6fdd06cdbfc7c02e"
+        )
+
 
 class TestValidateConfigKeys:
     def test_clean_config_no_warnings(self):

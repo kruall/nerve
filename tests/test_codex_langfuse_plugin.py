@@ -1,0 +1,153 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+
+import pytest
+
+from nerve.agent.backends.codex import langfuse_plugin as plugin
+from nerve.config import NerveConfig
+
+
+REVISION = "0123456789abcdef0123456789abcdef01234567"
+
+
+@pytest.fixture(autouse=True)
+def _reset_plugin_error(monkeypatch):
+    for name in (
+        "TRACE_TO_LANGFUSE", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY",
+        "LANGFUSE_BASE_URL", "LANGFUSE_HOST",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    plugin._last_error = None
+
+
+def _config(tmp_path: Path, **codex_values) -> NerveConfig:
+    values = {
+        "enabled": True,
+        "auto_install": True,
+        "version": "0.1.0",
+        "revision": REVISION,
+        **codex_values,
+    }
+    return NerveConfig.from_dict({
+        "codex": {"home_dir": str(tmp_path), "bin_path": "codex"},
+        "langfuse": {
+            "public_key": "pk-lf-test",
+            "secret_key": "sk-lf-test",
+            "base_url": "https://us.cloud.langfuse.com/",
+            "codex": values,
+        },
+    })
+
+
+def _materialize_installed(config: NerveConfig, *, with_git: bool = True) -> Path:
+    root = Path(config.codex.home_dir) / "plugins" / "cache" / "tracing"
+    manifest = root / ".codex-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"name": "tracing", "version": "0.1.0"}))
+    if with_git:
+        (root / ".git").mkdir()
+        (root / ".git" / "HEAD").write_text(REVISION)
+    return root
+
+
+def test_status_requires_exact_version_revision_and_credentials(tmp_path):
+    config = _config(tmp_path)
+    root = _materialize_installed(config)
+
+    status = plugin.installation_status(config)
+
+    assert status["ready"] is True
+    assert status["version"] == "0.1.0"
+    assert status["revision"] == REVISION
+    assert status["path"] == str(root)
+    assert "pk-lf-test" not in json.dumps(status)
+    assert "sk-lf-test" not in json.dumps(status)
+
+
+def test_gitless_codex_cache_uses_content_bound_install_receipt(tmp_path):
+    config = _config(tmp_path)
+    root = _materialize_installed(config, with_git=False)
+    plugin._write_install_receipt(config, root, "0.1.0")
+
+    assert plugin.installation_status(config)["ready"] is True
+
+    (root / "dist.mjs").write_text("changed after verification")
+    assert plugin.installation_status(config)["ready"] is False
+
+
+def test_child_configuration_contains_no_secret_in_overrides(tmp_path):
+    config = _config(tmp_path)
+
+    env = plugin.child_env(config)
+    overrides = plugin.config_overrides()
+
+    assert env["TRACE_TO_LANGFUSE"] == "true"
+    assert env["LANGFUSE_BASE_URL"] == "https://us.cloud.langfuse.com"
+    assert env["LANGFUSE_CODEX_MAX_CHARS"] == "20000"
+    assert overrides == [
+        "features.plugin_hooks=true",
+        'plugins."tracing@codex-observability-plugin".enabled=true',
+    ]
+    serialized = " ".join(overrides)
+    assert config.langfuse.public_key not in serialized
+    assert config.langfuse.secret_key not in serialized
+
+
+@pytest.mark.asyncio
+async def test_missing_revision_fails_open_without_install(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    config.langfuse.codex.revision = ""
+    called = False
+
+    async def fake_run(*args, **kwargs):
+        nonlocal called
+        called = True
+        return ""
+
+    monkeypatch.setattr(plugin, "_run", fake_run)
+    status = await plugin.ensure_installed(config)
+
+    assert called is False
+    assert status["ready"] is False
+    assert status["last_error"] == "verified plugin revision is not configured"
+
+
+@pytest.mark.asyncio
+async def test_install_is_idempotent_under_concurrent_startup(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_run(*args, env, timeout=90.0):
+        calls.append(tuple(args))
+        assert "LANGFUSE_SECRET_KEY" not in env
+        if args[1:3] == ("plugin", "add"):
+            _materialize_installed(config)
+        return "{}"
+
+    monkeypatch.setattr(plugin, "_run", fake_run)
+    first, second = await asyncio.gather(
+        plugin.ensure_installed(config),
+        plugin.ensure_installed(config),
+    )
+
+    assert first["ready"] is True
+    assert second["ready"] is True
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_install_error_is_redacted_and_fail_open(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+
+    async def fake_run(*args, **kwargs):
+        raise RuntimeError(f"authorization={config.langfuse.secret_key}")
+
+    monkeypatch.setattr(plugin, "_run", fake_run)
+    status = await plugin.ensure_installed(config)
+
+    assert status["ready"] is False
+    assert config.langfuse.secret_key not in status["last_error"]
+    assert "[redacted]" in status["last_error"]

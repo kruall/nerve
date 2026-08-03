@@ -112,19 +112,34 @@ export function DiagnosticsPage() {
           <InfoCard icon={HardDrive} label="Disk Free" value={`${data.system?.disk_free_gb} / ${data.system?.disk_total_gb} GB`} />
         </div>
 
-        {/* Observability — Langfuse status */}
+        {/* Observability — Python/Claude exporter and Codex plugin are separate */}
         {data.langfuse && (
           <div className="text-[12px] text-text-dim flex items-center gap-3 flex-wrap">
             <span className="flex items-center gap-1.5">
-              {data.langfuse.enabled ? (
+              {data.langfuse.python_exporter?.enabled ? (
                 <CheckCircle2 size={12} className="text-hue-green" />
               ) : (
                 <XCircle size={12} className="text-text-faint" />
               )}
               <span>
-                Langfuse:{' '}
-                <span className={data.langfuse.enabled ? 'text-text-secondary' : 'text-text-faint'}>
-                  {data.langfuse.enabled ? 'enabled' : 'disabled'}
+                Langfuse Python/Claude:{' '}
+                <span className={data.langfuse.python_exporter?.enabled ? 'text-text-secondary' : 'text-text-faint'}>
+                  {data.langfuse.python_exporter?.enabled ? 'ready' : 'disabled'}
+                </span>
+              </span>
+            </span>
+            <span className="flex items-center gap-1.5" title={data.langfuse.codex_plugin?.last_error || undefined}>
+              {data.langfuse.codex_plugin?.ready ? (
+                <CheckCircle2 size={12} className="text-hue-green" />
+              ) : (
+                <XCircle size={12} className="text-text-faint" />
+              )}
+              <span>
+                Codex plugin:{' '}
+                <span className={data.langfuse.codex_plugin?.ready ? 'text-text-secondary' : 'text-text-faint'}>
+                  {data.langfuse.codex_plugin?.ready
+                    ? `ready${data.langfuse.codex_plugin.version ? ` (${data.langfuse.codex_plugin.version})` : ''}`
+                    : data.langfuse.codex_plugin?.requested ? 'not ready' : 'disabled'}
                 </span>
               </span>
             </span>

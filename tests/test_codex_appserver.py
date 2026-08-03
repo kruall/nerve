@@ -26,6 +26,7 @@ from nerve.agent.backends.base import TurnInput
 from nerve.agent.interactive import InteractiveToolHandler
 from nerve.agent.interactive import InteractionOutcome
 from nerve.config import NerveConfig
+from nerve.config import LangfuseConfig
 
 FAKE_BIN = str(Path(__file__).parent / "fixtures" / "fake_codex_appserver.py")
 
@@ -218,6 +219,81 @@ def test_config_overrides_use_runtime_loopback_port(tmp_path):
         'mcp_servers.nerve.url="http://127.0.0.1:49152/mcp/v1/"'
         in overrides
     )
+
+
+@pytest.mark.asyncio
+async def test_langfuse_plugin_is_injected_only_after_verified_install(
+    tmp_path, monkeypatch,
+):
+    from nerve.agent.backends.codex import backend as backend_module
+
+    monkeypatch.delenv("TRACE_TO_LANGFUSE", raising=False)
+    cfg = _config(tmp_path)
+    cfg.langfuse = LangfuseConfig.from_dict({
+        "public_key": "pk-lf-test",
+        "secret_key": "sk-lf-test",
+        "base_url": "https://cloud.langfuse.com",
+        "codex": {
+            "enabled": True,
+            "revision": "0123456789abcdef0123456789abcdef01234567",
+        },
+    })
+
+    async def ready(config):
+        return {"ready": True}
+
+    monkeypatch.setattr(
+        backend_module, "ensure_langfuse_plugin_installed", ready,
+    )
+    backend = CodexBackend(_deps(cfg))
+    client = await backend.create_client(_spec(cfg))
+    try:
+        env = backend.build_env(_spec(cfg))
+        overrides = backend.build_config_overrides(_spec(cfg))
+        assert env["TRACE_TO_LANGFUSE"] == "true"
+        assert env["LANGFUSE_SECRET_KEY"] == "sk-lf-test"
+        assert "features.plugin_hooks=true" in overrides
+        assert (
+            'plugins."tracing@codex-observability-plugin".enabled=true'
+            in overrides
+        )
+        assert "sk-lf-test" not in " ".join(overrides)
+    finally:
+        await client.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_langfuse_plugin_failure_does_not_block_codex(
+    tmp_path, monkeypatch,
+):
+    from nerve.agent.backends.codex import backend as backend_module
+
+    monkeypatch.delenv("TRACE_TO_LANGFUSE", raising=False)
+    cfg = _config(tmp_path)
+    cfg.langfuse = LangfuseConfig.from_dict({
+        "public_key": "pk-lf-test",
+        "secret_key": "sk-lf-test",
+        "codex": {
+            "enabled": True,
+            "revision": "0123456789abcdef0123456789abcdef01234567",
+        },
+    })
+
+    async def fail(config):
+        raise RuntimeError("network unavailable")
+
+    monkeypatch.setattr(
+        backend_module, "ensure_langfuse_plugin_installed", fail,
+    )
+    backend = CodexBackend(_deps(cfg))
+    client = await backend.create_client(_spec(cfg))
+    try:
+        env = backend.build_env(_spec(cfg))
+        overrides = backend.build_config_overrides(_spec(cfg))
+        assert env["TRACE_TO_LANGFUSE"] == "false"
+        assert "features.plugin_hooks=true" not in overrides
+    finally:
+        await client.disconnect()
 
 
 def test_notification_backlog_fails_transport_instead_of_dropping(monkeypatch):

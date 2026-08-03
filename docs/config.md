@@ -1,12 +1,19 @@
 # Configuration Reference
 
-Nerve uses two YAML config files:
+Nerve uses a config-directory dotenv file and two YAML files:
+- `.env` — credentials and environment overrides (gitignored)
 - `config.yaml` — Template settings (version controlled)
 - `config.local.yaml` — Secrets and personal overrides (gitignored)
 
 Values in `config.local.yaml` are deep-merged on top of `config.yaml`.
 Unknown keys are ignored but logged as warnings at startup (and shown by
 `nerve doctor`) so typos don't fail silently.
+
+Only `<resolved config directory>/.env` is loaded; Nerve does not search the
+current directory or parents for another dotenv file. For settings with
+environment-variable support, precedence is process environment, then `.env`,
+then merged YAML, then built-in defaults. Existing process values are never
+overwritten by dotenv loading.
 
 ## Config Directory Resolution
 
@@ -212,9 +219,11 @@ back into the parent turn, and run read-only unless a workflow explicitly asks
 for a writable sandbox. `GET /api/codex/status` exposes preflight state and
 non-terminal journals available for recovery.
 
-Notes: prompt-cache TTL policy, Claude Code plugins, and Langfuse tracing are
-claude-only. PDF attachments are surfaced to Codex as explicit path/context
-notes rather than silently dropped. With the
+Notes: prompt-cache TTL policy and Claude Code plugins are claude-only.
+Langfuse's Python exporter covers Claude/memU; explicitly opted-in Codex
+transcript tracing uses the pinned official Codex plugin. PDF attachments are
+surfaced to Codex as explicit path/context notes rather than silently dropped.
+With the
 default `approval_policy: never` + full-access sandbox, codex sessions
 behave like claude's auto-approved tools; tightening the policy surfaces
 Approve/Decline cards in the web UI.

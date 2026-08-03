@@ -20,6 +20,19 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _observability_status() -> dict:
+    config = get_config()
+    plugin_status = None
+    try:
+        deps = get_deps()
+        backend = deps.engine._backends.get("codex") if deps.engine else None
+        if backend is not None and hasattr(backend, "langfuse_plugin_status"):
+            plugin_status = backend.langfuse_plugin_status()
+    except Exception as error:
+        logger.debug("Could not collect runtime Codex plugin status: %s", error)
+    return langfuse_status(config, codex_plugin_status=plugin_status)
+
+
 async def _per_source_status(db, source: str) -> tuple[str, dict]:
     """Fetch (cursor, last_run) for one source in parallel-friendly form."""
     cursor, last_run = await asyncio.gather(
@@ -180,7 +193,7 @@ async def diagnostics(user: dict = Depends(require_auth)):
             "sessions_pending": len(pending_sessions),
         },
         "usage": usage_data,
-        "langfuse": langfuse_status(),
+        "langfuse": _observability_status(),
     }
 
 
@@ -192,7 +205,7 @@ async def observability_status(user: dict = Depends(require_auth)):
     Kept separate from /api/diagnostics so the chat page can poll it
     without paying for the full diagnostics fan-out.
     """
-    return {"langfuse": langfuse_status()}
+    return {"langfuse": _observability_status()}
 
 
 @router.post("/api/memorization/sweep")

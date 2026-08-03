@@ -30,6 +30,7 @@ def _reset_lf_state(monkeypatch):
     lf._usage_rewriter = False
     for var in (
         "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST",
+        "LANGFUSE_BASE_URL",
         "LANGSMITH_OTEL_ENABLED", "LANGSMITH_OTEL_ONLY", "LANGSMITH_TRACING",
     ):
         monkeypatch.delenv(var, raising=False)
@@ -58,6 +59,25 @@ def test_init_noop_without_keys():
     assert status["enabled"] is False
     assert status["auth_ok"] is False
     assert status["host"] is None
+
+
+def test_status_keeps_python_and_codex_exporters_separate():
+    lf._enabled = True
+    lf._host = "https://cloud.langfuse.com"
+    lf._auth_ok = True
+
+    status = lf.get_status(codex_plugin_status={
+        "requested": True,
+        "ready": False,
+        "auth_configured": True,
+        "auth_ok": None,
+        "last_error": "plugin not installed",
+    })
+
+    assert status["enabled"] is True  # compatibility field
+    assert status["python_exporter"]["enabled"] is True
+    assert status["codex_plugin"]["ready"] is False
+    assert status["codex_plugin"]["auth_ok"] is True
 
 
 def test_init_noop_when_only_public_key():
@@ -143,6 +163,7 @@ def test_init_with_keys_sets_env_and_calls_instrumentors(monkeypatch):
     # Env vars set
     assert os.environ["LANGFUSE_PUBLIC_KEY"] == "pk-lf-test"
     assert os.environ["LANGFUSE_SECRET_KEY"] == "sk-lf-test"
+    assert os.environ["LANGFUSE_BASE_URL"] == "https://cloud.langfuse.com"
     assert os.environ["LANGFUSE_HOST"] == "https://cloud.langfuse.com"
     assert os.environ["LANGSMITH_OTEL_ENABLED"] == "true"
     assert os.environ["LANGSMITH_OTEL_ONLY"] == "true"
@@ -153,6 +174,17 @@ def test_init_with_keys_sets_env_and_calls_instrumentors(monkeypatch):
     fakes.configure.assert_called_once()
     fakes.instrumentor_cls.assert_called_once()
     fakes.instrumentor_inst.instrument.assert_called_once()
+
+
+def test_init_prefers_environment_credentials_and_base_url(monkeypatch):
+    _install_fake_langfuse(monkeypatch, auth_ok=True)
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-env")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-env")
+    monkeypatch.setenv("LANGFUSE_BASE_URL", "https://us.example/")
+
+    assert lf.init_langfuse(_config_with()) is True
+    assert lf.get_status()["host"] == "https://us.example"
+    assert os.environ["LANGFUSE_PUBLIC_KEY"] == "pk-env"
 
 
 def test_init_disabled_when_auth_check_fails(monkeypatch):

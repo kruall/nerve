@@ -1,12 +1,12 @@
 # Observability — Langfuse
 
-Nerve has an optional Langfuse integration for tracing the Claude agent loop
-and Anthropic/Bedrock calls in the memU memory pipeline. When configured,
-those SDK calls become spans in your Langfuse project, tagged with
+Nerve has two independent optional Langfuse exporters: the Python exporter for
+the Claude agent loop and Anthropic/Bedrock calls in memU, and the official
+Langfuse Codex plugin for native Codex sessions. Python SDK calls become spans
+tagged with
 `session_id`, `source` (`web` / `cron` / `telegram` / `hook`), `model`, and
-`channel`. Codex app-server and OpenAI embedding calls remain visible in
-Nerve's own structured logs and diagnostics, but are not currently exported as
-Langfuse generation spans.
+`channel`. The Codex plugin groups traces by the native Codex thread id stored
+as `sdk_session_id`.
 
 When the keys aren't set, the integration is a complete no-op — Nerve
 runs identically with zero observability overhead.
@@ -17,6 +17,7 @@ runs identically with zero observability overhead.
 |-------------------------------|------------------------------------------------------|---------------------------------------------------|
 | Agent turns + tool calls      | `claude_agent_sdk` via LangSmith integration         | `source:*`, `model:*`, `channel:*` (when present) |
 | memU Anthropic/Bedrock chat   | `anthropic` SDK via `AnthropicInstrumentor`          | `component:memu`, `purpose:summarize`             |
+| Codex turns + tool calls      | official `codex-observability-plugin` Stop hook      | native Codex thread/session id                    |
 
 Trace-level attributes (`session_id`, `metadata.parent_session_id`,
 `metadata.fork_from`) are propagated to every span emitted inside a turn
@@ -43,14 +44,49 @@ Copy the public (`pk-lf-...`) and secret (`sk-lf-...`) keys.
 
 ### 3. Configure Nerve
 
-Add to `config.local.yaml` (gitignored):
+Put credentials in `<config_dir>/.env` (gitignored):
+
+```dotenv
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
+TRACE_TO_LANGFUSE=false
+```
+
+`config.local.yaml` remains a compatible fallback:
 
 ```yaml
 langfuse:
   public_key: pk-lf-...
   secret_key: sk-lf-...
-  host: https://cloud.langfuse.com
+  base_url: https://cloud.langfuse.com
 ```
+
+Resolution is process environment → `<config_dir>/.env` → YAML → defaults.
+`LANGFUSE_HOST` remains a legacy fallback for `LANGFUSE_BASE_URL`.
+
+### 4. Optional Codex transcript export
+
+Codex export requires credentials and explicit `TRACE_TO_LANGFUSE=true`.
+Nerve ships a reviewed full commit SHA; override it only after reviewing a
+different upstream revision:
+
+```yaml
+langfuse:
+  codex:
+    enabled: false              # overridden by TRACE_TO_LANGFUSE
+    auto_install: true
+    version: 0.1.0
+    revision: 33bc50ba75ef82ed1f3718df6fdd06cdbfc7c02e
+    max_chars: 20000
+```
+
+Nerve creates the marketplace under isolated `~/.nerve/codex`, installs only
+that revision, disables floating updates, and enables `features.plugin_hooks`
+only after the installed version and revision match. Credentials are supplied
+only in the child Codex process environment. Missing credentials, an invalid
+pin, installation/network failure, or exporter failure leaves Codex running
+without transcript tracing and appears as a separate diagnostics error.
 
 Restart Nerve. On startup you should see one of:
 
@@ -66,8 +102,13 @@ Visit the diagnostics page (`/diagnostics`) to confirm the live status.
 |-------------------|----------------------------------|-----------------------------------------------------------------|
 | `public_key`      | `""`                             | `pk-lf-...` — required to activate.                             |
 | `secret_key`      | `""`                             | `sk-lf-...` — required to activate.                             |
-| `host`            | `https://cloud.langfuse.com`     | Region endpoint or self-hosted URL.                             |
+| `base_url`        | `https://cloud.langfuse.com`     | Region endpoint or self-hosted URL (`host` is legacy).          |
 | `redact_patterns` | (built-in secret regexes)        | List of regexes — matched substrings are replaced with `[REDACTED]`. |
+| `codex.enabled`   | `false`                          | Explicit opt-in; `TRACE_TO_LANGFUSE` has priority.              |
+| `codex.auto_install` | `true`                       | Install the pinned plugin when the first Codex client starts.   |
+| `codex.version`   | `0.1.0`                          | Expected plugin manifest version.                               |
+| `codex.revision`  | `33bc50ba...c7c02e`             | Reviewed full git SHA; override only for an explicit upgrade.   |
+| `codex.max_chars` | `20000`                          | Maximum captured characters per large input/output field.       |
 
 The default `redact_patterns` strip common secret formats: Anthropic API
 keys, Langfuse keys, and bcrypt hashes. Add more for any project-specific
@@ -76,17 +117,23 @@ secret formats you don't want to leave the host.
 ## Privacy note
 
 When enabled, **prompt content, tool inputs, and model outputs leave the
-host** to whichever Langfuse instance you point at. The `host` field is
+host** to whichever Langfuse instance you point at. The `base_url` field is
 the boundary — make sure it points where you want the data to go. For
 strict data residency, self-host Langfuse on infrastructure you control.
 
 `redact_patterns` is a defensive layer — useful even with trusted
-endpoints in case a secret leaks into a prompt accidentally.
+endpoints in case a secret leaks into a prompt accidentally. It protects the
+Python exporter only. The official JavaScript Codex plugin reads completed
+rollouts and can upload prompts, assistant messages, reasoning summaries,
+tool inputs/outputs, model metadata, and usage. `codex.max_chars` bounds large
+fields but is not secret redaction; do not opt in for sessions whose transcript
+must remain local.
 
 ## Disabling
 
-Remove or empty the `public_key` / `secret_key` fields. No restart-time
-flags, no feature gates — the lack of keys is the off switch.
+Set `TRACE_TO_LANGFUSE=false` to disable Codex transcript export. Remove or
+empty credentials to disable both exporters. A restart is required because
+instrumentation and Codex child environments are assembled at process start.
 
 ## Cost cross-check
 
@@ -128,6 +175,10 @@ key).
   if `auth_ok: false`, the keys are wrong. If `enabled: false` despite
   keys being set, look at startup logs for an `ImportError` on the
   `langfuse` package itself (run `uv pip install -e .` to refresh).
+- **Claude tracing is green but Codex is absent.** Check the separate
+  `codex_plugin` block for requested/installed/ready, expected version and
+  revision, auth, and the last safe error. Python status does not prove the
+  transcript plugin ran.
 - **Spans are tagged but session_id is missing.** That can happen if the
   installed Langfuse SDK doesn't accept `session_id=` kwarg in
   `propagate_attributes`. Upgrade to a newer Langfuse Python SDK.
