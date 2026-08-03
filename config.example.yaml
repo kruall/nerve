@@ -166,7 +166,8 @@ discord:
   # mirrors visible messages, tool activity, lifecycle events, and errors.
   # Historical sessions are not backfilled until they become active; existing
   # mirror threads are reconciled after every restart. The same forum also
-  # contains an unpinned "System" lifecycle feed plus "Notifications",
+  # contains an unpinned "System" feed for process lifecycle, important runner
+  # decisions, and agent-session errors, plus "Notifications",
   # "Questions", and "Approvals" inbox threads with persistent controls.
   # Discord permits one pinned forum thread, so only "Approvals" is pinned.
   # When available, the exact "system" and "user-inbox" tags are applied to

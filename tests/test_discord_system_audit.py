@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 
+from nerve.agent.streaming import StreamBroadcaster
 from nerve.channels.discord_system_audit import DiscordSystemAudit
 
 GUILD_ID = 100
@@ -58,12 +59,14 @@ def _thread(
     return thread
 
 
-def _audit():
+def _audit(*, db=None, stream=None):
     client = MagicMock(spec=discord.Client)
     return DiscordSystemAudit(
         client=client,
+        db=db or MagicMock(),
         guild_id=GUILD_ID,
         forum_id=FORUM_ID,
+        stream=stream or StreamBroadcaster(),
     )
 
 
@@ -96,6 +99,7 @@ async def test_start_creates_unpinned_system_tagged_thread():
         "reason": "Prepare Nerve system audit",
         "applied_tags": [system_tag, inbox_tag],
     }
+    await audit.stop()
 
 
 @pytest.mark.asyncio
@@ -123,6 +127,7 @@ async def test_start_restores_existing_archived_thread_and_preserves_tags():
         system_tag,
         inbox_tag,
     ]
+    await audit.stop()
 
 
 @pytest.mark.asyncio
@@ -188,3 +193,157 @@ async def test_missing_system_tag_does_not_block_thread_creation():
 
     assert "applied_tags" not in forum.create_thread.await_args.kwargs
     assert "applied_tags" not in thread.edit.await_args.kwargs
+    await audit.stop()
+
+
+@pytest.mark.asyncio
+async def test_terminal_session_error_creates_one_red_card(db):
+    stream = StreamBroadcaster()
+    thread = _thread()
+    audit = _audit(db=db, stream=stream)
+    audit._thread = thread
+    await db.create_session(
+        "session-error-123",
+        title="Broken canary",
+        source="discord",
+        backend="codex",
+    )
+
+    try:
+        await audit.start()
+        await stream.broadcast("session-error-123", {
+            "type": "error",
+            "error": "Backend startup failed",
+        })
+        await audit._error_queue.join()
+
+        thread.send.assert_awaited_once()
+        card = thread.send.await_args.kwargs["embed"]
+        assert card.title == "🔴 Session error"
+        assert "Session: Broken canary" in card.description
+        assert "ID: `session-`" in card.description
+        assert "Source: `discord` · Backend: `codex`" in card.description
+        assert "Error: Backend startup failed" in card.description
+        assert card.colour == discord.Colour.red()
+    finally:
+        await audit.stop()
+
+
+@pytest.mark.asyncio
+async def test_error_listener_ignores_nonterminal_and_global_events(db):
+    stream = StreamBroadcaster()
+    thread = _thread()
+    audit = _audit(db=db, stream=stream)
+    audit._thread = thread
+
+    try:
+        await audit.start()
+        await stream.broadcast("session-1", {"type": "token", "content": "x"})
+        await stream.broadcast("__global__", {
+            "type": "error",
+            "error": "not a session event",
+        })
+        await audit._error_queue.join()
+
+        thread.send.assert_not_awaited()
+    finally:
+        await audit.stop()
+
+
+@pytest.mark.asyncio
+async def test_error_listener_returns_before_database_or_discord_work():
+    thread = _thread()
+    db = MagicMock()
+    db.get_session = AsyncMock()
+    stream = StreamBroadcaster()
+    audit = _audit(db=db, stream=stream)
+    audit._thread = thread
+
+    try:
+        await audit.start()
+        await audit._on_stream_event("session-1", {
+            "type": "error",
+            "error": "late failure",
+        })
+
+        db.get_session.assert_not_awaited()
+        thread.send.assert_not_awaited()
+    finally:
+        await audit.stop()
+
+
+@pytest.mark.asyncio
+async def test_start_is_idempotent_and_stop_removes_listener_and_worker():
+    stream = StreamBroadcaster()
+    audit = _audit(stream=stream)
+    audit._thread = _thread()
+
+    await audit.start()
+    worker = audit._worker_task
+    await audit.start()
+
+    assert worker is not None
+    assert audit._worker_task is worker
+    assert [item[0] for item in stream._global_listeners] == [
+        audit._listener_id,
+    ]
+
+    await audit.stop()
+
+    assert worker.done()
+    assert audit._worker_task is None
+    assert stream._global_listeners == []
+
+
+@pytest.mark.asyncio
+async def test_one_database_or_delivery_failure_does_not_block_next_error():
+    stream = StreamBroadcaster()
+    thread = _thread()
+    thread.send = AsyncMock(side_effect=[RuntimeError("Discord unavailable"), None])
+    db = MagicMock()
+    db.get_session = AsyncMock(side_effect=[
+        RuntimeError("database unavailable"),
+        {"title": "First delivered", "source": "web", "backend": "codex"},
+        {"title": "Second delivered", "source": "web", "backend": "codex"},
+    ])
+    audit = _audit(db=db, stream=stream)
+    audit._thread = thread
+
+    try:
+        await audit.start()
+        await stream.broadcast("session-1", {"type": "error", "error": "db"})
+        await stream.broadcast("session-2", {"type": "error", "error": "send"})
+        await stream.broadcast("session-3", {"type": "error", "error": "next"})
+        await audit._error_queue.join()
+
+        assert db.get_session.await_count == 3
+        assert thread.send.await_count == 2
+        assert "Second delivered" in thread.send.await_args.kwargs["embed"].description
+    finally:
+        await audit.stop()
+
+
+@pytest.mark.asyncio
+async def test_session_error_is_bounded_and_disables_mentions(db):
+    stream = StreamBroadcaster()
+    thread = _thread()
+    audit = _audit(db=db, stream=stream)
+    audit._thread = thread
+    await db.create_session("session-long", title="Long error")
+
+    try:
+        await audit.start()
+        await stream.broadcast("session-long", {
+            "type": "error",
+            "error": "@everyone " + "x" * 10_000,
+        })
+        await audit._error_queue.join()
+
+        call = thread.send.await_args
+        assert len(call.kwargs["embed"].description) <= 2000
+        assert call.kwargs["embed"].description.endswith("…")
+        assert call.kwargs["allowed_mentions"].everyone is False
+        assert call.kwargs["allowed_mentions"].users is False
+        assert call.kwargs["allowed_mentions"].roles is False
+    finally:
+        await audit.stop()

@@ -21,6 +21,7 @@ from typing import Any, TYPE_CHECKING
 import discord
 from discord import app_commands
 
+from nerve.agent.streaming import broadcaster
 from nerve.channels.base import (
     BaseChannel,
     ChannelCapability,
@@ -729,6 +730,7 @@ class DiscordChannel(BaseChannel):
         self._presence = None
         self._approval_inbox = None
         self._notification_inbox = None
+        system_audit = self._system_audit
         self._system_audit = None
         skill_forum = self._skill_forum
         self._skill_forum = None
@@ -738,6 +740,8 @@ class DiscordChannel(BaseChannel):
 
         if mirror is not None:
             await mirror.stop()
+        if system_audit is not None:
+            await system_audit.stop()
         if skill_forum is not None:
             await skill_forum.stop()
         if project_task_runner is not None:
@@ -1035,8 +1039,10 @@ class DiscordChannel(BaseChannel):
 
             audit = DiscordSystemAudit(
                 client=self._client,
+                db=self.db,
                 guild_id=self.config.guild_id,
                 forum_id=self.config.audit_forum_id,
+                stream=broadcaster,
             )
             await audit.start(guild)
             self._system_audit = audit

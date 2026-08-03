@@ -459,11 +459,15 @@ outputs as the Nerve session UI, so restrict the audit forum's Discord
 permissions to the intended reviewers.
 
 The audit forum also contains an unpinned `System` thread. Nerve appends
-timestamped process lifecycle events when the daemon starts and begins a
-graceful shutdown. The thread is reused across restarts and receives the
-existing `system` and `user-inbox` tags when those tags are uniquely available,
-matching the notification inboxes while retaining its system classification.
-Missing or duplicate tags do not block startup.
+timestamped process lifecycle events, important runner decisions, and terminal
+agent-session errors when the daemon starts, begins a graceful shutdown, or a
+session fails. Session-error cards contain a short session ID, title, source,
+backend, and a bounded error summary; they do not include a traceback or tool
+payload. The feed is enabled only when `discord.audit_forum_id` is configured,
+is reused across restarts, and receives the existing `system` and `user-inbox`
+tags when those tags are uniquely available, matching the notification inboxes
+while retaining its system classification. Missing or duplicate tags do not
+block startup.
 
 Three notification inbox threads sit alongside it: `Notifications`,
 `Questions`, and `Approvals`. Discord permits only one pinned thread per forum,

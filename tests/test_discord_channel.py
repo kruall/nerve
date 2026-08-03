@@ -1944,6 +1944,8 @@ async def test_ready_starts_system_audit_only_once_across_reconnects():
         await channel._post_ready_task
 
     audit_cls.assert_called_once()
+    assert audit_cls.call_args.kwargs["db"] is channel.db
+    assert "stream" in audit_cls.call_args.kwargs
     audit_cls.return_value.start.assert_awaited_once_with(guild)
 
 
@@ -2017,15 +2019,19 @@ async def test_presence_reads_current_codex_primary_rate_limits():
 
 
 @pytest.mark.asyncio
-async def test_stop_stops_presence_before_discarding_it():
+async def test_stop_stops_system_audit_and_presence_before_client_close():
     channel = _channel()
     presence = SimpleNamespace(stop=AsyncMock())
+    system_audit = SimpleNamespace(stop=AsyncMock())
     channel._presence = presence
+    channel._system_audit = system_audit
 
     await channel.stop()
 
     presence.stop.assert_awaited_once_with()
+    system_audit.stop.assert_awaited_once_with()
     assert channel._presence is None
+    assert channel._system_audit is None
 
 
 def test_validation_is_fail_closed():
