@@ -647,6 +647,11 @@ class CodexClient(AgentClient):
             env=env,
             server_request_handler=self._handle_server_request,
             config_overrides=config_overrides,
+            # Codex hooks execute outside its tool sandbox and therefore need
+            # explicit trust in headless app-server mode. Nerve grants it only
+            # after the managed plugin's pinned revision and runtime digest
+            # have been verified successfully.
+            bypass_hook_trust=backend._langfuse_plugin_ready,
         )
         self._thread_id: str | None = None
         self._turn_id: str | None = None

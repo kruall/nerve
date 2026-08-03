@@ -129,6 +129,7 @@ def test_child_configuration_contains_no_secret_in_overrides(tmp_path):
     assert env["LANGFUSE_BASE_URL"] == "https://us.cloud.langfuse.com"
     assert env["LANGFUSE_CODEX_MAX_CHARS"] == "20000"
     assert overrides == [
+        "features.hooks=true",
         "features.plugin_hooks=true",
         'plugins."tracing@codex-observability-plugin".enabled=true',
     ]

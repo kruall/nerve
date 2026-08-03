@@ -252,12 +252,16 @@ async def test_langfuse_plugin_is_injected_only_after_verified_install(
         overrides = backend.build_config_overrides(_spec(cfg))
         assert env["TRACE_TO_LANGFUSE"] == "true"
         assert env["LANGFUSE_SECRET_KEY"] == "sk-lf-test"
+        assert "features.hooks=true" in overrides
         assert "features.plugin_hooks=true" in overrides
         assert (
             'plugins."tracing@codex-observability-plugin".enabled=true'
             in overrides
         )
         assert "sk-lf-test" not in " ".join(overrides)
+        args = client._transport._build_args()
+        assert "--dangerously-bypass-hook-trust" in args
+        assert "sk-lf-test" not in args
     finally:
         await client.disconnect()
 
@@ -291,7 +295,9 @@ async def test_langfuse_plugin_failure_does_not_block_codex(
         env = backend.build_env(_spec(cfg))
         overrides = backend.build_config_overrides(_spec(cfg))
         assert env["TRACE_TO_LANGFUSE"] == "false"
+        assert "features.hooks=true" not in overrides
         assert "features.plugin_hooks=true" not in overrides
+        assert "--dangerously-bypass-hook-trust" not in client._transport._build_args()
     finally:
         await client.disconnect()
 

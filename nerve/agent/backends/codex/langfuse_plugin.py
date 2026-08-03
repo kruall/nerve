@@ -375,6 +375,9 @@ def child_env(config: Any) -> dict[str, str]:
 
 def config_overrides() -> list[str]:
     return [
+        # Current Codex releases expose the stable generic hook gate. Keep the
+        # legacy plugin-specific gate for the plugin's minimum supported CLI.
+        "features.hooks=true",
         "features.plugin_hooks=true",
         f'plugins."{_PLUGIN}@{_MARKETPLACE}".enabled=true',
     ]
