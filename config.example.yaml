@@ -147,16 +147,14 @@ discord:
   # forum. Split the working instructions across as many allowed-author messages
   # as needed; Nerve joins them chronologically and reflects edits or deletions
   # when adding the combined prompt to other forum threads.
-  # Optional initial Codex tier for ordinary project sessions and the planning
-  # pass of an autonomous task. Autonomous execution receives the global
-  # codex.default_tier after the planner hands its plan over. Keys must also be
-  # present in task_forums; existing sessions keep their stored tier.
+  # Optional initial Codex tier for ordinary project sessions and autonomous
+  # task implementation. Keys must also be present in task_forums; existing
+  # sessions keep their stored tier.
   # project_model_tiers:
   #   YDB: sol-medium
   #   NERVE: terra-high
   # Optional planner-only tier for autonomous project tasks. When a project is
-  # omitted here, its project_model_tiers value is used for planning. The
-  # implementation session still uses the global codex.default_tier.
+  # omitted here, its project_model_tiers value is used for planning.
   # project_planner_model_tiers:
   #   NERVE: sol-xhigh
   # Optional shared skill forum. Nerve creates one thread per local skill,

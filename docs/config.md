@@ -280,7 +280,7 @@ WebSocket. It does not require an inbound listener or a public Nerve endpoint.
 | `discord.project_task_runner_enabled` | bool | `false` | Opt in to selecting and running one `ready-for-agent` project task at a time |
 | `discord.project_task_runner_poll_interval_seconds` | float | `60` | Delay between autonomous task scans; values below 10 seconds are clamped |
 | `discord.project_task_runner_instructions` | map[string, string] | `{}` | Trusted local policy injected only into autonomous planning and implementation sessions; keys must exist in `task_forums` |
-| `discord.project_model_tiers` | map[string, string] | `{}` | Initial Codex tier for ordinary project sessions and the legacy fallback for autonomous planning; keys must exist in `task_forums` |
+| `discord.project_model_tiers` | map[string, string] | `{}` | Initial Codex tier for ordinary project sessions and autonomous task implementation; also the fallback for autonomous planning; keys must exist in `task_forums` |
 | `discord.project_planner_model_tiers` | map[string, string] | `{}` | Codex tier for the planning pass of autonomous tasks; overrides `project_model_tiers`; keys must exist in `task_forums` |
 | `discord.skills_forum_id` | int | `0` | Shared forum where Nerve publishes one managed thread per local skill |
 | `discord.audit_forum_id` | int | `0` | Outbound-only forum where Nerve mirrors one thread per session |
@@ -519,19 +519,20 @@ discord:
 ### Discord slash commands
 
 When `agent.backend: codex`, `discord.project_model_tiers` overrides
-`codex.default_tier` for a newly created ordinary session in a project forum.
-Each value must be an ID from `codex.model_tiers`, and each key must also appear
-in `discord.task_forums`. Nerve persists the resolved model, tier, and
-reasoning effort on creation, so later messages, restarts, and resumed sessions
-keep that initial choice. The setting does not affect existing sessions,
-ordinary Discord threads, Web, Telegram, or cron sessions. A later `/model`
-selection remains authoritative for its session.
+`codex.default_tier` for a newly created ordinary session in a project forum
+and an autonomous task implementation session. Each value must be an ID from
+`codex.model_tiers`, and each key must also appear in `discord.task_forums`.
+Nerve persists the resolved model, tier, and reasoning effort on creation, so
+later messages, restarts, and resumed sessions keep that initial choice. The
+setting does not affect existing sessions, ordinary Discord threads, Web,
+Telegram, or cron sessions. A later `/model` selection remains authoritative
+for its session.
 
 `discord.project_planner_model_tiers` is separate and applies only to the
 planning pass of autonomous project tasks. It has the same key and value
 validation. If a project has no planner-only entry, planning falls back to its
-`project_model_tiers` entry; the implementation session receives no project
-override and therefore keeps the global `codex.default_tier`.
+`project_model_tiers` entry. The implementation session always uses its
+`project_model_tiers` entry.
 
 `/model` is available only in the configured guild. Its `tier` argument is a
 Discord choice list containing `Auto` and the configured `codex.model_tiers`.

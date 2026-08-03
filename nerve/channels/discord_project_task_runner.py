@@ -1019,6 +1019,7 @@ class DiscordProjectTaskRunner:
             "title": title,
             "metadata": metadata,
         }
+        create_args.update(self._implementation_model_args(project))
         await self.router.engine.sessions.get_or_create(session_id, **create_args)
         await self.router.engine.sessions.set_active_session(channel_key, session_id)
         await self.db.bind_discord_session(
@@ -1081,6 +1082,21 @@ class DiscordProjectTaskRunner:
         tier = self.nerve_config.codex.tier(
             self.config.project_planner_model_tiers.get(project)
             or self.config.project_model_tiers.get(project),
+        )
+        if tier is None:
+            return {}
+        return {
+            "model": tier.model,
+            "model_tier": tier.id,
+            "reasoning_effort": tier.effort,
+        }
+
+    def _implementation_model_args(self, project: str) -> dict[str, Any]:
+        """Keep an autonomous implementation session on its project tier."""
+        if self.nerve_config.agent.backend != "codex":
+            return {}
+        tier = self.nerve_config.codex.tier(
+            self.config.project_model_tiers.get(project),
         )
         if tier is None:
             return {}

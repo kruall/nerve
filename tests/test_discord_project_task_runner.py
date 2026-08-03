@@ -127,7 +127,7 @@ async def test_scans_oldest_ready_task_claims_it_then_dispatches(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_planning_uses_project_tier_but_execution_uses_global_default(
+async def test_planning_and_execution_use_their_project_tiers(
     monkeypatch,
 ):
     runner, guild = _runner([_Thread(100)])
@@ -157,7 +157,9 @@ async def test_planning_uses_project_tier_but_execution_uses_global_default(
         planning_call.kwargs["metadata"]["discord_task_stage"] == "planning"
     )
     assert execution_call.args[0] == "discord-task:1:100"
-    assert "model" not in execution_call.kwargs
+    assert execution_call.kwargs["model"] == "gpt-5.6-terra"
+    assert execution_call.kwargs["model_tier"] == "terra-high"
+    assert execution_call.kwargs["reasoning_effort"] == "high"
     assert (
         execution_call.kwargs["metadata"]["discord_task_stage"]
         == "implementation"
