@@ -42,14 +42,35 @@ def _config(tmp_path: Path, **codex_values) -> NerveConfig:
     })
 
 
-def _materialize_installed(config: NerveConfig, *, with_git: bool = True) -> Path:
-    root = Path(config.codex.home_dir) / "plugins" / "cache" / "tracing"
+def _materialize_marketplace(config: NerveConfig) -> Path:
+    root = (
+        Path(config.codex.home_dir)
+        / ".tmp" / "marketplaces" / "codex-observability-plugin"
+    )
+    (root / ".git").mkdir(parents=True)
+    (root / ".git" / "HEAD").write_text(REVISION)
+    return root
+
+
+def _materialize_runtime(config: NerveConfig) -> Path:
+    root = (
+        Path(config.codex.home_dir)
+        / "plugins" / "cache" / "codex-observability-plugin"
+        / "tracing" / "0.1.0"
+    )
     manifest = root / ".codex-plugin" / "plugin.json"
     manifest.parent.mkdir(parents=True)
     manifest.write_text(json.dumps({"name": "tracing", "version": "0.1.0"}))
-    if with_git:
-        (root / ".git").mkdir()
-        (root / ".git" / "HEAD").write_text(REVISION)
+    entrypoint = root / "dist" / "index.mjs"
+    entrypoint.parent.mkdir()
+    entrypoint.write_text("// bundled hook")
+    return root
+
+
+def _materialize_installed(config: NerveConfig) -> Path:
+    _materialize_marketplace(config)
+    root = _materialize_runtime(config)
+    plugin._write_install_receipt(config, root, "0.1.0")
     return root
 
 
@@ -67,15 +88,35 @@ def test_status_requires_exact_version_revision_and_credentials(tmp_path):
     assert "sk-lf-test" not in json.dumps(status)
 
 
-def test_gitless_codex_cache_uses_content_bound_install_receipt(tmp_path):
+def test_codex_cache_uses_content_bound_install_receipt(tmp_path):
     config = _config(tmp_path)
-    root = _materialize_installed(config, with_git=False)
-    plugin._write_install_receipt(config, root, "0.1.0")
+    root = _materialize_installed(config)
 
     assert plugin.installation_status(config)["ready"] is True
 
-    (root / "dist.mjs").write_text("changed after verification")
+    (root / "dist" / "index.mjs").write_text("changed after verification")
     assert plugin.installation_status(config)["ready"] is False
+
+
+def test_local_marketplace_source_tree_is_not_runtime_ready(tmp_path):
+    config = _config(tmp_path)
+    root = (
+        Path(config.codex.home_dir)
+        / "plugins" / "cache" / "codex-observability-plugin"
+        / "tracing" / "local" / "plugins" / "tracing"
+    )
+    manifest = root / ".codex-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"name": "tracing", "version": "0.1.0"}))
+    (root / ".git").mkdir()
+    (root / ".git" / "HEAD").write_text(REVISION)
+    plugin._write_install_receipt(config, root, "0.1.0")
+
+    status = plugin.installation_status(config)
+
+    assert status["installed"] is False
+    assert status["ready"] is False
+    assert status["path"] is None
 
 
 def test_child_configuration_contains_no_secret_in_overrides(tmp_path):
@@ -123,8 +164,10 @@ async def test_install_is_idempotent_under_concurrent_startup(tmp_path, monkeypa
     async def fake_run(*args, env, timeout=90.0):
         calls.append(tuple(args))
         assert "LANGFUSE_SECRET_KEY" not in env
+        if args[1:4] == ("plugin", "marketplace", "add"):
+            _materialize_marketplace(config)
         if args[1:3] == ("plugin", "add"):
-            _materialize_installed(config)
+            _materialize_runtime(config)
         return "{}"
 
     monkeypatch.setattr(plugin, "_run", fake_run)
@@ -135,7 +178,17 @@ async def test_install_is_idempotent_under_concurrent_startup(tmp_path, monkeypa
 
     assert first["ready"] is True
     assert second["ready"] is True
-    assert len(calls) == 2
+    assert len(calls) == 4
+    assert calls[0][1:4] == ("plugin", "remove", "tracing@codex-observability-plugin")
+    assert calls[1][1:5] == (
+        "plugin", "marketplace", "remove", "codex-observability-plugin",
+    )
+    assert calls[2][1:] == (
+        "plugin", "marketplace", "add",
+        "https://github.com/langfuse/codex-observability-plugin.git",
+        "--ref", REVISION, "--json",
+    )
+    assert calls[3][1:3] == ("plugin", "add")
 
 
 @pytest.mark.asyncio
@@ -151,3 +204,13 @@ async def test_install_error_is_redacted_and_fail_open(tmp_path, monkeypatch):
     assert status["ready"] is False
     assert config.langfuse.secret_key not in status["last_error"]
     assert "[redacted]" in status["last_error"]
+
+
+@pytest.mark.asyncio
+async def test_remove_missing_marketplace_is_idempotent(monkeypatch):
+    async def fake_run(*args, **kwargs):
+        raise RuntimeError("marketplace is not configured or installed")
+
+    monkeypatch.setattr(plugin, "_run", fake_run)
+
+    await plugin._remove_if_present("codex", "plugin", "marketplace", "remove", env={})

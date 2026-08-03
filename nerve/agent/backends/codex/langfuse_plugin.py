@@ -31,6 +31,25 @@ def managed_dir(home: str | Path) -> Path:
     return Path(home).expanduser() / "nerve-managed" / "langfuse"
 
 
+def _marketplace_root(config: Any) -> Path:
+    return (
+        Path(config.codex.home_dir).expanduser()
+        / ".tmp" / "marketplaces" / _MARKETPLACE
+    )
+
+
+def _runtime_root(config: Any) -> Path:
+    plugin = config.langfuse.codex
+    return (
+        Path(config.codex.home_dir).expanduser()
+        / "plugins" / "cache" / _MARKETPLACE / _PLUGIN / plugin.version
+    )
+
+
+def _hook_entrypoint(root: Path) -> Path:
+    return root / "dist" / "index.mjs"
+
+
 def _atomic_write(path: Path, content: str, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -155,35 +174,24 @@ def _credentials_configured(config: Any) -> bool:
 def installation_status(config: Any) -> dict[str, Any]:
     """Inspect plugin state without invoking Codex or the network."""
     plugin = config.langfuse.codex
-    home = Path(config.codex.home_dir).expanduser()
-    manifests = sorted([
-        *home.glob("plugins/cache/**/.codex-plugin/plugin.json"),
-        *home.glob(".tmp/plugins*/**/.codex-plugin/plugin.json"),
-    ])
-    found: tuple[str, str, Path] | None = None
-    for manifest_path in manifests:
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if manifest.get("name") != _PLUGIN:
-            continue
-        root = manifest_path.parent.parent
-        version = str(manifest.get("version") or "")
-        revision = _git_revision(root) or _receipt_revision(
-            config, root, version,
+    root = _runtime_root(config)
+    marketplace_revision = _git_revision(_marketplace_root(config))
+    try:
+        manifest = json.loads(
+            (root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
         )
-        found = (version, revision, root)
-        if found[0] == plugin.version and found[1] == plugin.revision:
-            break
-
-    version, revision, root = found or ("", "", None)
+    except (OSError, ValueError):
+        manifest = {}
+    version = str(manifest.get("version") or "")
+    receipt_revision = _receipt_revision(config, root, version)
     revision_configured = bool(re.fullmatch(r"[0-9a-f]{40}", plugin.revision))
     installed = bool(
-        root
-        and revision_configured
+        revision_configured
+        and manifest.get("name") == _PLUGIN
         and version == plugin.version
-        and revision == plugin.revision
+        and marketplace_revision == plugin.revision
+        and receipt_revision == plugin.revision
+        and _hook_entrypoint(root).is_file()
     )
     auth = _credentials_configured(config)
     requested = bool(plugin.enabled)
@@ -202,33 +210,12 @@ def installation_status(config: Any) -> dict[str, Any]:
         "auth_ok": None if auth else False,
         "version": version or None,
         "expected_version": plugin.version,
-        "revision": revision or None,
+        "revision": marketplace_revision or receipt_revision or None,
         "expected_revision": plugin.revision or None,
-        "path": str(root) if root else None,
+        "path": str(root) if root.exists() else None,
         "auto_update": False,
         "max_chars": plugin.max_chars,
         "last_error": error,
-    }
-
-
-def _marketplace_manifest(config: Any) -> dict[str, Any]:
-    plugin = config.langfuse.codex
-    return {
-        "name": _MARKETPLACE,
-        "interface": {"displayName": "Nerve managed Langfuse plugin"},
-        "plugins": [{
-            "name": _PLUGIN,
-            "source": {
-                "source": "url",
-                "url": plugin.repository,
-                "ref": plugin.revision,
-            },
-            "policy": {
-                "installation": "AVAILABLE",
-                "authentication": "ON_INSTALL",
-            },
-            "category": "Monitoring",
-        }],
     }
 
 
@@ -262,6 +249,22 @@ async def _run(*args: str, env: dict[str, str], timeout: float = 90.0) -> str:
     return output
 
 
+async def _remove_if_present(*args: str, env: dict[str, str]) -> None:
+    try:
+        await _run(*args, env=env)
+    except RuntimeError as error:
+        message = str(error).lower()
+        if any(
+            marker in message
+            for marker in (
+                "not installed", "not configured", "not found",
+                "unknown marketplace",
+            )
+        ):
+            return
+        raise
+
+
 async def ensure_installed(config: Any) -> dict[str, Any]:
     """Install or repair the exact reviewed snapshot, returning fail-open status."""
     global _last_error
@@ -286,12 +289,6 @@ async def ensure_installed(config: Any) -> dict[str, Any]:
             status = installation_status(config)
             if status["ready"]:
                 return status
-            root = managed_dir(config.codex.home_dir) / "marketplace"
-            manifest_path = root / ".agents" / "plugins" / "marketplace.json"
-            _atomic_write(
-                manifest_path,
-                json.dumps(_marketplace_manifest(config), indent=2) + "\n",
-            )
             # Credentials intentionally are not present during installation.
             env = {
                 key: value for key, value in os.environ.items()
@@ -300,30 +297,51 @@ async def ensure_installed(config: Any) -> dict[str, Any]:
             }
             env["CODEX_HOME"] = str(Path(config.codex.home_dir).expanduser())
             try:
-                try:
-                    await _run(
-                        config.codex.bin_path,
-                        "plugin", "marketplace", "add", str(root), "--json",
-                        env=env,
+                # Repair an old or partial installation without touching any
+                # unrelated marketplace or plugin.
+                await _remove_if_present(
+                    config.codex.bin_path,
+                    "plugin", "remove", f"{_PLUGIN}@{_MARKETPLACE}", "--json",
+                    env=env,
+                )
+                await _remove_if_present(
+                    config.codex.bin_path,
+                    "plugin", "marketplace", "remove", _MARKETPLACE, "--json",
+                    env=env,
+                )
+                await _run(
+                    config.codex.bin_path,
+                    "plugin", "marketplace", "add", plugin.repository,
+                    "--ref", plugin.revision, "--json",
+                    env=env,
+                )
+                if _git_revision(_marketplace_root(config)) != plugin.revision:
+                    raise RuntimeError(
+                        "Codex marketplace snapshot does not match the pinned revision"
                     )
-                except RuntimeError as error:
-                    if "already" not in str(error).lower():
-                        raise
                 await _run(
                     config.codex.bin_path,
                     "plugin", "add", f"{_PLUGIN}@{_MARKETPLACE}", "--json",
                     env=env,
                 )
-                candidate = installation_status(config)
-                if (
-                    candidate.get("path")
-                    and candidate.get("version") == plugin.version
-                ):
-                    _write_install_receipt(
-                        config,
-                        Path(candidate["path"]),
-                        str(candidate["version"]),
+                root = _runtime_root(config)
+                try:
+                    manifest = json.loads(
+                        (root / ".codex-plugin" / "plugin.json").read_text(
+                            encoding="utf-8"
+                        )
                     )
+                except (OSError, ValueError) as error:
+                    raise RuntimeError("Codex plugin manifest is unavailable") from error
+                if (
+                    manifest.get("name") != _PLUGIN
+                    or manifest.get("version") != plugin.version
+                    or not _hook_entrypoint(root).is_file()
+                ):
+                    raise RuntimeError(
+                        "Codex plugin runtime cache does not match the pinned version"
+                    )
+                _write_install_receipt(config, root, plugin.version)
                 status = installation_status(config)
                 if not status["installed"]:
                     raise RuntimeError(
