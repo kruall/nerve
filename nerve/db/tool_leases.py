@@ -141,6 +141,18 @@ class ToolLeaseStore:
         )
         return bool(result.rowcount)
 
+    async def has_pending_tool_lease_subscription(
+        self, session_id: str, *, now: datetime | None = None,
+    ) -> bool:
+        """Whether ``session_id`` is durably waiting for a tool-lease handoff."""
+        now_iso = self._tool_lease_iso(now or self._tool_lease_now())
+        async with self.db.execute(
+            """SELECT 1 FROM tool_lease_subscriptions
+               WHERE session_id = ? AND expires_at > ? LIMIT 1""",
+            (session_id, now_iso),
+        ) as cursor:
+            return await cursor.fetchone() is not None
+
     async def list_ready_tool_lease_subscriptions(
         self, *, now: datetime | None = None, limit: int = 50,
     ) -> list[dict]:

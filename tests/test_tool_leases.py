@@ -73,6 +73,13 @@ class TestToolLeaseStore:
         await db.subscribe_tool_lease("deploy", "s2", "resume", 120, 60, now=_at())
         assert await db.list_ready_tool_lease_subscriptions(now=_at(61)) == []
 
+    async def test_pending_subscription_is_visible_for_session_scheduler(self, db):
+        await self._sessions(db)
+        await db.subscribe_tool_lease("deploy", "s2", "resume", 120, 60, now=_at())
+        assert await db.has_pending_tool_lease_subscription("s2", now=_at(1))
+        assert not await db.has_pending_tool_lease_subscription("s1", now=_at(1))
+        assert not await db.has_pending_tool_lease_subscription("s2", now=_at(61))
+
 
 @pytest.mark.asyncio
 class TestToolLeaseHandlers:

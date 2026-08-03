@@ -32,6 +32,7 @@ _RECOVERY_ACTIONS = (
 _RECOVERY_FINAL_STATUSES = frozenset({
     "answered", "dismissed", "expired", "failed", "silenced",
 })
+_CONTINUATION_RUNNABLE = "runnable"
 
 _TASK_LIFECYCLE_CONTEXT = """[Discord project-task lifecycle]
 Discord forum tags are the sole source of task state; do not use Plane or
@@ -142,8 +143,9 @@ class DiscordProjectTaskRunner:
                 except TimeoutError:
                     pass
                 self._status_change_event.clear()
-                # The timer only catches a missed Gateway update.  A stable
-                # in-progress tag must not re-dispatch work or spam System.
+                # The timer is a restart-safe continuation fallback.  Stable
+                # ready tasks stay quiet, while a stable in-progress claim is
+                # reclassified so an idle session can receive its next turn.
                 await self.scan_once(guild, force=False)
             except asyncio.CancelledError:
                 raise
@@ -164,12 +166,16 @@ class DiscordProjectTaskRunner:
         self._active_session_id = None
 
         in_progress, ready = await self._task_threads(guild)
-        if not force and not self._task_statuses_changed:
-            return False
         # An old claim blocks the queue even when its session is damaged. This
         # makes the failure visible and prevents a newer task from overtaking
         # work that the user already entrusted to the runner.
-        candidates = in_progress or ready
+        # A durable in-progress claim must be reconsidered at every bounded
+        # poll: an earlier internal model turn can finish without a Discord
+        # event.  By contrast, an unchanged ready task has not been claimed
+        # and must not be repeatedly dispatched.
+        candidates = in_progress
+        if not candidates and (force or self._task_statuses_changed):
+            candidates = ready
         if not candidates:
             return False
         thread, project = candidates[0]
@@ -720,7 +726,13 @@ class DiscordProjectTaskRunner:
             return None
         return plan
 
-    async def _has_pending_continuation(self, session_id: str) -> bool:
+    async def _continuation_state(self, session_id: str) -> str:
+        """Classify whether an in-progress session can receive another turn.
+
+        The lifecycle tag is the durable task claim; this method identifies
+        durable or in-memory states that already own its next continuation.
+        A normal model turn ending is deliberately not a terminal task state.
+        """
         engine = self.router.engine
         sessions = engine.sessions
         if sessions.is_running(session_id):
@@ -728,7 +740,7 @@ class DiscordProjectTaskRunner:
                 "In-progress Discord task session %s is already running",
                 session_id,
             )
-            return True
+            return "waiting-running"
         running_tasks = getattr(sessions, "_running_tasks", {})
         registered = (
             running_tasks.get(session_id)
@@ -740,7 +752,7 @@ class DiscordProjectTaskRunner:
                 "registered continuation",
                 session_id,
             )
-            return True
+            return "waiting-registered"
         recovery_sessions = getattr(engine, "_restart_recovery_sessions", set())
         if (
             isinstance(recovery_sessions, (set, frozenset, list, tuple))
@@ -750,7 +762,7 @@ class DiscordProjectTaskRunner:
                 "In-progress Discord task session %s has pending restart recovery",
                 session_id,
             )
-            return True
+            return "waiting-restart-recovery"
         recovery = getattr(self.db, "get_session_run_recovery", None)
         if callable(recovery):
             row = recovery(session_id)
@@ -761,7 +773,7 @@ class DiscordProjectTaskRunner:
                     "In-progress Discord task session %s has a recovery checkpoint",
                     session_id,
                 )
-                return True
+                return "waiting-recovery-checkpoint"
         for method_name in (
             "list_pending_wakeups",
             "list_pending_long_command_resumes",
@@ -788,9 +800,31 @@ class DiscordProjectTaskRunner:
                     session_id,
                     method_name,
                 )
-                return True
+                return f"waiting-{method_name.removeprefix('list_')}"
+        for method_name, state in (
+            ("has_pending_session_interaction", "waiting-session-interaction"),
+            ("has_pending_tool_lease_subscription", "waiting-tool-lease"),
+        ):
+            method = getattr(self.db, method_name, None)
+            if not callable(method):
+                continue
+            pending = method(session_id)
+            if inspect.isawaitable(pending):
+                pending = await pending
+            if pending is True:
+                logger.info(
+                    "In-progress Discord task session %s has %s",
+                    session_id, state,
+                )
+                return state
         pending_model = getattr(engine, "_pending_model_tier_continuations", {})
-        return isinstance(pending_model, dict) and session_id in pending_model
+        if isinstance(pending_model, dict) and session_id in pending_model:
+            return "waiting-model-tier"
+        return _CONTINUATION_RUNNABLE
+
+    async def _has_pending_continuation(self, session_id: str) -> bool:
+        """Compatibility predicate for continuation call sites."""
+        return (await self._continuation_state(session_id)) != _CONTINUATION_RUNNABLE
 
     async def _run_internal_continuation(
         self, session_id: str, prompt: str,
@@ -839,6 +873,7 @@ class DiscordProjectTaskRunner:
                     thread, project,
                     "Discord task runner woke planning session",
                     details=f"Task: **{getattr(thread, 'name', thread.id)}**",
+                    state=f"planning-wake:{session_id}",
                 )
                 await self._run_internal_continuation(
                     session_id,
@@ -885,6 +920,7 @@ class DiscordProjectTaskRunner:
             thread, project,
             "Discord task runner woke implementation session",
             details=f"Task: **{getattr(thread, 'name', thread.id)}**",
+            state=f"implementation-wake:{session_id}",
         )
         await self._run_internal_continuation(
             session_id,
@@ -1043,6 +1079,7 @@ class DiscordProjectTaskRunner:
                 project,
                 "Discord task runner started implementation recovery",
                 details=f"Task: **{getattr(thread, 'name', channel_id)}**",
+                state=f"implementation-recovery:{session_id}",
             )
             await self._run_internal_continuation(session_id, prompt)
             return

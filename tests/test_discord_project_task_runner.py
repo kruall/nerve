@@ -358,6 +358,8 @@ def _recovery_runner(
     runner.db.list_pending_wakeups = AsyncMock(return_value=[])
     runner.db.list_pending_long_command_resumes = AsyncMock(return_value=[])
     runner.db.list_running_long_commands = AsyncMock(return_value=[])
+    runner.db.has_pending_session_interaction = AsyncMock(return_value=False)
+    runner.db.has_pending_tool_lease_subscription = AsyncMock(return_value=False)
     runner.db.list_notifications_by_target = AsyncMock(return_value=[])
     runner.db.dismiss_notification = AsyncMock(return_value=True)
     planning_id = f"discord-task-plan:{GUILD_ID}:{thread.id}"
@@ -387,7 +389,7 @@ async def test_in_progress_wakes_the_same_idle_implementation_session():
 
 
 @pytest.mark.asyncio
-async def test_unchanged_in_progress_poll_does_not_rewake_or_reaudit():
+async def test_unchanged_in_progress_poll_rewakes_without_reauditing():
     runner, guild, _thread, _sessions = _recovery_runner(
         mapped_session_id="discord-task:1:100",
     )
@@ -398,10 +400,102 @@ async def test_unchanged_in_progress_poll_does_not_rewake_or_reaudit():
     task = runner._active_task
     assert task is not None
     await task
-    assert await runner.scan_once(guild, force=False) is False
+    assert await runner.scan_once(guild, force=False) is True
+    task = runner._active_task
+    assert task is not None
+    await task
 
-    runner.router.engine.run.assert_awaited_once()
+    assert runner.router.engine.run.await_count == 2
     assert len(audit.await_args_list) == 3
+
+
+@pytest.mark.asyncio
+async def test_unchanged_ready_task_stays_quiet_after_initial_observation():
+    runner, guild = _runner([_Thread(100)])
+
+    await runner._task_threads(guild)
+    assert await runner.scan_once(guild, force=False) is False
+    runner.router.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method_name", "waiting_state"),
+    [
+        ("has_pending_session_interaction", "waiting-session-interaction"),
+        ("has_pending_tool_lease_subscription", "waiting-tool-lease"),
+    ],
+)
+async def test_durable_waiting_state_suppresses_then_releases_continuation(
+    method_name, waiting_state,
+):
+    runner, guild, _thread, _sessions = _recovery_runner(
+        mapped_session_id="discord-task:1:100",
+    )
+    waiting = getattr(runner.db, method_name)
+    waiting.return_value = True
+
+    assert await runner.scan_once(guild) is True
+    task = runner._active_task
+    assert task is not None
+    await task
+    runner.router.engine.run.assert_not_awaited()
+    assert await runner._continuation_state("discord-task:1:100") == waiting_state
+
+    waiting.return_value = False
+    assert await runner.scan_once(guild, force=False) is True
+    task = runner._active_task
+    assert task is not None
+    await task
+    runner.router.engine.run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        "list_pending_wakeups",
+        "list_pending_long_command_resumes",
+        "list_running_long_commands",
+    ],
+)
+async def test_persisted_scheduler_waits_suppress_continuation(method_name):
+    runner, guild, _thread, _sessions = _recovery_runner(
+        mapped_session_id="discord-task:1:100",
+    )
+    getattr(runner.db, method_name).return_value = [{
+        "session_id": "discord-task:1:100",
+    }]
+
+    assert await runner.scan_once(guild) is True
+    task = runner._active_task
+    assert task is not None
+    await task
+
+    runner.router.engine.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_new_runner_resumes_persisted_in_progress_claim_after_restart():
+    runner, guild, _thread, _sessions = _recovery_runner(
+        mapped_session_id="discord-task:1:100",
+    )
+    restarted = DiscordProjectTaskRunner(
+        config=runner.nerve_config,
+        router=runner.router,
+        db=runner.db,
+        project_forums={FORUM_ID: "NERVE"},
+        project_prompt=lambda _forum, _thread: "Project instructions.",
+    )
+
+    assert await restarted.scan_once(guild, force=False) is True
+    task = restarted._active_task
+    assert task is not None
+    await task
+
+    call = restarted.router.engine.run.await_args.kwargs
+    assert call["session_id"] == "discord-task:1:100"
+    assert call["internal"] is True
 
 
 @pytest.mark.asyncio

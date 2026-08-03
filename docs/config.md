@@ -324,9 +324,17 @@ resumed, a new recovery card is offered rather than leaving the answered card
 to block the queue forever. When `audit_forum_id` is configured, every material
 runner decision—claim, dispatch, continuation, recovery state, lifecycle
 observation, and failure—is appended to its `System` thread. Repeated polls
-with unchanged state remain quiet: after its initial recovery, the runner
-dispatches again only after a Discord task-status change, while timer polls
-only detect a missed Gateway update. A planning session whose final
+with an unchanged `ready-for-agent` tag remain quiet. An unchanged
+`in-progress` tag is instead a durable active-goal claim: every bounded poll
+rechecks it and starts the next internal turn only after the prior turn has
+settled and no continuation is already durable or running. The timer is thus a
+restart-safe scheduler fallback, not only a missed-Gateway-event detector.
+Running or registered turns, restart recovery/checkpoints, pending wakeups,
+long-command resumes or commands, question/approval interactions, tool-lease
+subscriptions, and model-tier continuations suppress that next turn. Moving
+the task to `ready-for-user`, `blocked`, `cancelled`, `completed`, or any other
+status removes it from automatic continuation. State-deduplicated System audit
+entries keep repeated waiting checks quiet. A planning session whose final
 assistant message contains a valid plan is handed to the existing
 implementation session; otherwise the same planning session is woken for the
 next poll. The planning session uses the project's configured Codex tier; its
