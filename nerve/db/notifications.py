@@ -95,6 +95,24 @@ class NotificationStore:
         ) as cursor:
             return [dict(row) async for row in cursor]
 
+    async def list_notifications_by_target(
+        self,
+        *,
+        target_kind: str,
+        target_id: str,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Return durable action rows for one dispatcher target oldest-first."""
+        async with self.db.execute(
+            """SELECT n.*, s.title AS session_title
+               FROM notifications n
+               LEFT JOIN sessions s ON n.session_id = s.id
+               WHERE n.target_kind = ? AND n.target_id = ?
+               ORDER BY n.created_at ASC LIMIT ?""",
+            (target_kind, target_id, limit),
+        ) as cursor:
+            return [dict(row) async for row in cursor]
+
     async def has_pending_session_interaction(self, session_id: str) -> bool:
         """Whether a session is waiting for a question or approval answer."""
         async with self.db.execute(

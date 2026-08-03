@@ -29,6 +29,9 @@ _RECOVERY_ACTIONS = (
     {"label": "Переместить в backlog", "value": "backlog"},
     {"label": "Передать пользователю", "value": "ready-for-user"},
 )
+_RECOVERY_FINAL_STATUSES = frozenset({
+    "answered", "dismissed", "expired", "failed", "silenced",
+})
 
 _TASK_LIFECYCLE_CONTEXT = """[Discord project-task lifecycle]
 Discord forum tags are the sole source of task state; do not use Plane or
@@ -91,6 +94,7 @@ class DiscordProjectTaskRunner:
         self._active_task: asyncio.Task[None] | None = None
         self._active_session_id: str | None = None
         self._last_recovery_error = ""
+        self._system_audit_states: dict[str, str] = {}
 
     @property
     def active_session_id(self) -> str | None:
@@ -165,6 +169,16 @@ class DiscordProjectTaskRunner:
         *,
         recovering: bool,
     ) -> None:
+        await self._emit_system_action(
+            thread,
+            project,
+            "Discord task runner selected task",
+            details=(
+                f"Task: **{getattr(thread, 'name', thread.id)}**\n"
+                f"Mode: {'recover existing in-progress claim' if recovering else 'claim ready-for-agent task'}"
+            ),
+            state=f"selected:{'recovery' if recovering else 'claim'}",
+        )
         try:
             if recovering:
                 await self._resume_in_progress(guild, thread, project)
@@ -175,6 +189,14 @@ class DiscordProjectTaskRunner:
             raise
         except Exception:
             logger.exception("Discord project-task dispatch failed")
+            await self._emit_system_action(
+                thread,
+                project,
+                "Discord task runner action failed",
+                details="The runner failed while dispatching this task; see local logs.",
+                level="error",
+                state="dispatch-failed",
+            )
 
     async def _task_threads(
         self, guild: Any,
@@ -247,6 +269,19 @@ class DiscordProjectTaskRunner:
             "Discord project task %s status after continuation: %s",
             thread.id,
             status or "unknown",
+        )
+        await self._emit_system_action(
+            current,
+            self.project_forums.get(
+                int(getattr(current, "parent_id", 0) or 0),
+                "project",
+            ),
+            "Discord task runner observed lifecycle state",
+            details=(
+                f"Task: **{getattr(current, 'name', current.id)}**\n"
+                f"Current status: `{status or 'unknown'}`"
+            ),
+            state=f"lifecycle:{status or 'unknown'}",
         )
         return status
 
@@ -422,17 +457,46 @@ class DiscordProjectTaskRunner:
         session_id = str((mapping or {}).get("session_id") or "").strip()
         if not session_id:
             session_id = f"discord-task:{guild_id}:{thread_id}"
-        notification_id = (
-            f"discord-task-recovery:{guild_id}:{thread_id}"
+        notification_base = f"discord-task-recovery:{guild_id}:{thread_id}"
+        recovery_rows = await self._recovery_notifications(
+            notification_base,
+            thread_id,
         )
-        existing = await self.db.get_notification(notification_id)
+        existing = next(
+            (
+                row for row in reversed(recovery_rows)
+                if str(row.get("status") or "pending")
+                not in _RECOVERY_FINAL_STATUSES
+            ),
+            None,
+        )
         if isinstance(existing, dict):
             logger.info(
                 "Recovery action for Discord task %s/%s already exists "
                 "(status=%s)",
                 project, thread_id, existing.get("status") or "unknown",
             )
+            await self._emit_system_action(
+                thread,
+                project,
+                "Discord task runner recovery action pending",
+                details=(
+                    f"Task: **{getattr(thread, 'name', thread_id)}**\n"
+                    f"Recovery action status: `{existing.get('status') or 'unknown'}`."
+                ),
+                level="warning",
+                state=(
+                    f"recovery-action:{existing.get('id')}:"
+                    f"{existing.get('status') or 'unknown'}"
+                ),
+            )
             return
+
+        notification_id = (
+            notification_base
+            if not recovery_rows
+            else f"{notification_base}:{len(recovery_rows) + 1}"
+        )
 
         reason = self._last_recovery_error or "session cannot be resumed safely"
         title = f"Runner blocked on {project} task"
@@ -480,6 +544,54 @@ class DiscordProjectTaskRunner:
                 "Choices: close, backlog, or ready-for-user."
             ),
             level="warning",
+        )
+
+    async def _recovery_notifications(
+        self,
+        notification_base: str,
+        thread_id: int,
+    ) -> list[dict[str, Any]]:
+        """Read all recovery attempts, with a compatibility fallback.
+
+        A user can hand a task back to ``in-progress`` after choosing a
+        recovery action. That is a new blocked-claim episode, so an answered
+        card must not prevent the runner from offering a new card forever.
+        """
+        list_by_target = getattr(
+            self.db, "list_notifications_by_target", None,
+        )
+        if callable(list_by_target):
+            rows = list_by_target(
+                target_kind=DISCORD_PROJECT_TASK_RECOVERY_TARGET_KIND,
+                target_id=str(thread_id),
+            )
+            if inspect.isawaitable(rows):
+                rows = await rows
+            if isinstance(rows, list):
+                return [row for row in rows if isinstance(row, dict)]
+        existing = await self.db.get_notification(notification_base)
+        return [existing] if isinstance(existing, dict) else []
+
+    async def _emit_system_action(
+        self,
+        thread: Any,
+        project: str,
+        title: str,
+        *,
+        details: str,
+        level: str = "info",
+        state: str = "",
+    ) -> None:
+        """Emit a material runner decision without turning polling into spam."""
+        key = f"{int(thread.id)}:{title}"
+        if state and self._system_audit_states.get(key) == state:
+            return
+        if state:
+            self._system_audit_states[key] = state
+        await self._emit_system_audit(
+            title,
+            details=f"Project: `{project}`\n{details}",
+            level=level,
         )
 
     async def _emit_system_audit(
@@ -615,7 +727,21 @@ class DiscordProjectTaskRunner:
             plan = await self._saved_plan(session_id)
             if plan is None:
                 if await self._has_pending_continuation(session_id):
+                    await self._emit_system_action(
+                        thread, project,
+                        "Discord task runner continuation already pending",
+                        details=(
+                            f"Task: **{getattr(thread, 'name', thread.id)}**\n"
+                            "Planning session already has a continuation."
+                        ),
+                        state=f"planning-pending:{session_id}",
+                    )
                     return
+                await self._emit_system_action(
+                    thread, project,
+                    "Discord task runner woke planning session",
+                    details=f"Task: **{getattr(thread, 'name', thread.id)}**",
+                )
                 await self._run_internal_continuation(
                     session_id,
                     self._planning_recovery_prompt(task_context),
@@ -647,7 +773,21 @@ class DiscordProjectTaskRunner:
             f"discord-task-plan:{int(guild.id)}:{int(thread.id)}",
         )
         if await self._has_pending_continuation(session_id):
+            await self._emit_system_action(
+                thread, project,
+                "Discord task runner continuation already pending",
+                details=(
+                    f"Task: **{getattr(thread, 'name', thread.id)}**\n"
+                    "Implementation session already has a continuation."
+                ),
+                state=f"implementation-pending:{session_id}",
+            )
             return
+        await self._emit_system_action(
+            thread, project,
+            "Discord task runner woke implementation session",
+            details=f"Task: **{getattr(thread, 'name', thread.id)}**",
+        )
         await self._run_internal_continuation(
             session_id,
             self._implementation_recovery_prompt(task_context, plan),
@@ -667,6 +807,12 @@ class DiscordProjectTaskRunner:
         ))
         if self.router.engine.sessions.is_running(session_id):
             logger.info("Ready project task already has a running session")
+            await self._emit_system_action(
+                thread, project,
+                "Discord task runner skipped already-running task",
+                details=f"Task: **{getattr(thread, 'name', channel_id)}**",
+                state=f"running:{session_id}",
+            )
             return
 
         metadata = self._metadata(guild, thread, project)
@@ -695,9 +841,33 @@ class DiscordProjectTaskRunner:
             audit_reason="Nerve autonomous project-task runner",
         )
         if result.get("current_status") != "in-progress":
+            await self._emit_system_action(
+                thread, project,
+                "Discord task runner did not claim task",
+                details=(
+                    f"Task: **{getattr(thread, 'name', channel_id)}**\n"
+                    f"Observed status: `{result.get('current_status') or 'unknown'}`"
+                ),
+                level="warning",
+                state=f"claim-missed:{result.get('current_status') or 'unknown'}",
+            )
             return
+        await self._emit_system_action(
+            thread, project,
+            "Discord task runner claimed ready task",
+            details=f"Task: **{getattr(thread, 'name', channel_id)}**",
+            state="claimed",
+        )
 
         task_context = await self._task_prompt(thread, project)
+
+        await self._emit_system_action(
+            thread,
+            project,
+            "Discord task runner started planning",
+            details=f"Task: **{getattr(thread, 'name', channel_id)}**",
+            state=f"planning:{planning_session_id}",
+        )
 
         self._active_session_id = planning_session_id
         plan = await self.router.handle_message(InboundMessage(
@@ -759,9 +929,31 @@ class DiscordProjectTaskRunner:
         prompt = self._implementation_prompt(task_context, plan)
         if internal:
             if await self._has_pending_continuation(session_id):
+                await self._emit_system_action(
+                    thread, project,
+                    "Discord task runner continuation already pending",
+                    details=(
+                        f"Task: **{getattr(thread, 'name', channel_id)}**\n"
+                        "Implementation session already has a continuation."
+                    ),
+                    state=f"implementation-pending:{session_id}",
+                )
                 return
+            await self._emit_system_action(
+                thread,
+                project,
+                "Discord task runner started implementation recovery",
+                details=f"Task: **{getattr(thread, 'name', channel_id)}**",
+            )
             await self._run_internal_continuation(session_id, prompt)
             return
+        await self._emit_system_action(
+            thread,
+            project,
+            "Discord task runner started implementation",
+            details=f"Task: **{getattr(thread, 'name', channel_id)}**",
+            state=f"implementation:{session_id}",
+        )
         self._active_session_id = session_id
         await self.router.handle_message(InboundMessage(
             channel_name="discord",

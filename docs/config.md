@@ -312,11 +312,16 @@ scans active threads once per poll and always gives the oldest thread carrying
 continuation; the runner resumes the existing, immutably bound planning or
 implementation session and never creates a parallel recovery session. If the
 session mapping or binding is missing or conflicts, the runner fails closed,
-keeps the task ahead of the ready queue, and posts one restart-safe decision
+keeps the task ahead of the ready queue, and posts a restart-safe decision
 card in the task thread and the approval inbox. The card lets an authorized
 user close the claim as `cancelled`, move it to `backlog`, or hand it to the
 user as `ready-for-user`; after a choice Nerve mentions the user in the task
-thread. A planning session whose final
+thread. If the task is later handed back to `in-progress` and still cannot be
+resumed, a new recovery card is offered rather than leaving the answered card
+to block the queue forever. When `audit_forum_id` is configured, every material
+runner decision—claim, dispatch, continuation, recovery state, lifecycle
+observation, and failure—is appended to its `System` thread. Repeated polls
+with unchanged state remain quiet. A planning session whose final
 assistant message contains a valid plan is handed to the existing
 implementation session; otherwise the same planning session is woken for the
 next poll. The planning session uses the project's configured Codex tier; its

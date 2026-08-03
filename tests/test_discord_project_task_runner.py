@@ -352,6 +352,7 @@ def _recovery_runner(
     runner.db.list_pending_wakeups = AsyncMock(return_value=[])
     runner.db.list_pending_long_command_resumes = AsyncMock(return_value=[])
     runner.db.list_running_long_commands = AsyncMock(return_value=[])
+    runner.db.list_notifications_by_target = AsyncMock(return_value=[])
     planning_id = f"discord-task-plan:{GUILD_ID}:{thread.id}"
     runner.db.get_messages = AsyncMock(return_value=(
         [{"role": "assistant", "content": plan}] if plan else []
@@ -454,8 +455,11 @@ async def test_unrecoverable_in_progress_task_offers_one_release_action():
     assert [option["value"] for option in call["options"]] == [
         "cancelled", "backlog", "ready-for-user",
     ]
-    audit.assert_awaited_once()
-    assert audit.await_args.args[0] == "Discord task runner recovery action offered"
+    assert [call.args[0] for call in audit.await_args_list] == [
+        "Discord task runner selected task",
+        "Discord task runner recovery action offered",
+        "Discord task runner observed lifecycle state",
+    ]
 
 
 @pytest.mark.asyncio
@@ -468,9 +472,14 @@ async def test_pending_release_action_is_not_duplicated_on_next_poll():
         "id": "discord-task-recovery:1:100",
         "status": "pending",
     })
+    runner.db.list_notifications_by_target = AsyncMock(return_value=[{
+        "id": "discord-task-recovery:1:100",
+        "status": "pending",
+    }])
     service = MagicMock()
     service.propose_action = AsyncMock()
     runner.notification_service = service
+    runner.system_audit = AsyncMock()
 
     assert await runner.scan_once(guild) is True
     task = runner._active_task
@@ -478,6 +487,41 @@ async def test_pending_release_action_is_not_duplicated_on_next_poll():
     await task
 
     service.propose_action.assert_not_awaited()
+    assert [call.args[0] for call in runner.system_audit.await_args_list] == [
+        "Discord task runner selected task",
+        "Discord task runner recovery action pending",
+        "Discord task runner observed lifecycle state",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_answered_release_action_rearms_when_task_reenters_in_progress():
+    runner, guild, thread, _sessions = _recovery_runner(
+        mapped_session_id="discord-task:1:100",
+    )
+    runner.db.get_discord_session_binding = AsyncMock(return_value=None)
+    runner.db.list_notifications_by_target = AsyncMock(return_value=[{
+        "id": "discord-task-recovery:1:100",
+        "status": "answered",
+    }])
+    service = MagicMock()
+    service.propose_action = AsyncMock(return_value={"status": "sent"})
+    runner.notification_service = service
+    runner.system_audit = AsyncMock()
+
+    assert await runner.scan_once(guild) is True
+    task = runner._active_task
+    assert task is not None
+    await task
+
+    assert service.propose_action.await_args.kwargs["notification_id"] == (
+        "discord-task-recovery:1:100:2"
+    )
+    assert [call.args[0] for call in runner.system_audit.await_args_list] == [
+        "Discord task runner selected task",
+        "Discord task runner recovery action offered",
+        "Discord task runner observed lifecycle state",
+    ]
 
 
 @pytest.mark.asyncio
