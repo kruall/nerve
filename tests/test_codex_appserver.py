@@ -262,6 +262,9 @@ async def test_langfuse_plugin_is_injected_only_after_verified_install(
         args = client._transport._build_args()
         assert "--dangerously-bypass-hook-trust" in args
         assert "sk-lf-test" not in args
+        assert backend.thread_params(_spec(cfg))["config"] == {
+            "bypass_hook_trust": True,
+        }
     finally:
         await client.disconnect()
 
@@ -298,6 +301,7 @@ async def test_langfuse_plugin_failure_does_not_block_codex(
         assert "features.hooks=true" not in overrides
         assert "features.plugin_hooks=true" not in overrides
         assert "--dangerously-bypass-hook-trust" not in client._transport._build_args()
+        assert "config" not in backend.thread_params(_spec(cfg))
     finally:
         await client.disconnect()
 

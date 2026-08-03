@@ -584,6 +584,12 @@ class CodexBackend:
             "approvalPolicy": self.codex.approval_policy,
             "developerInstructions": spec.system_prompt + _BACKEND_NOTES,
         }
+        if self._langfuse_plugin_ready:
+            # The app-server process flag alone does not reach the Config
+            # snapshot used by thread/start, thread/resume, and thread/fork.
+            # Forward the runtime-only override in every thread request so
+            # the already verified managed hook is not filtered as untrusted.
+            params["config"] = {"bypass_hook_trust": True}
         return params
 
     def map_effort(self, effort: str) -> str | None:

@@ -85,7 +85,10 @@ Nerve creates the marketplace under isolated `~/.nerve/codex`, installs only
 that revision, disables floating updates, and enables Codex hooks only after
 the installed version and revision match. In headless app-server mode it also
 bypasses the interactive hook-trust prompt only after that verification. The
-isolated Codex home must therefore contain only managed, reviewed hooks.
+bypass is supplied both to the app-server process and to each fresh or resumed
+thread's runtime config because process-level app-server flags alone do not
+become thread config overrides. The isolated Codex home must therefore contain
+only managed, reviewed hooks.
 Credentials are supplied only in the child Codex process environment. Missing
 credentials, an invalid pin, installation/network failure, or exporter failure
 leaves Codex running without transcript tracing and appears as a separate
