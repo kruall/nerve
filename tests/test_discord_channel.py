@@ -178,7 +178,7 @@ def test_model_command_is_registered_for_configured_guild_only():
         guild=discord.Object(id=GUILD),
     )
     assert [command.name for command in commands] == [
-        "model", "create-task", "close_task",
+        "model", "create-task", "to_work", "postpone", "close_task",
     ]
     command = commands[0]
     tier = command.parameters[0]
@@ -187,7 +187,9 @@ def test_model_command_is_registered_for_configured_guild_only():
     ]
     create_task = commands[1]
     assert [parameter.name for parameter in create_task.parameters] == ["project"]
-    assert commands[2].parameters == []
+    for command in commands[2:]:
+        assert [parameter.name for parameter in command.parameters] == ["force"]
+        assert command.parameters[0].required is False
 
 
 @pytest.mark.asyncio
@@ -320,6 +322,7 @@ async def test_close_task_defers_completes_archives_and_retires_bound_session(
         channel._nerve_config,
         thread_id=YDB_THREAD,
         audit_reason=f"Nerve /close_task by {USER}",
+        force=False,
     )
     channel._notification_service.retire_completed_project_task_session.assert_awaited_once_with(
         "task-session",
@@ -363,6 +366,98 @@ async def test_close_task_rejects_foreign_thread_before_defer():
     interaction.response.send_message.assert_awaited_once_with(
         "Откройте /close_task внутри темы задачи проекта Nerve.",
         ephemeral=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_to_work_and_postpone_transition_the_task_with_force(monkeypatch):
+    channel = _channel()
+    transition = MagicMock(return_value={"current_status": "ready-for-agent"})
+    monkeypatch.setattr(
+        "nerve.channels.discord.transition_project_task_status", transition,
+    )
+    interaction = _interaction()
+
+    await channel._handle_to_work_command(interaction, force=True)
+
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    transition.assert_called_once_with(
+        channel._nerve_config,
+        thread_id=YDB_THREAD,
+        target_status="ready-for-agent",
+        audit_reason=f"Nerve /to_work by {USER}",
+        force=True,
+    )
+    interaction.followup.send.assert_awaited_once_with(
+        "Статус задачи: ready-for-agent.", ephemeral=True,
+    )
+
+    transition.reset_mock()
+    interaction = _interaction()
+    transition.return_value = {"current_status": "backlog"}
+    await channel._handle_postpone_command(interaction)
+
+    transition.assert_called_once_with(
+        channel._nerve_config,
+        thread_id=YDB_THREAD,
+        target_status="backlog",
+        audit_reason=f"Nerve /postpone by {USER}",
+        force=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_task_status_commands_reject_wrong_guild_author_and_thread(
+    monkeypatch,
+):
+    channel = _channel()
+    transition = MagicMock()
+    monkeypatch.setattr(
+        "nerve.channels.discord.transition_project_task_status", transition,
+    )
+
+    wrong_guild = _interaction(guild_id=GUILD + 1)
+    await channel._handle_to_work_command(wrong_guild)
+    wrong_guild.response.send_message.assert_awaited_once_with(
+        "Эта команда доступна только в настроенном сервере Nerve.", ephemeral=True,
+    )
+
+    forbidden = _interaction(user_id=USER + 2)
+    await channel._handle_postpone_command(forbidden)
+    forbidden.response.send_message.assert_awaited_once_with(
+        "У вас нет доступа к управлению задачами Nerve.", ephemeral=True,
+    )
+
+    foreign_thread = _interaction(channel_id=CONVERSATION_THREAD)
+    await channel._handle_to_work_command(foreign_thread)
+    foreign_thread.response.send_message.assert_awaited_once_with(
+        "Откройте /to_work внутри темы задачи проекта Nerve.", ephemeral=True,
+    )
+    transition.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_force_close_passes_force_and_retires_only_after_success(monkeypatch):
+    channel = _channel()
+    interaction = _interaction()
+    complete = MagicMock(return_value={"current_status": "completed"})
+    monkeypatch.setattr("nerve.channels.discord.complete_project_task", complete)
+    channel.db.get_discord_session_binding_by_thread = AsyncMock(
+        return_value={"session_id": "task-session"},
+    )
+    channel._notification_service = MagicMock()
+    channel._notification_service.retire_completed_project_task_session = AsyncMock()
+
+    await channel._handle_close_task_command(interaction, force=True)
+
+    complete.assert_called_once_with(
+        channel._nerve_config,
+        thread_id=YDB_THREAD,
+        audit_reason=f"Nerve /close_task by {USER}",
+        force=True,
+    )
+    channel._notification_service.retire_completed_project_task_session.assert_awaited_once_with(
+        "task-session",
     )
 
 

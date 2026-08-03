@@ -45,6 +45,7 @@ from nerve.discord_tags import (
     DiscordForumTagError,
     complete_project_task,
     resume_project_task,
+    transition_project_task_status,
 )
 
 if TYPE_CHECKING:
@@ -349,12 +350,46 @@ class DiscordChannel(BaseChannel):
             return self._project_task_creator.project_choices(current)
 
         @tree.command(
+            name="to_work",
+            description="Передать задачу в работу",
+            guild=guild,
+        )
+        @app_commands.describe(
+            force="Разрешить переход вне обычного графа статусов",
+        )
+        async def to_work_command(
+            interaction: discord.Interaction,
+            force: bool = False,
+        ) -> None:
+            await self._handle_to_work_command(interaction, force=force)
+
+        @tree.command(
+            name="postpone",
+            description="Отложить задачу в backlog",
+            guild=guild,
+        )
+        @app_commands.describe(
+            force="Разрешить переход вне обычного графа статусов",
+        )
+        async def postpone_command(
+            interaction: discord.Interaction,
+            force: bool = False,
+        ) -> None:
+            await self._handle_postpone_command(interaction, force=force)
+
+        @tree.command(
             name="close_task",
             description="Закрыть готовую задачу Nerve и архивировать тему",
             guild=guild,
         )
-        async def close_task_command(interaction: discord.Interaction) -> None:
-            await self._handle_close_task_command(interaction)
+        @app_commands.describe(
+            force="Разрешить закрытие вне обычного графа статусов",
+        )
+        async def close_task_command(
+            interaction: discord.Interaction,
+            force: bool = False,
+        ) -> None:
+            await self._handle_close_task_command(interaction, force=force)
 
         @client.event
         async def on_ready() -> None:
@@ -521,11 +556,14 @@ class DiscordChannel(BaseChannel):
             ),
         )
 
-    async def _handle_close_task_command(
+    async def _project_task_command_context(
         self,
         interaction: discord.Interaction,
-    ) -> None:
-        """Close the current ready-for-user project task mechanically."""
+        *,
+        command_name: str,
+        access_message: str,
+    ) -> tuple[int, int] | None:
+        """Validate a guild command that changes a project task lifecycle."""
         guild_id = int(getattr(interaction, "guild_id", 0) or 0)
         user_id = int(getattr(getattr(interaction, "user", None), "id", 0) or 0)
         channel_id = int(getattr(interaction, "channel_id", 0) or 0)
@@ -538,9 +576,9 @@ class DiscordChannel(BaseChannel):
         if user_id not in self._allowed_authors:
             await self._respond_to_interaction(
                 interaction,
-                "У вас нет доступа к закрытию задач Nerve.",
+                access_message,
             )
-            return
+            return None
 
         channel = getattr(interaction, "channel", None)
         if channel is None and self._client is not None:
@@ -557,9 +595,102 @@ class DiscordChannel(BaseChannel):
         ):
             await self._respond_to_interaction(
                 interaction,
-                "Откройте /close_task внутри темы задачи проекта Nerve.",
+                f"Откройте /{command_name} внутри темы задачи проекта Nerve.",
+            )
+            return None
+        return user_id, channel_id
+
+    async def _handle_project_task_status_command(
+        self,
+        interaction: discord.Interaction,
+        *,
+        command_name: str,
+        target_status: str,
+        force: bool,
+        access_message: str,
+    ) -> None:
+        """Apply one authenticated project-task lifecycle transition."""
+        context = await self._project_task_command_context(
+            interaction,
+            command_name=command_name,
+            access_message=access_message,
+        )
+        if context is None:
+            return
+        user_id, channel_id = context
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            result = await asyncio.to_thread(
+                transition_project_task_status,
+                self._nerve_config,
+                thread_id=channel_id,
+                target_status=target_status,
+                audit_reason=f"Nerve /{command_name} by {user_id}",
+                force=force,
+            )
+        except DiscordForumTagError as exc:
+            await interaction.followup.send(
+                f"Статус задачи не изменён: {exc}", ephemeral=True,
             )
             return
+        except Exception:
+            logger.exception(
+                "Unexpected /%s failure for Discord thread %s",
+                command_name, channel_id,
+            )
+            await interaction.followup.send(
+                "Статус задачи не изменён из-за внутренней ошибки Nerve.",
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            f"Статус задачи: {result['current_status']}.", ephemeral=True,
+        )
+
+    async def _handle_to_work_command(
+        self,
+        interaction: discord.Interaction,
+        *,
+        force: bool = False,
+    ) -> None:
+        await self._handle_project_task_status_command(
+            interaction,
+            command_name="to_work",
+            target_status="ready-for-agent",
+            force=force,
+            access_message="У вас нет доступа к управлению задачами Nerve.",
+        )
+
+    async def _handle_postpone_command(
+        self,
+        interaction: discord.Interaction,
+        *,
+        force: bool = False,
+    ) -> None:
+        await self._handle_project_task_status_command(
+            interaction,
+            command_name="postpone",
+            target_status="backlog",
+            force=force,
+            access_message="У вас нет доступа к управлению задачами Nerve.",
+        )
+
+    async def _handle_close_task_command(
+        self,
+        interaction: discord.Interaction,
+        *,
+        force: bool = False,
+    ) -> None:
+        """Close the current ready-for-user project task mechanically."""
+        context = await self._project_task_command_context(
+            interaction,
+            command_name="close_task",
+            access_message="У вас нет доступа к закрытию задач Nerve.",
+        )
+        if context is None:
+            return
+        user_id, channel_id = context
 
         await interaction.response.defer(ephemeral=True)
         try:
@@ -568,6 +699,7 @@ class DiscordChannel(BaseChannel):
                 self._nerve_config,
                 thread_id=channel_id,
                 audit_reason=f"Nerve /close_task by {user_id}",
+                force=force,
             )
         except DiscordForumTagError as exc:
             await interaction.followup.send(
@@ -588,7 +720,7 @@ class DiscordChannel(BaseChannel):
         binding = None
         try:
             binding = await self.db.get_discord_session_binding_by_thread(
-                guild_id, channel_id,
+                self.config.guild_id, channel_id,
             )
         except Exception:
             logger.exception(

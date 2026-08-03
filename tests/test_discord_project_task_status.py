@@ -16,6 +16,7 @@ from nerve.discord_tags import (
     DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND,
     DISCORD_PROJECT_TASK_RECOVERY_TARGET_KIND,
     DiscordProjectTaskStatusError,
+    complete_project_task,
     dispatch_discord_project_task_completion,
     dispatch_discord_project_task_recovery,
     resume_project_task,
@@ -56,7 +57,7 @@ def _forum(tags: list[dict] | None = None) -> dict:
         "guild_id": str(GUILD_ID),
         "type": 15,
         "name": "nerve",
-        "available_tags": tags or [
+        "available_tags": tags if tags is not None else [
             {
                 "id": str(300 + index),
                 "name": name,
@@ -86,7 +87,12 @@ def _thread(applied: list[str]) -> dict:
     }
 
 
-def _fake_api(monkeypatch, *, applied: list[str]) -> list[tuple]:
+def _fake_api(
+    monkeypatch,
+    *,
+    applied: list[str],
+    forum_tags: list[dict] | None = None,
+) -> list[tuple]:
     calls: list[tuple] = []
 
     def request(
@@ -97,7 +103,7 @@ def _fake_api(monkeypatch, *, applied: list[str]) -> list[tuple]:
         if method == "GET" and channel_id == THREAD_ID:
             return _thread(applied)
         if method == "GET" and channel_id == FORUM_ID:
-            return _forum()
+            return _forum(forum_tags)
         if method == "PATCH" and channel_id == THREAD_ID:
             if "applied_tags" in payload:
                 return _thread(payload["applied_tags"])
@@ -179,6 +185,73 @@ def test_blocked_task_cannot_bypass_recovery_handoff(monkeypatch):
         )
 
 
+def test_force_transition_skips_the_graph_and_preserves_other_tags(monkeypatch):
+    calls = _fake_api(monkeypatch, applied=[OTHER_TAG_ID, "304"])
+
+    result = transition_project_task_status(
+        _config(),
+        thread_id=THREAD_ID,
+        target_status="backlog",
+        audit_reason="force",
+        force=True,
+    )
+
+    assert result["previous_status"] == "completed"
+    assert result["current_status"] == "backlog"
+    assert calls[-1][2] == {"applied_tags": [OTHER_TAG_ID, "300"]}
+
+
+def test_force_transition_still_rejects_ambiguous_or_missing_tags(monkeypatch):
+    duplicate_ready_tags = _forum()["available_tags"] + [{
+        "id": "777", "name": "ready-for-agent", "moderated": False,
+        "emoji_id": None, "emoji_name": None,
+    }]
+    _fake_api(monkeypatch, applied=["304"], forum_tags=duplicate_ready_tags)
+
+    with pytest.raises(DiscordProjectTaskStatusError, match="exactly one"):
+        transition_project_task_status(
+            _config(),
+            thread_id=THREAD_ID,
+            target_status="backlog",
+            audit_reason="force",
+            force=True,
+        )
+
+    _fake_api(monkeypatch, applied=[OTHER_TAG_ID])
+    with pytest.raises(DiscordProjectTaskStatusError, match="no task-status tag"):
+        transition_project_task_status(
+            _config(),
+            thread_id=THREAD_ID,
+            target_status="backlog",
+            audit_reason="force",
+            force=True,
+        )
+
+    missing_backlog_tag = _forum()["available_tags"][1:]
+    _fake_api(monkeypatch, applied=["304"], forum_tags=missing_backlog_tag)
+    with pytest.raises(DiscordProjectTaskStatusError, match="invalid: backlog"):
+        transition_project_task_status(
+            _config(),
+            thread_id=THREAD_ID,
+            target_status="backlog",
+            audit_reason="force",
+            force=True,
+        )
+
+
+def test_force_transition_still_rejects_multiple_applied_statuses(monkeypatch):
+    _fake_api(monkeypatch, applied=["301", "302"])
+
+    with pytest.raises(DiscordProjectTaskStatusError, match="more than one"):
+        transition_project_task_status(
+            _config(),
+            thread_id=THREAD_ID,
+            target_status="backlog",
+            audit_reason="force",
+            force=True,
+        )
+
+
 def test_transition_fails_closed_for_multiple_status_tags(monkeypatch):
     _fake_api(monkeypatch, applied=["301", "302"])
 
@@ -207,6 +280,33 @@ async def test_tool_uses_the_bound_discord_project_thread(monkeypatch):
 
     assert result.is_error is False
     assert json.loads(result.content[0]["text"])["current_status"] == "in-progress"
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_cannot_forward_a_force_transition(monkeypatch):
+    captured: dict = {}
+
+    def transition(*_args, **kwargs):
+        captured.update(kwargs)
+        return {"current_status": "in-progress"}
+
+    monkeypatch.setattr(
+        "nerve.agent.tools.handlers.discord.transition_project_task_status",
+        transition,
+    )
+    engine = MagicMock()
+    engine.get_active_channel.return_value = "discord"
+    engine.router.get_message_context.return_value = {
+        "channel_name": "discord", "target": str(THREAD_ID),
+    }
+
+    result = await discord_project_task_status_handler(
+        ToolContext(session_id="s1", config=_config(), engine=engine),
+        {"status": "in-progress", "force": True},
+    )
+
+    assert result.is_error is False
+    assert "force" not in captured
 
 
 @pytest.mark.asyncio
@@ -308,6 +408,26 @@ def test_close_rejects_task_not_ready_for_user(monkeypatch):
     assert [call[:2] for call in calls] == [
         ("GET", THREAD_ID), ("GET", FORUM_ID),
     ]
+
+
+def test_force_close_replaces_status_then_archives(monkeypatch):
+    calls = _fake_api(monkeypatch, applied=[OTHER_TAG_ID, "302"])
+
+    result = complete_project_task(
+        _config(), thread_id=THREAD_ID, audit_reason="force close", force=True,
+    )
+
+    assert result["previous_status"] == "in-progress"
+    assert result["current_status"] == "completed"
+    assert result["archived"] is True
+    assert [call[:2] for call in calls] == [
+        ("GET", THREAD_ID),
+        ("GET", FORUM_ID),
+        ("PATCH", THREAD_ID),
+        ("PATCH", THREAD_ID),
+    ]
+    assert calls[2][2] == {"applied_tags": [OTHER_TAG_ID, "304"]}
+    assert calls[3][2] == {"archived": True}
 
 
 def test_approved_completion_changes_tag_then_archives(monkeypatch):

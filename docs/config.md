@@ -566,14 +566,21 @@ message mentions the command's author and contains the description. An
 unmarked task starts in the normal `new-task` lifecycle state. Neither form
 choice starts an agent session directly.
 
-`/close_task` is available in the same guild to `discord.allowed_author_ids`,
-without arguments, but only inside a configured project-task thread whose
-current tag is `ready-for-user`. It changes the tag to `completed`, archives
-the thread, and retires the bound session without creating a model turn. The
-agent status tool can hand work back with `ready-for-user`, but cannot set
-`completed` directly. A mention or true reply to the bot in that state resumes
-the task as `in-progress` before dispatch; unmentioned context does not change
-the lifecycle tag.
+`/to_work`, `/postpone`, and `/close_task` are available in the same guild to
+`discord.allowed_author_ids`, only inside configured project-task threads.
+They respectively change the task to `ready-for-agent`, change it to `backlog`,
+and change it to `completed` before archiving the thread and retiring its bound
+session. Each has an optional `force` boolean that defaults to `false`.
+Without it, the ordinary lifecycle graph applies; with `force=true`, an
+authorized user can replace one unambiguous lifecycle tag with the command's
+target even when the graph would reject the transition. Force never bypasses
+the configured guild and author checks, project-thread validation, a missing
+or ambiguous lifecycle tag, Discord's five-tag limit, or Discord API errors.
+It does not cancel an active model turn, unarchive a completed thread, or
+restore a retired session. The agent status tool can hand work back with
+`ready-for-user`, but cannot set `completed` directly. A mention or true reply
+to the bot in that state resumes the task as `in-progress` before dispatch;
+unmentioned context does not change the lifecycle tag.
 
 ### Discord project-forum tools
 

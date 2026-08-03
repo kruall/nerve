@@ -899,6 +899,7 @@ def _apply_project_task_status(
     audit_reason: str,
     allow_reopen: bool = False,
     allow_verified_blocked_handoff: bool = False,
+    force: bool = False,
 ) -> dict[str, Any]:
     thread_id = str(_snowflake(thread.get("id"), "thread id"))
     if current == target:
@@ -909,7 +910,12 @@ def _apply_project_task_status(
             "previous_status": current,
             "current_status": target,
         }
-    if target not in _PROJECT_TASK_TRANSITIONS[current] and not (
+    if force and not any(tag_id in status_tag_ids for tag_id in current_ids):
+        raise DiscordProjectTaskStatusError(
+            "Project thread has no task-status tag; force requires one "
+            "unambiguous current lifecycle tag"
+        )
+    if not force and target not in _PROJECT_TASK_TRANSITIONS[current] and not (
         allow_reopen
         and current == "ready-for-user"
         and target == "in-progress"
@@ -964,12 +970,16 @@ def transition_project_task_status(
     target_status: str,
     audit_reason: str,
     allow_verified_blocked_handoff: bool = False,
+    force: bool = False,
 ) -> dict[str, Any]:
     """Apply one validated lifecycle transition to a project-thread tag.
 
     ``allow_verified_blocked_handoff`` is reserved for the recovery approval
     dispatcher after it has authenticated the Discord actor and decision.
     Agents using the ordinary lifecycle tool cannot bypass a blocked task.
+    ``force`` is reserved for authenticated guild commands; it bypasses only
+    the transition graph after the project thread and its lifecycle tags have
+    been fully validated.
     """
     target = str(target_status or "").strip().casefold()
     if target not in PROJECT_TASK_STATUSES:
@@ -993,6 +1003,7 @@ def transition_project_task_status(
             target=target,
             audit_reason=audit_reason,
             allow_verified_blocked_handoff=allow_verified_blocked_handoff,
+            force=force,
         )
 
 
@@ -1034,6 +1045,7 @@ def complete_project_task(
     *,
     thread_id: Any,
     audit_reason: str,
+    force: bool = False,
 ) -> dict[str, Any]:
     """Mark a project task complete, then archive its Discord thread.
 
@@ -1048,7 +1060,7 @@ def complete_project_task(
         project, thread, status_tag_ids, current_ids, current = (
             _project_task_state(manager, thread_id)
         )
-        if current not in {"ready-for-user", "completed"}:
+        if not force and current not in {"ready-for-user", "completed"}:
             raise DiscordProjectTaskStatusError(
                 "Project task can be closed only from ready-for-user; "
                 f"current status is {current}"
@@ -1062,6 +1074,7 @@ def complete_project_task(
             current=current,
             target="completed",
             audit_reason=audit_reason,
+            force=force,
         )
         if not bool(thread.get("archived")):
             _discord_request(
