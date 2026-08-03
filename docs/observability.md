@@ -83,7 +83,15 @@ langfuse:
 
 Nerve creates the marketplace under isolated `~/.nerve/codex`, installs only
 that revision, disables floating updates, and enables Codex hooks only after
-the installed version and revision match. In headless app-server mode it also
+the installed version and revision match. The pinned `0.1.0` artifact reports
+Codex's inclusive input/output counters as flat Langfuse usage buckets. Nerve
+therefore applies the deterministic `exclusive-usage-v1` compatibility patch:
+cached input and reasoning output are subtracted from their inclusive parent
+buckets before export. Both source and bundled hook must match the reviewed
+artifact exactly; the patched bytes and patch id are bound into the managed
+install receipt. A mismatch disables Codex tracing without blocking Codex.
+
+In headless app-server mode Nerve also
 bypasses the interactive hook-trust prompt only after that verification. The
 bypass is supplied both to the app-server process and to each fresh or resumed
 thread's runtime config because process-level app-server flags alone do not

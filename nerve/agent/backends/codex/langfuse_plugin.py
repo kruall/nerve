@@ -23,8 +23,67 @@ logger = logging.getLogger(__name__)
 
 _MARKETPLACE = "codex-observability-plugin"
 _PLUGIN = "tracing"
+_USAGE_PATCH_ID = "exclusive-usage-v1"
 _INSTALL_LOCK = asyncio.Lock()
 _last_error: str | None = None
+
+_SOURCE_USAGE_REPLACEMENTS = (
+    (
+        '  const details: Record<string, number> = {};',
+        '''  const details: Record<string, number> = {};
+  // Nerve managed patch: exclusive-usage-v1
+  const cachedInputTokens =
+    typeof usage.cached_input_tokens === "number" ? usage.cached_input_tokens : 0;
+  const reasoningOutputTokens =
+    typeof usage.reasoning_output_tokens === "number" ? usage.reasoning_output_tokens : 0;''',
+    ),
+    (
+        '  if (typeof usage.input_tokens === "number") details.input = usage.input_tokens;',
+        '''  if (typeof usage.input_tokens === "number") {
+    details.input = Math.max(0, usage.input_tokens - cachedInputTokens);
+  }''',
+    ),
+    (
+        '  if (typeof usage.output_tokens === "number") details.output = usage.output_tokens;',
+        '''  if (typeof usage.output_tokens === "number") {
+    details.output = Math.max(0, usage.output_tokens - reasoningOutputTokens);
+  }''',
+    ),
+    (
+        "    details.cache_read_input_tokens = usage.cached_input_tokens;",
+        "    details.cache_read_input_tokens = cachedInputTokens;",
+    ),
+    (
+        "    details.reasoning_tokens = usage.reasoning_output_tokens;",
+        "    details.reasoning_tokens = reasoningOutputTokens;",
+    ),
+)
+
+_BUNDLE_USAGE_REPLACEMENTS = (
+    (
+        "\tconst details = {};",
+        '''\tconst details = {};
+\t/* Nerve managed patch: exclusive-usage-v1 */
+\tconst cachedInputTokens = typeof usage.cached_input_tokens === "number" ? usage.cached_input_tokens : 0;
+\tconst reasoningOutputTokens = typeof usage.reasoning_output_tokens === "number" ? usage.reasoning_output_tokens : 0;''',
+    ),
+    (
+        '\tif (typeof usage.input_tokens === "number") details.input = usage.input_tokens;',
+        '\tif (typeof usage.input_tokens === "number") details.input = Math.max(0, usage.input_tokens - cachedInputTokens);',
+    ),
+    (
+        '\tif (typeof usage.output_tokens === "number") details.output = usage.output_tokens;',
+        '\tif (typeof usage.output_tokens === "number") details.output = Math.max(0, usage.output_tokens - reasoningOutputTokens);',
+    ),
+    (
+        '\tif (typeof usage.cached_input_tokens === "number") details.cache_read_input_tokens = usage.cached_input_tokens;',
+        '\tif (typeof usage.cached_input_tokens === "number") details.cache_read_input_tokens = cachedInputTokens;',
+    ),
+    (
+        '\tif (typeof usage.reasoning_output_tokens === "number") details.reasoning_tokens = usage.reasoning_output_tokens;',
+        '\tif (typeof usage.reasoning_output_tokens === "number") details.reasoning_tokens = reasoningOutputTokens;',
+    ),
+)
 
 
 def managed_dir(home: str | Path) -> Path:
@@ -135,8 +194,55 @@ def _tree_digest(root: Path) -> str:
     return digest.hexdigest()
 
 
+def _usage_patch_applied(root: Path) -> bool:
+    try:
+        source = (root / "src" / "trace.ts").read_text(encoding="utf-8")
+        bundle = _hook_entrypoint(root).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return all(
+        patched in source for _, patched in _SOURCE_USAGE_REPLACEMENTS
+    ) and all(
+        patched in bundle for _, patched in _BUNDLE_USAGE_REPLACEMENTS
+    )
+
+
+def _apply_usage_patch(root: Path) -> None:
+    """Make inclusive Codex counters exclusive for Langfuse flat usage keys."""
+    targets = (
+        (root / "src" / "trace.ts", _SOURCE_USAGE_REPLACEMENTS),
+        (_hook_entrypoint(root), _BUNDLE_USAGE_REPLACEMENTS),
+    )
+    for path, replacements in targets:
+        try:
+            content = path.read_text(encoding="utf-8")
+            mode = path.stat().st_mode & 0o777
+        except OSError as error:
+            raise RuntimeError(
+                "Langfuse usage-normalization target is unavailable"
+            ) from error
+        updated = content
+        for original, patched in replacements:
+            if patched in updated:
+                continue
+            if updated.count(original) != 1:
+                raise RuntimeError(
+                    "Langfuse usage-normalization target does not match the "
+                    "reviewed plugin"
+                )
+            updated = updated.replace(original, patched)
+        if updated != content:
+            _atomic_write(path, updated, mode=mode)
+    if not _usage_patch_applied(root):
+        raise RuntimeError("Langfuse usage-normalization patch verification failed")
+
+
 def _receipt_revision(
-    config: Any, plugin_root: Path, version: str,
+    config: Any,
+    plugin_root: Path,
+    version: str,
+    *,
+    patch: str | None = _USAGE_PATCH_ID,
 ) -> str:
     path = managed_dir(config.codex.home_dir) / "install-receipt.json"
     try:
@@ -144,6 +250,7 @@ def _receipt_revision(
         if (
             receipt.get("path") == str(plugin_root)
             and receipt.get("version") == version
+            and receipt.get("patch") == patch
             and receipt.get("digest") == _tree_digest(plugin_root)
             and re.fullmatch(r"[0-9a-f]{40}", str(receipt.get("revision") or ""))
         ):
@@ -162,6 +269,7 @@ def _write_install_receipt(
             "path": str(plugin_root),
             "version": version,
             "revision": config.langfuse.codex.revision,
+            "patch": _USAGE_PATCH_ID,
             "digest": _tree_digest(plugin_root),
         }, indent=2) + "\n",
     )
@@ -184,6 +292,7 @@ def installation_status(config: Any) -> dict[str, Any]:
         manifest = {}
     version = str(manifest.get("version") or "")
     receipt_revision = _receipt_revision(config, root, version)
+    usage_patched = _usage_patch_applied(root)
     revision_configured = bool(re.fullmatch(r"[0-9a-f]{40}", plugin.revision))
     installed = bool(
         revision_configured
@@ -192,6 +301,7 @@ def installation_status(config: Any) -> dict[str, Any]:
         and marketplace_revision == plugin.revision
         and receipt_revision == plugin.revision
         and _hook_entrypoint(root).is_file()
+        and usage_patched
     )
     auth = _credentials_configured(config)
     requested = bool(plugin.enabled)
@@ -214,6 +324,7 @@ def installation_status(config: Any) -> dict[str, Any]:
         "expected_revision": plugin.revision or None,
         "path": str(root) if root.exists() else None,
         "auto_update": False,
+        "usage_normalization": _USAGE_PATCH_ID if usage_patched else None,
         "max_chars": plugin.max_chars,
         "last_error": error,
     }
@@ -289,6 +400,42 @@ async def ensure_installed(config: Any) -> dict[str, Any]:
             status = installation_status(config)
             if status["ready"]:
                 return status
+            root = _runtime_root(config)
+            try:
+                manifest = json.loads(
+                    (root / ".codex-plugin" / "plugin.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+            except (OSError, ValueError):
+                manifest = {}
+            legacy_ready = bool(
+                manifest.get("name") == _PLUGIN
+                and manifest.get("version") == plugin.version
+                and _git_revision(_marketplace_root(config)) == plugin.revision
+                and _receipt_revision(
+                    config, root, plugin.version, patch=None,
+                ) == plugin.revision
+                and _hook_entrypoint(root).is_file()
+            )
+            if legacy_ready:
+                try:
+                    _apply_usage_patch(root)
+                    _write_install_receipt(config, root, plugin.version)
+                    status = installation_status(config)
+                    if not status["installed"]:
+                        raise RuntimeError(
+                            "patched Langfuse plugin failed managed verification"
+                        )
+                    _last_error = None
+                    logger.info(
+                        "Applied managed Langfuse usage normalization %s at %s",
+                        _USAGE_PATCH_ID, status["path"],
+                    )
+                    return status
+                except Exception as error:
+                    record_error(error, config)
+                    return installation_status(config)
             # Credentials intentionally are not present during installation.
             env = {
                 key: value for key, value in os.environ.items()
@@ -341,6 +488,7 @@ async def ensure_installed(config: Any) -> dict[str, Any]:
                     raise RuntimeError(
                         "Codex plugin runtime cache does not match the pinned version"
                     )
+                _apply_usage_patch(root)
                 _write_install_receipt(config, root, plugin.version)
                 status = installation_status(config)
                 if not status["installed"]:

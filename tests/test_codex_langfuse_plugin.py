@@ -63,15 +63,35 @@ def _materialize_runtime(config: NerveConfig) -> Path:
     manifest.write_text(json.dumps({"name": "tracing", "version": "0.1.0"}))
     entrypoint = root / "dist" / "index.mjs"
     entrypoint.parent.mkdir()
-    entrypoint.write_text("// bundled hook")
+    entrypoint.write_text("\n".join(
+        original for original, _ in plugin._BUNDLE_USAGE_REPLACEMENTS
+    ))
+    source = root / "src" / "trace.ts"
+    source.parent.mkdir()
+    source.write_text("\n".join(
+        original for original, _ in plugin._SOURCE_USAGE_REPLACEMENTS
+    ))
     return root
 
 
 def _materialize_installed(config: NerveConfig) -> Path:
     _materialize_marketplace(config)
     root = _materialize_runtime(config)
+    plugin._apply_usage_patch(root)
     plugin._write_install_receipt(config, root, "0.1.0")
     return root
+
+
+def _write_legacy_receipt(config: NerveConfig, root: Path) -> None:
+    plugin._atomic_write(
+        plugin.managed_dir(config.codex.home_dir) / "install-receipt.json",
+        json.dumps({
+            "path": str(root),
+            "version": "0.1.0",
+            "revision": REVISION,
+            "digest": plugin._tree_digest(root),
+        }),
+    )
 
 
 def test_status_requires_exact_version_revision_and_credentials(tmp_path):
@@ -84,6 +104,7 @@ def test_status_requires_exact_version_revision_and_credentials(tmp_path):
     assert status["version"] == "0.1.0"
     assert status["revision"] == REVISION
     assert status["path"] == str(root)
+    assert status["usage_normalization"] == "exclusive-usage-v1"
     assert "pk-lf-test" not in json.dumps(status)
     assert "sk-lf-test" not in json.dumps(status)
 
@@ -96,6 +117,72 @@ def test_codex_cache_uses_content_bound_install_receipt(tmp_path):
 
     (root / "dist" / "index.mjs").write_text("changed after verification")
     assert plugin.installation_status(config)["ready"] is False
+
+
+def test_usage_patch_makes_flat_langfuse_buckets_exclusive(tmp_path):
+    config = _config(tmp_path)
+    root = _materialize_runtime(config)
+
+    plugin._apply_usage_patch(root)
+
+    source = (root / "src" / "trace.ts").read_text()
+    bundle = (root / "dist" / "index.mjs").read_text()
+    for content in (source, bundle):
+        assert "usage.input_tokens - cachedInputTokens" in content
+        assert "usage.output_tokens - reasoningOutputTokens" in content
+        assert "details.cache_read_input_tokens = cachedInputTokens" in content
+        assert "details.reasoning_tokens = reasoningOutputTokens" in content
+    assert plugin._usage_patch_applied(root) is True
+
+    # Reapplying the managed patch is deterministic and idempotent.
+    digest = plugin._tree_digest(root)
+    plugin._apply_usage_patch(root)
+    assert plugin._tree_digest(root) == digest
+
+
+@pytest.mark.asyncio
+async def test_legacy_verified_install_is_patched_without_network(
+    tmp_path, monkeypatch,
+):
+    config = _config(tmp_path)
+    _materialize_marketplace(config)
+    root = _materialize_runtime(config)
+    _write_legacy_receipt(config, root)
+
+    async def unexpected_run(*args, **kwargs):
+        raise AssertionError("legacy repair must not invoke Codex or the network")
+
+    monkeypatch.setattr(plugin, "_run", unexpected_run)
+    status = await plugin.ensure_installed(config)
+
+    assert status["ready"] is True
+    assert status["usage_normalization"] == "exclusive-usage-v1"
+    assert plugin._usage_patch_applied(root) is True
+
+
+@pytest.mark.asyncio
+async def test_usage_patch_mismatch_disables_tracing_without_network(
+    tmp_path, monkeypatch,
+):
+    config = _config(tmp_path)
+    _materialize_marketplace(config)
+    root = _materialize_runtime(config)
+    entrypoint = root / "dist" / "index.mjs"
+    entrypoint.write_text(entrypoint.read_text().replace(
+        'details.input = usage.input_tokens',
+        'details.input = unexpected_provider_counter',
+    ))
+    _write_legacy_receipt(config, root)
+
+    async def unexpected_run(*args, **kwargs):
+        raise AssertionError("a reviewed-artifact mismatch must fail open")
+
+    monkeypatch.setattr(plugin, "_run", unexpected_run)
+    status = await plugin.ensure_installed(config)
+
+    assert status["ready"] is False
+    assert status["usage_normalization"] is None
+    assert "does not match the reviewed plugin" in status["last_error"]
 
 
 def test_local_marketplace_source_tree_is_not_runtime_ready(tmp_path):
