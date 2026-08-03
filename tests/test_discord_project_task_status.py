@@ -167,6 +167,18 @@ def test_transition_rejects_skipped_or_terminal_paths(monkeypatch):
         )
 
 
+def test_blocked_task_cannot_bypass_recovery_handoff(monkeypatch):
+    _fake_api(monkeypatch, applied=["305"])
+
+    with pytest.raises(DiscordProjectTaskStatusError, match="Invalid project task transition"):
+        transition_project_task_status(
+            _config(),
+            thread_id=THREAD_ID,
+            target_status="ready-for-user",
+            audit_reason="test",
+        )
+
+
 def test_transition_fails_closed_for_multiple_status_tags(monkeypatch):
     _fake_api(monkeypatch, applied=["301", "302"])
 
@@ -317,7 +329,7 @@ def test_approved_completion_changes_tag_then_archives(monkeypatch):
 
 
 def test_recovery_action_changes_status_and_mentions_the_actor(monkeypatch):
-    calls = _fake_api(monkeypatch, applied=["302"])
+    calls = _fake_api(monkeypatch, applied=["305"])
 
     result = dispatch_discord_project_task_recovery(
         {"id": "recovery-1"},
@@ -334,6 +346,7 @@ def test_recovery_action_changes_status_and_mentions_the_actor(monkeypatch):
         ("PATCH", THREAD_ID),
         ("POST", THREAD_ID),
     ]
+    assert calls[2][2] == {"applied_tags": ["303"]}
     assert calls[-1][2] == {
         "content": "<@400> Task runner claim released: `ready-for-user`.",
         "allowed_mentions": {"users": ["400"]},

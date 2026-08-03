@@ -898,6 +898,7 @@ def _apply_project_task_status(
     target: str,
     audit_reason: str,
     allow_reopen: bool = False,
+    allow_verified_blocked_handoff: bool = False,
 ) -> dict[str, Any]:
     thread_id = str(_snowflake(thread.get("id"), "thread id"))
     if current == target:
@@ -912,6 +913,10 @@ def _apply_project_task_status(
         allow_reopen
         and current == "ready-for-user"
         and target == "in-progress"
+    ) and not (
+        allow_verified_blocked_handoff
+        and current == "blocked"
+        and target == "ready-for-user"
     ):
         allowed = ", ".join(sorted(_PROJECT_TASK_TRANSITIONS[current])) or "(none)"
         raise DiscordProjectTaskStatusError(
@@ -958,8 +963,14 @@ def transition_project_task_status(
     thread_id: Any,
     target_status: str,
     audit_reason: str,
+    allow_verified_blocked_handoff: bool = False,
 ) -> dict[str, Any]:
-    """Apply one validated lifecycle transition to a project-thread tag."""
+    """Apply one validated lifecycle transition to a project-thread tag.
+
+    ``allow_verified_blocked_handoff`` is reserved for the recovery approval
+    dispatcher after it has authenticated the Discord actor and decision.
+    Agents using the ordinary lifecycle tool cannot bypass a blocked task.
+    """
     target = str(target_status or "").strip().casefold()
     if target not in PROJECT_TASK_STATUSES:
         valid = ", ".join(sorted(PROJECT_TASK_STATUSES))
@@ -981,6 +992,7 @@ def transition_project_task_status(
             current=current,
             target=target,
             audit_reason=audit_reason,
+            allow_verified_blocked_handoff=allow_verified_blocked_handoff,
         )
 
 
@@ -1207,6 +1219,7 @@ def dispatch_discord_project_task_recovery(
                 "Nerve blocked Discord task recovery approval "
                 f"{notification.get('id', '')}"
             ),
+            allow_verified_blocked_handoff=True,
         )
         _discord_request(
             config.discord,
