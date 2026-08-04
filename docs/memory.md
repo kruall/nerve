@@ -199,7 +199,7 @@ memorize(content="User prefers dark mode in all apps", memory_type="profile")
 Explicitly save a fact to memU. Use when told "remember this" or when learning something important mid-conversation.
 
 ```
-memory_update(memory_id="abc123", content="Updated fact", memory_type="knowledge", categories="work,infrastructure")
+memory_update(memory_id="abc123", content="Updated fact", memory_type="knowledge", categories=["work", "infrastructure"])
 ```
 Update an existing memory item's content, type, or category assignments. Re-embeds and regenerates category summaries automatically.
 

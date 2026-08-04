@@ -448,10 +448,22 @@ async def memory_update_handler(ctx: ToolContext, args: dict) -> ToolResult:
     memory_id = args["memory_id"]
     content = args.get("content", "") or None
     memory_type = args.get("memory_type", "") or None
-    raw_cats = args.get("categories", "") or ""
-    categories = [c.strip() for c in raw_cats.split(",") if c.strip()] or None
+    raw_categories = args.get("categories")
+    categories: list[str] | None
+    if raw_categories is None:
+        categories = None
+    elif isinstance(raw_categories, list):
+        if not all(isinstance(category, str) for category in raw_categories):
+            return ToolResult.text("Categories must be an array of strings.")
+        categories = [category.strip() for category in raw_categories if category.strip()]
+    elif isinstance(raw_categories, str):
+        # Accept persisted calls made against the old comma-separated schema.
+        # New callers receive an array so commas remain valid within a name.
+        categories = [category.strip() for category in raw_categories.split(",") if category.strip()]
+    else:
+        return ToolResult.text("Categories must be an array of strings.")
 
-    if not content and not memory_type and not categories:
+    if not content and not memory_type and categories is None:
         return ToolResult.text(
             "Nothing to update — provide content, memory_type, or categories."
         )

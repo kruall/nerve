@@ -362,9 +362,9 @@ MEMORY_UPDATE_SCHEMA = {
             "default": "",
         },
         "categories": {
-            "type": "string",
-            "description": "Comma-separated category names to reassign to (e.g. 'work,personal')",
-            "default": "",
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Exact category names to reassign to (e.g. ['work', 'personal']). Names may contain commas.",
         },
     },
     "required": ["memory_id"],
