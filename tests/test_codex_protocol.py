@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
 from nerve.agent.backends import events as ev
-from nerve.agent.backends.base import SessionSpec
+from nerve.agent.backends.base import SessionSpec, TurnInput
 from nerve.agent.backends.codex.backend import CodexBackend, CodexClient
 from nerve.agent.backends.codex.pricing import compute_cost, match_pricing
 from nerve.config import NerveConfig
@@ -177,3 +178,91 @@ def test_backend_notes_appended_to_developer_instructions(tmp_path):
     assert "Native Codex skills keep their normal" in flat_instructions
     assert params["approvalPolicy"] == "never"
     assert params["sandbox"] == "danger-full-access"
+
+
+def test_workspace_write_can_make_git_metadata_writable(tmp_path):
+    shared = tmp_path / "shared"
+    client = _client(
+        tmp_path,
+        sandbox="workspace-write",
+        writable_git_metadata=True,
+        extra_config={
+            "sandbox_workspace_write.writable_roots": [
+                str(shared), str(tmp_path),
+            ],
+            "sandbox_workspace_write.network_access": False,
+        },
+    )
+    backend = client._backend
+
+    thread = backend.thread_params(client._spec)
+    assert "sandbox" not in thread
+    assert thread["runtimeWorkspaceRoots"] == [str(tmp_path), str(shared)]
+    assert backend.turn_permission_params(client._spec) == {
+        "permissions": "nerve_workspace_write_git",
+        "runtimeWorkspaceRoots": [str(tmp_path), str(shared)],
+    }
+
+    overrides = backend.build_config_overrides(client._spec)
+    assert "default_permissions=\"nerve_workspace_write_git\"" in overrides
+    assert not any(
+        value.startswith("sandbox_workspace_write.")
+        for value in overrides
+    )
+    filesystem = next(
+        value for value in overrides
+        if value.startswith(
+            "permissions.nerve_workspace_write_git.filesystem=",
+        )
+    )
+    assert '\".git/\"=\"write\"' in filesystem
+    assert '\".agents/\"=\"read\"' in filesystem
+    assert '\".codex/\"=\"read\"' in filesystem
+    assert '\":tmpdir\"=\"write\"' in filesystem
+    assert '\":slash_tmp\"=\"write\"' in filesystem
+    assert not any(
+        value == "permissions.nerve_workspace_write_git.network.enabled=true"
+        for value in overrides
+    )
+
+
+def test_git_metadata_profile_is_opt_in(tmp_path):
+    client = _client(tmp_path, sandbox="workspace-write")
+    backend = client._backend
+
+    assert backend.turn_permission_params(client._spec) == {}
+    assert "runtimeWorkspaceRoots" not in backend.thread_params(client._spec)
+    assert not any(
+        value.startswith("permissions.nerve_workspace_write_git.")
+        for value in backend.build_config_overrides(client._spec)
+    )
+
+
+@pytest.mark.asyncio
+async def test_start_turn_selects_git_writable_profile(tmp_path):
+    client = _client(
+        tmp_path,
+        sandbox="workspace-write",
+        writable_git_metadata=True,
+    )
+    client._thread_id = "thread-1"
+    requests: list[tuple[str, dict]] = []
+
+    async def request(method: str, params: dict) -> dict:
+        requests.append((method, params))
+        return {"turn": {"id": "turn-1"}}
+
+    client._transport = SimpleNamespace(
+        notifications=asyncio.Queue(),
+        request=request,
+    )
+
+    await client.start_turn(TurnInput(text="commit the change"))
+
+    assert requests == [("turn/start", {
+        "threadId": "thread-1",
+        "input": [{"type": "text", "text": "commit the change"}],
+        "permissions": "nerve_workspace_write_git",
+        "runtimeWorkspaceRoots": [str(tmp_path)],
+        "effort": "high",
+    })]

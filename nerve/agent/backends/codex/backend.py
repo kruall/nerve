@@ -65,6 +65,8 @@ from nerve.agent.backends.images import validate_image_data
 
 logger = logging.getLogger(__name__)
 
+_GIT_WRITABLE_PERMISSION_PROFILE = "nerve_workspace_write_git"
+
 # Backend notes appended to the developer instructions so the model
 # knows how this runtime differs from the docs it may have absorbed.
 _BACKEND_NOTES = """
@@ -498,15 +500,115 @@ class CodexBackend:
             overrides.append("tools.web_search=false")
 
         for key, value in (self.codex.extra_config or {}).items():
+            if (
+                self._uses_git_writable_permission_profile()
+                and key.startswith("sandbox_workspace_write.")
+            ):
+                # Named permissions and legacy sandbox_workspace_write are
+                # mutually exclusive. The profile builder translates these
+                # network/tmp flags, and runtime roots are sent on the thread.
+                continue
             if isinstance(value, str):
                 overrides.append(f"{key}={_toml_str(value)}")
             elif isinstance(value, bool):
                 overrides.append(f"{key}={'true' if value else 'false'}")
             else:
                 overrides.append(f"{key}={value}")
+        if self._uses_git_writable_permission_profile():
+            overrides.extend(self._git_writable_permission_profile_overrides())
         if self._langfuse_plugin_ready:
             overrides.extend(langfuse_config_overrides())
         return overrides
+
+    def _uses_git_writable_permission_profile(self) -> bool:
+        return (
+            self.codex.sandbox == "workspace-write"
+            and self.codex.writable_git_metadata
+        )
+
+    def _workspace_write_flag(self, key: str, default: bool = False) -> bool:
+        value = (self.codex.extra_config or {}).get(
+            f"sandbox_workspace_write.{key}", default,
+        )
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    def _git_writable_permission_profile_overrides(self) -> list[str]:
+        """Define workspace-write without Codex's implicit .git carveout.
+
+        Named permission profiles compile directly into the effective
+        filesystem policy. Unlike the legacy ``workspace-write`` shorthand,
+        they do not add a narrower read-only rule for Git metadata. Keep the
+        other protected workspace directories and temporary-directory behavior
+        aligned with the built-in profile.
+        """
+        scoped = {
+            ".": "write",
+            ".git/": "write",
+            ".agents/": "read",
+            ".codex/": "read",
+        }
+        scoped_toml = ", ".join(
+            f"{_toml_str(path)}={_toml_str(access)}"
+            for path, access in scoped.items()
+        )
+        filesystem = [
+            f'{_toml_str(":minimal")}={_toml_str("read")}',
+            f'{_toml_str(":workspace_roots")}={{{scoped_toml}}}',
+        ]
+        if not self._workspace_write_flag("exclude_tmpdir_env_var"):
+            filesystem.append(
+                f'{_toml_str(":tmpdir")}={_toml_str("write")}',
+            )
+        if not self._workspace_write_flag("exclude_slash_tmp"):
+            filesystem.append(
+                f'{_toml_str(":slash_tmp")}={_toml_str("write")}',
+            )
+
+        base = f"permissions.{_GIT_WRITABLE_PERMISSION_PROFILE}"
+        overrides = [
+            "default_permissions="
+            f'{_toml_str(_GIT_WRITABLE_PERMISSION_PROFILE)}',
+            f"{base}.description="
+            f'{_toml_str("Nerve workspace write with Git metadata")}',
+            f"{base}.filesystem={{{', '.join(filesystem)}}}",
+        ]
+        if self._workspace_write_flag("network_access"):
+            overrides.append(f"{base}.network.enabled=true")
+        return overrides
+
+    def _runtime_workspace_roots(self, spec: SessionSpec) -> list[str]:
+        """Return cwd plus legacy additional roots as absolute paths."""
+        configured = (self.codex.extra_config or {}).get(
+            "sandbox_workspace_write.writable_roots", [],
+        )
+        if isinstance(configured, (str, os.PathLike)):
+            configured = [configured]
+        elif not isinstance(configured, (list, tuple)):
+            configured = []
+
+        base = Path(spec.cwd).expanduser()
+        roots: list[str] = []
+        for raw in [spec.cwd, *configured]:
+            path = Path(str(raw)).expanduser()
+            if not path.is_absolute():
+                path = base / path
+            try:
+                normalized = str(path.resolve(strict=False))
+            except OSError:
+                normalized = os.path.abspath(str(path))
+            if normalized not in roots:
+                roots.append(normalized)
+        return roots
+
+    def turn_permission_params(self, spec: SessionSpec) -> dict[str, Any]:
+        if not self._uses_git_writable_permission_profile():
+            return {}
+        return {
+            "permissions": _GIT_WRITABLE_PERMISSION_PROFILE,
+            "runtimeWorkspaceRoots": self._runtime_workspace_roots(spec),
+        }
 
     def langfuse_plugin_status(self) -> dict[str, Any]:
         return langfuse_plugin_installation_status(self.config)
@@ -580,16 +682,19 @@ class CodexBackend:
         params: dict[str, Any] = {
             "cwd": spec.cwd,
             "model": spec.model or self.codex.model,
-            "sandbox": self.codex.sandbox,
             "approvalPolicy": self.codex.approval_policy,
             "developerInstructions": spec.system_prompt + _BACKEND_NOTES,
         }
+        if not self._uses_git_writable_permission_profile():
+            params["sandbox"] = self.codex.sandbox
         if self._langfuse_plugin_ready:
             # The app-server process flag alone does not reach the Config
             # snapshot used by thread/start, thread/resume, and thread/fork.
             # Forward the runtime-only override in every thread request so
             # the already verified managed hook is not filtered as untrusted.
             params["config"] = {"bypass_hook_trust": True}
+        if self._uses_git_writable_permission_profile():
+            params["runtimeWorkspaceRoots"] = self._runtime_workspace_roots(spec)
         return params
 
     def map_effort(self, effort: str) -> str | None:
@@ -852,6 +957,7 @@ class CodexClient(AgentClient):
             "threadId": self._thread_id,
             "input": self._build_input_items(turn),
         }
+        params.update(self._backend.turn_permission_params(self._spec))
         effort = self._backend.map_effort(self._spec.effort)
         if effort:
             params["effort"] = effort

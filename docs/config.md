@@ -147,6 +147,7 @@ codex:                     # active when a codex backend is selected
   auth: chatgpt            # chatgpt | api_key
   api_key: null            # config.local.yaml; or api_key_env: OPENAI_API_KEY
   sandbox: danger-full-access   # read-only | workspace-write | danger-full-access
+  writable_git_metadata: false # workspace-write: allow writes below .git
   approval_policy: never        # never | on-request | untrusted
   web_search: true
   tool_timeout_sec: 3600        # nerve MCP calls may block on ask_user
@@ -167,6 +168,14 @@ codex:                     # active when a codex backend is selected
     default_token_budget: 250000 # default and maximum per workflow
     max_agents: 8               # lifetime worker cap per workflow
 ```
+
+Codex's built-in `workspace-write` profile keeps `.git` read-only even when
+the repository is inside a writable root. Set `writable_git_metadata: true`
+when Nerve agents are expected to create branches or commits. Nerve then
+selects a named permissions profile that makes `.git` writable under the
+session cwd and every `sandbox_workspace_write.writable_roots` entry, while
+keeping `.agents` and `.codex` read-only. This is an explicit security opt-in;
+it has no effect with `read-only` or `danger-full-access`.
 
 When `default_tier` is set, new Codex sessions persist the tier, model, and
 reasoning effort together. Existing sessions keep their stored routing.

@@ -1186,6 +1186,9 @@ class CodexConfig:
     api_key: str = ""                       # literal key (config.local.yaml)
     api_key_env: str = "OPENAI_API_KEY"     # env fallback when auth=api_key
     sandbox: str = "danger-full-access"     # read-only | workspace-write | danger-full-access
+    # Codex's built-in workspace-write profile protects .git even inside a
+    # writable root. Opt into Nerve's named profile when agents must commit.
+    writable_git_metadata: bool = False
     approval_policy: str = "never"          # never | on-request | untrusted
     # nerve effort vocabulary -> codex reasoning effort string
     effort_map: dict[str, str] = field(default_factory=lambda: {
@@ -1262,6 +1265,9 @@ class CodexConfig:
             api_key=str(d.get("api_key") or ""),
             api_key_env=str(d.get("api_key_env", "OPENAI_API_KEY")),
             sandbox=str(d.get("sandbox", "danger-full-access")),
+            writable_git_metadata=bool(
+                d.get("writable_git_metadata", False),
+            ),
             approval_policy=str(d.get("approval_policy", "never")),
             effort_map=effort_map,
             web_search=bool(d.get("web_search", True)),
