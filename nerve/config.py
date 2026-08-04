@@ -1361,6 +1361,39 @@ class CodexConfig:
 
 
 @dataclass
+class OpenCodeConfig:
+    """Settings for the per-session OpenCode headless-server backend."""
+
+    bin_path: str = "opencode"
+    home_dir: str = "~/.nerve/opencode"
+    model: str = ""  # empty -> the user's OpenCode default
+    cron_model: str = ""
+    startup_timeout_seconds: float = 15.0
+    request_timeout_seconds: float = 3600.0
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "OpenCodeConfig":
+        return cls(
+            bin_path=str(d.get("bin_path", "opencode")),
+            home_dir=str(d.get("home_dir", "~/.nerve/opencode")),
+            model=str(d.get("model") or "").strip(),
+            cron_model=str(d.get("cron_model") or "").strip(),
+            startup_timeout_seconds=float(d.get("startup_timeout_seconds", 15)),
+            request_timeout_seconds=float(d.get("request_timeout_seconds", 3600)),
+        )
+
+    def validate(self) -> list[str]:
+        problems = []
+        if not self.bin_path.strip():
+            problems.append("opencode.bin_path must not be empty")
+        if self.startup_timeout_seconds <= 0:
+            problems.append("opencode.startup_timeout_seconds must be positive")
+        if self.request_timeout_seconds <= 0:
+            problems.append("opencode.request_timeout_seconds must be positive")
+        return problems
+
+
+@dataclass
 class McpServerConfig:
     """External MCP server configuration.
 
@@ -1939,6 +1972,7 @@ class NerveConfig:
     proxy: ProxyConfig = field(default_factory=ProxyConfig)
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
     codex: CodexConfig = field(default_factory=CodexConfig)
+    opencode: OpenCodeConfig = field(default_factory=OpenCodeConfig)
     houseofagents: HouseOfAgentsConfig = field(default_factory=HouseOfAgentsConfig)
     langfuse: LangfuseConfig = field(default_factory=LangfuseConfig)
     xmemory: XmemoryConfig = field(default_factory=XmemoryConfig)
@@ -2052,7 +2086,7 @@ class NerveConfig:
             timeout=timeout,
         )
 
-    _KNOWN_BACKENDS = ("claude", "codex")
+    _KNOWN_BACKENDS = ("claude", "codex", "opencode")
 
     def _validate_backend_config(self) -> None:
         """Fail fast on unusable backend settings (called from from_dict).
@@ -2112,6 +2146,15 @@ class NerveConfig:
                 raise ValueError("; ".join(problems))
             for p in problems:
                 logger.warning("Inactive codex config problem: %s", p)
+        opencode_selected = "opencode" in (
+            self.agent.backend, self.agent.resolved_cron_backend,
+        )
+        problems = self.opencode.validate()
+        if problems:
+            if opencode_selected:
+                raise ValueError("; ".join(problems))
+            for p in problems:
+                logger.warning("Inactive opencode config problem: %s", p)
         # Langfuse transcript export is optional and fail-open. Report pinning
         # problems prominently, but never prevent the gateway or Codex backend
         # from starting because observability is unavailable.
@@ -2202,6 +2245,7 @@ class NerveConfig:
             proxy=ProxyConfig.from_dict(d.get("proxy", {})),
             ollama=OllamaConfig.from_dict(d.get("ollama", {})),
             codex=CodexConfig.from_dict(d.get("codex", {})),
+            opencode=OpenCodeConfig.from_dict(d.get("opencode", {})),
             houseofagents=HouseOfAgentsConfig.from_dict(d.get("houseofagents", {})),
             langfuse=LangfuseConfig.from_dict(d.get("langfuse", {})),
             xmemory=XmemoryConfig.from_dict(d.get("xmemory", {})),
