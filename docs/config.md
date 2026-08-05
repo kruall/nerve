@@ -117,9 +117,9 @@ that deliberately detached itself.
 
 **Note:** The engine uses a `can_use_tool` callback (not `bypassPermissions`) so that interactive tools (`AskUserQuestion`, `ExitPlanMode`, `EnterPlanMode`) can pause mid-turn for user input. All other tools are auto-approved. See [sdk-sessions.md](sdk-sessions.md#permissions--interactive-tools) for details.
 
-## Agent Backends (claude / codex / opencode)
+## Agent Backends (claude / codex)
 
-Nerve can run sessions on three agent runtimes. The backend is selected per
+Nerve can run sessions on two agent runtimes. The backend is selected per
 NEW session and is **sticky**: it's stamped into `sessions.backend` at first
 client build and always wins over config afterwards, so flipping the
 defaults never crosses an existing conversation (or its wakeups) onto a
@@ -127,7 +127,7 @@ runtime that can't resume it. See `docs/plans/codex-backend.md`.
 
 ```yaml
 agent:
-  backend: claude          # claude | codex | opencode — new interactive sessions
+  backend: claude          # claude | codex — new interactive sessions
   cron_backend: null       # null → backend; new cron/hook sessions only
 
 codex:                     # active when a codex backend is selected
@@ -176,21 +176,6 @@ selects a named permissions profile that makes `.git` writable under the
 session cwd and every `sandbox_workspace_write.writable_roots` entry, while
 keeping `.agents` and `.codex` read-only. This is an explicit security opt-in;
 it has no effect with `read-only` or `danger-full-access`.
-
-OpenCode starts one private `opencode serve` process per Nerve session and
-persists the native session id for resume. Its provider credentials remain in
-OpenCode's own configuration; Nerve supplies only a session-scoped Nerve MCP
-bridge through an inline runtime override.
-
-```yaml
-opencode:
-  bin_path: opencode
-  home_dir: ~/.nerve/opencode
-  model: null                  # OpenCode's configured default
-  cron_model: null
-  startup_timeout_seconds: 15
-  request_timeout_seconds: 3600
-```
 
 When `default_tier` is set, new Codex sessions persist the tier, model, and
 reasoning effort together. Existing sessions keep their stored routing.

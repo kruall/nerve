@@ -86,18 +86,6 @@ agent:
 #     - {id: sol-xhigh, model: gpt-5.6-sol, effort: xhigh}
 #   routing_policy_file: ~/.nerve/model-routing-policy.md
 
-# OpenCode backend (optional). Provider credentials remain in OpenCode's own
-# configuration; Nerve starts one isolated headless server per session.
-# agent:
-#   backend: opencode
-# opencode:
-#   bin_path: opencode
-#   home_dir: ~/.nerve/opencode
-#   model: ""                 # OpenCode's configured default
-#   cron_model: ""
-#   startup_timeout_seconds: 15
-#   request_timeout_seconds: 3600
-
 # Gateway
 gateway:
   host: 0.0.0.0

@@ -61,7 +61,7 @@ class BackendDeps:
 def build_backends(deps: BackendDeps) -> dict[str, AgentBackend]:
     """Construct every known backend.
 
-    All backends are always constructed (construction is cheap and has
+    Both backends are always constructed (construction is cheap and has
     no side effects beyond mkdir of the codex home): a session created on
     codex must stay resumable even after the operator flips the config
     default back to claude — the sticky ``sessions.backend`` column
@@ -69,12 +69,10 @@ def build_backends(deps: BackendDeps) -> dict[str, AgentBackend]:
     """
     from nerve.agent.backends.claude import ClaudeBackend
     from nerve.agent.backends.codex import CodexBackend
-    from nerve.agent.backends.opencode import OpenCodeBackend
 
     return {
         "claude": ClaudeBackend(deps),
         "codex": CodexBackend(deps),
-        "opencode": OpenCodeBackend(deps),
     }
 
 
