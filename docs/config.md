@@ -330,7 +330,13 @@ user close the claim as `cancelled`, move it to `backlog`, or hand it to the
 user as `ready-for-user`; after a choice Nerve mentions the user in the task
 thread. If the task is later handed back to `in-progress` and still cannot be
 resumed, a new recovery card is offered rather than leaving the answered card
-to block the queue forever. When `audit_forum_id` is configured, every material
+to block the queue forever. When an implementation agent deliberately moves a
+task from `in-progress` to `blocked` while awaiting external validation, Nerve
+creates one source-thread confirmation card. An authenticated Discord actor
+can use its sole `ready-for-user` action after validation passes; this is the
+narrow verified handoff exception, not a generic `blocked` transition and it
+does not resume or create an autonomous session. When `audit_forum_id` is
+configured, every material
 runner decision—claim, dispatch, continuation, recovery state, lifecycle
 observation, and failure—is appended to its `System` thread. Repeated polls
 with an unchanged `ready-for-agent` tag remain quiet. An unchanged

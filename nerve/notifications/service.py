@@ -24,6 +24,7 @@ from nerve.notifications import handlers as _handlers
 from nerve.discord_tags import (
     DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND,
     DISCORD_PROJECT_TASK_RECOVERY_TARGET_KIND,
+    DISCORD_PROJECT_TASK_VALIDATION_TARGET_KIND,
 )
 
 if TYPE_CHECKING:
@@ -708,6 +709,35 @@ class NotificationService:
                 self.config,
                 answered_by=notif.get("_answered_by", ""),
             )
+        elif target_kind == DISCORD_PROJECT_TASK_VALIDATION_TARGET_KIND:
+            if answer != "ready-for-user":
+                result = _handlers.DispatchResult(
+                    ok=False,
+                    audit_event={
+                        "event": "discord-project-task-validation",
+                        "notification_id": notification_id,
+                        "target_kind": DISCORD_PROJECT_TASK_VALIDATION_TARGET_KIND,
+                        "target_id": target_id,
+                        "decision": answer,
+                        "ok": False,
+                        "error": "invalid validation decision",
+                    },
+                )
+            else:
+                from nerve.discord_tags import dispatch_discord_project_task_recovery
+
+                result = await asyncio.to_thread(
+                    dispatch_discord_project_task_recovery,
+                    notif,
+                    target_id,
+                    answer,
+                    self.config,
+                    answered_by=notif.get("_answered_by", ""),
+                )
+                result.audit_event.update({
+                    "event": "discord-project-task-validation",
+                    "target_kind": DISCORD_PROJECT_TASK_VALIDATION_TARGET_KIND,
+                })
         elif dispatcher is None:
             logger.warning(
                 "approval %s has no dispatcher for target_kind=%r; "

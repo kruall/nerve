@@ -1730,6 +1730,33 @@ async def test_recovery_action_is_delivered_to_task_and_audit_threads():
 
 
 @pytest.mark.asyncio
+async def test_validation_action_is_delivered_to_task_and_audit_threads():
+    channel = _channel()
+    inbox = MagicMock()
+    inbox.deliver_to_thread = AsyncMock(return_value="validation-task-card")
+    inbox.deliver = AsyncMock(return_value="validation-audit-card")
+    channel._approval_inbox = inbox
+    task_thread = MagicMock(spec=discord.Thread)
+    task_thread.parent_id = YDB_FORUM
+    channel._resolve_messageable = AsyncMock(return_value=task_thread)
+    row = {
+        "id": "discord-task-validation:1:2:1",
+        "type": "approval",
+        "target_kind": "discord-project-task-validation",
+        "target_id": str(YDB_THREAD),
+    }
+    channel.db.get_notification = AsyncMock(return_value=row)
+
+    result = await channel.deliver_notification(row)
+
+    assert result == "validation-task-card"
+    inbox.deliver_to_thread.assert_awaited_once_with(
+        row, task_thread, metadata_key="discord_project_task_validation",
+    )
+    inbox.deliver.assert_awaited_once_with(row)
+
+
+@pytest.mark.asyncio
 async def test_completion_approval_rejects_non_project_target():
     channel = _channel()
     channel._approval_inbox = MagicMock()
@@ -1781,6 +1808,23 @@ async def test_post_ready_restores_missing_task_thread_recovery_cards():
 
     channel._deliver_project_task_recovery.assert_awaited_once_with(
         recovery, duplicate_to_audit=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_post_ready_restores_missing_task_thread_validation_cards():
+    validation = {
+        "id": "discord-task-validation:1:2:1",
+        "target_kind": "discord-project-task-validation",
+    }
+    channel = _channel()
+    channel.db.list_notifications = AsyncMock(return_value=[validation])
+    channel._deliver_project_task_recovery = AsyncMock()
+
+    await channel._restore_project_task_completion_cards()
+
+    channel._deliver_project_task_recovery.assert_awaited_once_with(
+        validation, duplicate_to_audit=False,
     )
 
 

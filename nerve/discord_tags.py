@@ -29,6 +29,7 @@ DISCORD_FORUM_TAG_TARGET_KIND = "discord-forum-tag"
 DISCORD_FORUM_TAG_METADATA_KEY = "discord_forum_tag_action"
 DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND = "discord-project-task-completion"
 DISCORD_PROJECT_TASK_RECOVERY_TARGET_KIND = "discord-project-task-recovery"
+DISCORD_PROJECT_TASK_VALIDATION_TARGET_KIND = "discord-project-task-validation"
 DISCORD_AUDIT_FORUM_PROJECT = "AUDIT"
 
 # Project forums use one of these tags as the durable task state.  An

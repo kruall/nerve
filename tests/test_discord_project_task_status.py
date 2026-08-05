@@ -15,6 +15,7 @@ from nerve.config import DiscordConfig, NerveConfig, NotificationsConfig
 from nerve.discord_tags import (
     DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND,
     DISCORD_PROJECT_TASK_RECOVERY_TARGET_KIND,
+    DISCORD_PROJECT_TASK_VALIDATION_TARGET_KIND,
     DiscordProjectTaskStatusError,
     complete_project_task,
     dispatch_discord_project_task_completion,
@@ -280,6 +281,70 @@ async def test_tool_uses_the_bound_discord_project_thread(monkeypatch):
 
     assert result.is_error is False
     assert json.loads(result.content[0]["text"])["current_status"] == "in-progress"
+
+
+@pytest.mark.asyncio
+async def test_blocking_an_active_task_creates_one_validation_action(monkeypatch):
+    calls = _fake_api(monkeypatch, applied=["302"])
+    engine = MagicMock()
+    engine.get_active_channel.return_value = "discord"
+    engine.router.get_message_context.return_value = {
+        "channel_name": "discord",
+        "target": str(THREAD_ID),
+    }
+    db = MagicMock()
+    db.list_notifications_by_target = AsyncMock(return_value=[])
+    notifications = MagicMock()
+    notifications.propose_action = AsyncMock(return_value={
+        "notification_id": "discord-task-validation:1:200:1",
+        "status": "sent",
+    })
+
+    result = await discord_project_task_status_handler(
+        ToolContext(
+            session_id="s1", config=_config(), engine=engine, db=db,
+            notification_service=notifications,
+        ),
+        {"status": "blocked"},
+    )
+
+    payload = json.loads(result.content[0]["text"])
+    assert payload["current_status"] == "blocked"
+    assert payload["validation_action"]["status"] == "sent"
+    assert calls[-1][2] == {"applied_tags": ["305"]}
+    notifications.propose_action.assert_awaited_once()
+    args = notifications.propose_action.await_args.args
+    assert args[:3] == (
+        "s1", DISCORD_PROJECT_TASK_VALIDATION_TARGET_KIND, str(THREAD_ID),
+    )
+    assert notifications.propose_action.await_args.kwargs["channels"] == ["discord"]
+
+
+@pytest.mark.asyncio
+async def test_blocking_does_not_duplicate_pending_validation_action(monkeypatch):
+    _fake_api(monkeypatch, applied=["302"])
+    engine = MagicMock()
+    engine.get_active_channel.return_value = "discord"
+    engine.router.get_message_context.return_value = {
+        "channel_name": "discord",
+        "target": str(THREAD_ID),
+    }
+    db = MagicMock()
+    db.list_notifications_by_target = AsyncMock(return_value=[{"status": "pending"}])
+    notifications = MagicMock()
+    notifications.propose_action = AsyncMock()
+
+    result = await discord_project_task_status_handler(
+        ToolContext(
+            session_id="s1", config=_config(), engine=engine, db=db,
+            notification_service=notifications,
+        ),
+        {"status": "blocked"},
+    )
+
+    payload = json.loads(result.content[0]["text"])
+    assert payload["validation_action"] == {"status": "already_pending"}
+    notifications.propose_action.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -551,6 +616,63 @@ async def test_recovery_choice_changes_status_mentions_user_without_model_turn(
     assert notification["status"] == "answered"
     assert calls[-1][0:2] == ("POST", THREAD_ID)
     engine.run.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_validation_choice_hands_blocked_task_to_user_without_model_turn(
+    db, monkeypatch,
+):
+    calls = _fake_api(monkeypatch, applied=["305"])
+    config = _config()
+    config.notifications = NotificationsConfig(channels=["web"])
+    engine = MagicMock()
+    service = NotificationService(config, db, engine)
+    service._append_approval_audit = AsyncMock()
+    await db.create_session("s1")
+    await db.create_notification(
+        notification_id="validation-approval",
+        session_id="s1",
+        type="approval",
+        title="Confirm external validation",
+        options=["ready-for-user"],
+        target_kind=DISCORD_PROJECT_TASK_VALIDATION_TARGET_KIND,
+        target_id=str(THREAD_ID),
+    )
+
+    assert await service.handle_answer(
+        "validation-approval", "ready-for-user", "discord:400",
+    )
+
+    notification = await db.get_notification("validation-approval")
+    assert notification["status"] == "answered"
+    assert calls[2][2] == {"applied_tags": ["303"]}
+    assert calls[-1][0:2] == ("POST", THREAD_ID)
+    engine.run.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_validation_dispatch_rejects_any_non_handoff_decision(db, monkeypatch):
+    calls = _fake_api(monkeypatch, applied=["305"])
+    config = _config()
+    config.notifications = NotificationsConfig(channels=["web"])
+    service = NotificationService(config, db, MagicMock())
+    service._append_approval_audit = AsyncMock()
+    await db.create_session("s1")
+    await db.create_notification(
+        notification_id="invalid-validation-approval",
+        session_id="s1",
+        type="approval",
+        title="Malformed validation action",
+        options=["backlog"],
+        target_kind=DISCORD_PROJECT_TASK_VALIDATION_TARGET_KIND,
+        target_id=str(THREAD_ID),
+    )
+
+    assert await service.handle_answer(
+        "invalid-validation-approval", "backlog", "discord:400",
+    )
+
+    assert calls == []
 
 
 @pytest.mark.asyncio

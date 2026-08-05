@@ -42,6 +42,7 @@ from nerve.config import NerveConfig
 from nerve.discord_tags import (
     DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND,
     DISCORD_PROJECT_TASK_RECOVERY_TARGET_KIND,
+    DISCORD_PROJECT_TASK_VALIDATION_TARGET_KIND,
     DiscordForumTagError,
     complete_project_task,
     resume_project_task,
@@ -1766,7 +1767,10 @@ class DiscordChannel(BaseChannel):
         """Deliver an actionable notification to the pinned audit thread."""
         if row.get("target_kind") == DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND:
             return await self._deliver_project_task_completion(row)
-        if row.get("target_kind") == DISCORD_PROJECT_TASK_RECOVERY_TARGET_KIND:
+        if row.get("target_kind") in {
+            DISCORD_PROJECT_TASK_RECOVERY_TARGET_KIND,
+            DISCORD_PROJECT_TASK_VALIDATION_TARGET_KIND,
+        }:
             return await self._deliver_project_task_recovery(row)
         inbox = self._approval_inbox
         if inbox is None:
@@ -1782,6 +1786,7 @@ class DiscordChannel(BaseChannel):
             if row.get("target_kind") not in {
                 DISCORD_PROJECT_TASK_COMPLETION_TARGET_KIND,
                 DISCORD_PROJECT_TASK_RECOVERY_TARGET_KIND,
+                DISCORD_PROJECT_TASK_VALIDATION_TARGET_KIND,
             }:
                 continue
             try:
@@ -1867,10 +1872,15 @@ class DiscordChannel(BaseChannel):
         ):
             raise ValueError("Project task recovery target is not a project thread")
 
+        metadata_key = (
+            "discord_project_task_validation"
+            if row.get("target_kind") == DISCORD_PROJECT_TASK_VALIDATION_TARGET_KIND
+            else "discord_project_task_recovery"
+        )
         message_id = await inbox.deliver_to_thread(
             row,
             thread,
-            metadata_key="discord_project_task_recovery",
+            metadata_key=metadata_key,
         )
         if duplicate_to_audit:
             refreshed = await self.db.get_notification(row["id"])

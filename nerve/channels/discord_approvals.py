@@ -106,6 +106,7 @@ def _delivery_coordinates(row: dict[str, Any]) -> list[dict[str, Any]]:
         "discord_approval",
         "discord_project_task_completion",
         "discord_project_task_recovery",
+        "discord_project_task_validation",
     ):
         value = metadata.get(key)
         if isinstance(value, dict):

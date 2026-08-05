@@ -27,6 +27,7 @@ from nerve.channels.discord_project_task_audit import DiscordProjectTaskAuditErr
 from nerve.discord_tags import (
     DISCORD_FORUM_TAG_METADATA_KEY,
     DISCORD_FORUM_TAG_TARGET_KIND,
+    DISCORD_PROJECT_TASK_VALIDATION_TARGET_KIND,
     DiscordForumTagError,
     DiscordForumTagManager,
     DiscordProjectTaskStatusError,
@@ -182,6 +183,47 @@ async def discord_project_task_status_handler(
             f"discord_project_task_status: {exc}",
             is_error=True,
         )
+    if (
+        result.get("previous_status") == "in-progress"
+        and result.get("current_status") == "blocked"
+        and ctx.notification_service is not None
+        and ctx.db is not None
+    ):
+        try:
+            existing = await ctx.db.list_notifications_by_target(
+                target_kind=DISCORD_PROJECT_TASK_VALIDATION_TARGET_KIND,
+                target_id=thread_id,
+            )
+            if not any(row.get("status") == "pending" for row in existing):
+                notification_id = (
+                    f"discord-task-validation:{ctx.config.discord.guild_id}:"
+                    f"{thread_id}:{len(existing) + 1}"
+                )
+                validation = await ctx.notification_service.propose_action(
+                    ctx.session_id,
+                    DISCORD_PROJECT_TASK_VALIDATION_TARGET_KIND,
+                    thread_id,
+                    "Confirm external validation",
+                    (
+                        "This task is blocked awaiting external validation. "
+                        "After the validation succeeds, hand it to the user "
+                        "without restarting autonomous execution."
+                    ),
+                    options=[{
+                        "label": "Hand off to user",
+                        "value": "ready-for-user",
+                    }],
+                    channels=["discord"],
+                    notification_id=notification_id,
+                )
+                result["validation_action"] = validation
+            else:
+                result["validation_action"] = {"status": "already_pending"}
+        except Exception:
+            logger.exception(
+                "Failed to create blocked-task validation action for %s", thread_id,
+            )
+            result["validation_action"] = {"status": "unavailable"}
     return ToolResult.text(json.dumps(result, ensure_ascii=False, indent=2))
 
 
