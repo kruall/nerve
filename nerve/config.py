@@ -389,6 +389,52 @@ class DiscordConfig:
 
 
 @dataclass
+class RocketChatConfig:
+    """Configuration for one fail-closed Rocket.Chat bot connection.
+
+    Each Nerve deployment owns one bot account. Rooms and human authors are
+    explicit allowlists, so credentials from one deployment cannot make it a
+    workspace-wide listener.
+    """
+
+    enabled: bool = False
+    url: str = ""
+    username: str = ""
+    user_id: str = ""
+    auth_token: str = ""
+    auth_token_file: Path | None = None
+    password: str = ""
+    password_file: Path | None = None
+    room_ids: list[str] = field(default_factory=list)
+    allowed_author_ids: list[str] = field(default_factory=list)
+    require_mention: bool = False
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RocketChatConfig":
+        return cls(
+            enabled=bool(d.get("enabled", False)),
+            url=str(d.get("url") or "").rstrip("/"),
+            username=str(d.get("username") or "").strip(),
+            user_id=str(d.get("user_id") or "").strip(),
+            auth_token=str(d.get("auth_token") or ""),
+            auth_token_file=_expand_path(d.get("auth_token_file")),
+            password=str(d.get("password") or ""),
+            password_file=_expand_path(d.get("password_file")),
+            room_ids=[
+                str(value).strip()
+                for value in d.get("room_ids", []) or []
+                if str(value).strip()
+            ],
+            allowed_author_ids=[
+                str(value).strip()
+                for value in d.get("allowed_author_ids", []) or []
+                if str(value).strip()
+            ],
+            require_mention=bool(d.get("require_mention", False)),
+        )
+
+
+@dataclass
 class TelegramSyncConfig:
     enabled: bool = True
     api_id: int = 0
@@ -1932,6 +1978,7 @@ class NerveConfig:
     agent: AgentConfig = field(default_factory=AgentConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     discord: DiscordConfig = field(default_factory=DiscordConfig)
+    rocketchat: RocketChatConfig = field(default_factory=RocketChatConfig)
     sync: SyncConfig = field(default_factory=SyncConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     cron: CronConfig = field(default_factory=CronConfig)
@@ -2195,6 +2242,7 @@ class NerveConfig:
             agent=AgentConfig.from_dict(d.get("agent", {})),
             telegram=TelegramConfig.from_dict(d.get("telegram", {})),
             discord=DiscordConfig.from_dict(d.get("discord", {})),
+            rocketchat=RocketChatConfig.from_dict(d.get("rocketchat", {})),
             sync=SyncConfig.from_dict(d.get("sync", {})),
             memory=MemoryConfig.from_dict(d.get("memory", {})),
             cron=CronConfig.from_dict(d.get("cron", {})),

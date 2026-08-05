@@ -193,6 +193,23 @@ discord:
   # Conversation threads created below ordinary channels are always mention-free.
   require_mention: true
 
+# Native Rocket.Chat channel. One Nerve deployment owns one bot user; use a
+# different username and password file for every instance (for example doggy
+# on a MacBook and litty on a server). Messages are accepted only from the
+# explicitly configured rooms and user IDs.
+rocketchat:
+  enabled: false
+  # url: http://192.168.0.104:3000
+  # username: doggy
+  # user_id: BOT_USER_ID
+  # Prefer a dedicated auth token when workspace policy requires bot 2FA.
+  # auth_token_file: ~/.config/nerve/rocketchat-doggy.token
+  # password_file: ~/.config/nerve/rocketchat-doggy.password
+  # room_ids: [ROOM_ID]
+  # allowed_author_ids: [USER_ID]
+  # Set true in shared rooms; dedicated private rooms can leave it false.
+  require_mention: false
+
 # Quiet hours (local timezone)
 quiet_start: "02:00"
 quiet_end: "12:00"

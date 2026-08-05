@@ -32,6 +32,7 @@ from nerve.agent.tools.schemas import (
     NOTIFY_SCHEMA,
     PROPOSE_ACTION_SCHEMA,
     REACT_SCHEMA,
+    ROCKETCHAT_SEND_SCHEMA,
     SEND_FILE_SCHEMA,
     SEND_STICKER_SCHEMA,
     SESSION_MESSAGE_SCHEMA,
@@ -439,6 +440,39 @@ async def discord_send_handler(ctx: ToolContext, args: dict) -> ToolResult:
     return ToolResult.text("Discord message sent.")
 
 
+async def rocketchat_send_handler(ctx: ToolContext, args: dict) -> ToolResult:
+    """Publish intentional text to this session's Rocket.Chat destination."""
+    raw_message = args.get("message")
+    if not isinstance(raw_message, str) or not raw_message.strip():
+        return ToolResult.text(
+            "rocketchat_send: message is required.",
+            is_error=True,
+        )
+    if ctx.engine is None:
+        return ToolResult.text(
+            "rocketchat_send: engine not available.", is_error=True,
+        )
+    try:
+        delivered = await ctx.engine.router.send_text(
+            ctx.session_id,
+            raw_message.strip(),
+            channel="rocketchat",
+        )
+    except Exception as exc:
+        logger.error("rocketchat_send dispatch failed: %s", exc)
+        return ToolResult.text(
+            f"Failed to send Rocket.Chat message: {exc}",
+            is_error=True,
+        )
+    if not delivered:
+        return ToolResult.text(
+            "Cannot send Rocket.Chat message: this session has no available "
+            "Rocket.Chat room binding.",
+            is_error=True,
+        )
+    return ToolResult.text("Rocket.Chat message sent.")
+
+
 async def send_session_message_handler(
     ctx: ToolContext, args: dict,
 ) -> ToolResult:
@@ -621,6 +655,16 @@ DISCORD_SEND_SPEC = ToolSpec(
     handler=discord_send_handler,
 )
 
+ROCKETCHAT_SEND_SPEC = ToolSpec(
+    name="rocketchat_send",
+    description=(
+        "Send an intentional user-facing message to this session's "
+        "Rocket.Chat room or thread."
+    ),
+    input_schema=ROCKETCHAT_SEND_SCHEMA,
+    handler=rocketchat_send_handler,
+)
+
 SESSION_MESSAGE_SPEC = ToolSpec(
     name="send_session_message",
     description=(
@@ -654,6 +698,7 @@ NOTIFICATION_SPECS = [
     REACT_SPEC,
     SEND_STICKER_SPEC,
     DISCORD_SEND_SPEC,
+    ROCKETCHAT_SEND_SPEC,
     SESSION_MESSAGE_SPEC,
     SEND_FILE_SPEC,
 ]

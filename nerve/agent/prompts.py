@@ -108,6 +108,7 @@ def build_system_prompt(
     session_id: str = "",
     source: str = "web",
     discord_bound: bool | None = None,
+    rocketchat_bound: bool | None = None,
     recalled_memories: list[str] | None = None,
     timezone_name: str = "America/New_York",
     skill_summaries: list[dict] | None = None,
@@ -176,6 +177,22 @@ session. Its destination is fixed to the session's Discord thread and remains
 available during scheduled wakeups and after process restarts. Send only
 deliberate messages meant for everyone in that thread. Never publish private
 reasoning, tool traces, credentials, or other internal session content."""
+        )
+
+    if rocketchat_bound is None:
+        rocketchat_bound = source == "rocketchat"
+
+    if rocketchat_bound:
+        parts.append(
+            """# Rocket.Chat Output Contract
+
+The session stream and final answer are internal and are NOT delivered to
+Rocket.Chat. To send any user-facing message, call
+`mcp__nerve__rocketchat_send`; it is the only public output path for this
+Rocket.Chat session. Its destination is the room or thread that drove the
+active turn. Send only deliberate messages intended for members of that room.
+Never publish private reasoning, tool traces, credentials, or other internal
+session content."""
         )
 
     # Skills summary (progressive disclosure level 1: name + description only)

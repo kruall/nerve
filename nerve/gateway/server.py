@@ -250,6 +250,34 @@ async def lifespan(app: FastAPI):
             discord_channel = candidate
             logger.info("Discord channel started")
 
+    # Each deployment owns one Rocket.Chat bot and listens only to explicit
+    # private rooms and authors configured for that bot.
+    rocketchat_channel = None
+    if config.rocketchat.enabled:
+        candidate = None
+        try:
+            from nerve.channels.rocketchat import RocketChatChannel
+
+            candidate = RocketChatChannel(config, _engine.router)
+            _engine.register_channel(candidate)
+            await candidate.start()
+        except Exception:
+            logger.exception(
+                "Rocket.Chat channel failed to start; continuing without it"
+            )
+            if candidate is not None:
+                try:
+                    await candidate.stop()
+                except Exception:
+                    logger.warning(
+                        "Rocket.Chat cleanup after failed startup raised",
+                        exc_info=True,
+                    )
+                _engine.unregister_channel(candidate.name)
+        else:
+            rocketchat_channel = candidate
+            logger.info("Rocket.Chat channel started")
+
     # Start cron service
     global _cron_service
     cron_task = None
@@ -589,6 +617,8 @@ async def lifespan(app: FastAPI):
         await telegram_channel.stop()
     if discord_channel:
         await discord_channel.stop()
+    if rocketchat_channel:
+        await rocketchat_channel.stop()
     if cron_task:
         await cron_task.stop()
 

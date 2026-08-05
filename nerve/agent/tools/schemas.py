@@ -897,6 +897,20 @@ DISCORD_SEND_SCHEMA = {
     "required": ["message"],
 }
 
+ROCKETCHAT_SEND_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "message": {
+            "type": "string",
+            "description": (
+                "Intentional user-facing message to send to the current "
+                "Rocket.Chat room or thread"
+            ),
+        },
+    },
+    "required": ["message"],
+}
+
 SESSION_MESSAGE_SCHEMA = {
     "type": "object",
     "properties": {
