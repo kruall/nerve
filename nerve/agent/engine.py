@@ -1441,6 +1441,7 @@ adjacent tier is a better fit:
                 session_id=session_id,
                 source=source,
                 discord_bound=discord_binding is not None,
+                rocketchat_bound=source == "rocketchat",
                 timezone_name=self.config.timezone,
                 recalled_memories=recalled_memories or None,
                 skill_summaries=self._collect_skill_summaries(),
