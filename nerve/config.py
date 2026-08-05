@@ -1171,6 +1171,9 @@ class CodexConfig:
     home_dir: str = "~/.nerve/codex"        # isolated CODEX_HOME (auth/config/sessions)
     model: str = "gpt-5.6-sol"
     cron_model: str = ""                    # empty → default_tier/model
+    # Custom providers can expose valid model IDs that Codex omits from
+    # model/list. Keep inventory validation on unless explicitly disabled.
+    allow_unlisted_models: bool = False
     # Named default from ``model_tiers``. A config that explicitly sets
     # ``model`` but omits ``default_tier`` keeps legacy behavior; set
     # ``default_tier`` explicitly to opt that existing config into routing.
@@ -1251,6 +1254,9 @@ class CodexConfig:
             home_dir=str(d.get("home_dir", "~/.nerve/codex")),
             model=str(d.get("model", "gpt-5.6-sol") or "").strip(),
             cron_model=str(d.get("cron_model") or "").strip(),
+            allow_unlisted_models=bool(
+                d.get("allow_unlisted_models", False),
+            ),
             default_tier=str(
                 d["default_tier"]
                 if "default_tier" in d

@@ -77,6 +77,7 @@ agent:
 #   cron_backend: codex
 # codex:
 #   model: gpt-5.6-sol       # legacy fallback if default_tier is empty
+#   allow_unlisted_models: false  # custom/local model IDs absent from model/list
 #   writable_git_metadata: false  # workspace-write opt-in for git commits
 #   default_tier: luna-high
 #   model_tiers:

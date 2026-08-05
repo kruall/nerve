@@ -1991,6 +1991,7 @@ class MemUBridge:
             ),
             auth=codex.auth,
             api_key=api_key,
+            allow_unlisted_models=codex.allow_unlisted_models,
             effort=effort,
             turn_timeout=float(self._LLM_CALL_TIMEOUT),
             idle_timeout=min(60.0, float(self._LLM_CALL_TIMEOUT)),

@@ -137,6 +137,7 @@ codex:                     # active when a codex backend is selected
   home_dir: ~/.nerve/codex # isolated CODEX_HOME (auth, config, sessions)
   model: gpt-5.6-sol       # legacy fallback when default_tier is empty
   cron_model: null         # null → default_tier/model
+  allow_unlisted_models: false # custom/local model IDs absent from model/list
   default_tier: luna-high  # new interactive sessions start here
   model_tiers:             # ordered low → high; adjacent agent moves only
     - {id: luna-high, model: gpt-5.6-luna, effort: high}
@@ -168,6 +169,12 @@ codex:                     # active when a codex backend is selected
     default_token_budget: 250000 # default and maximum per workflow
     max_agents: 8               # lifetime worker cap per workflow
 ```
+
+Codex may accept a custom provider's model ID even when that ID is absent from
+the app-server's `model/list` inventory. Set `allow_unlisted_models: true` only
+for that case. This skips inventory membership checks for agent and memory
+models; version, authentication, protocol, and provider errors are still
+validated normally.
 
 Codex's built-in `workspace-write` profile keeps `.git` read-only even when
 the repository is inside a writable root. Set `writable_git_metadata: true`

@@ -132,6 +132,7 @@ class CodexMemoryRuntime:
         work_dir: str,
         auth: str = "chatgpt",
         api_key: str = "",
+        allow_unlisted_models: bool = False,
         effort: str = "low",
         request_timeout: float = 30.0,
         turn_timeout: float = 120.0,
@@ -144,6 +145,7 @@ class CodexMemoryRuntime:
         self._work_dir = str(Path(work_dir).expanduser())
         self._auth = auth
         self._api_key = api_key if auth == "api_key" else ""
+        self._allow_unlisted_models = allow_unlisted_models
         self._effort = effort
         self._request_timeout = request_timeout
         self._turn_timeout = turn_timeout
@@ -418,7 +420,11 @@ class CodexMemoryRuntime:
         output_schema: dict[str, Any] | None,
     ) -> tuple[str, dict[str, Any]]:
         transport = await self._ensure_started()
-        if self._models and model not in self._models:
+        if (
+            self._models
+            and model not in self._models
+            and not self._allow_unlisted_models
+        ):
             raise CodexMemoryError(
                 f"Codex memory model {model!r} is unavailable "
                 f"(available: {sorted(self._models)})"

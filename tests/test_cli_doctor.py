@@ -173,6 +173,29 @@ def test_codex_agent_model_is_still_validated_by_doctor(tmp_path):
     )
 
 
+def test_doctor_allows_explicit_unlisted_codex_models(tmp_path):
+    config = _codex_config(tmp_path)
+    config.codex.model = "local-agents-a1"
+    config.codex.allow_unlisted_models = True
+    status = {
+        "available": True,
+        "version": "codex-cli 0.144.6",
+        "auth": "chatgpt",
+        "configured_auth": "chatgpt",
+        "auth_mismatch": False,
+        "models": ["gpt-5.6-sol"],
+    }
+
+    with patch(
+        "nerve.agent.backends.codex.backend.CodexBackend.preflight",
+        new=AsyncMock(return_value=status),
+    ):
+        report = doctor_report(config, check_api=True)
+
+    assert "[OK] Codex: codex-cli 0.144.6 (chatgpt)" in report
+    assert "[ERR] Codex model(s) unavailable" not in report
+
+
 def test_doctor_rejects_empty_active_codex_agent_model(tmp_path):
     config = _codex_config(tmp_path)
     config.codex.model = "   "

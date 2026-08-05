@@ -946,9 +946,13 @@ def doctor_report(config, config_source: str = "", check_api: bool = False) -> s
                     for model in configured_models
                     if model
                 }
-                missing = sorted(
-                    model for model in required_models
-                    if models and model not in models
+                missing = (
+                    []
+                    if config.codex.allow_unlisted_models
+                    else sorted(
+                        model for model in required_models
+                        if models and model not in models
+                    )
                 )
                 if model_config_errors:
                     errors.extend(model_config_errors)

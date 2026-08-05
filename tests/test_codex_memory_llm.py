@@ -29,7 +29,11 @@ def _home_with_mode(tmp_path: Path, mode: str) -> Path:
     return home
 
 
-def _runtime(tmp_path: Path, mode: str = "memory") -> CodexMemoryRuntime:
+def _runtime(
+    tmp_path: Path,
+    mode: str = "memory",
+    **runtime_overrides,
+) -> CodexMemoryRuntime:
     home = _home_with_mode(tmp_path, mode)
     return CodexMemoryRuntime(
         bin_path=FAKE_BIN,
@@ -40,6 +44,7 @@ def _runtime(tmp_path: Path, mode: str = "memory") -> CodexMemoryRuntime:
         request_timeout=2,
         turn_timeout=5,
         idle_timeout=2,
+        **runtime_overrides,
     )
 
 
@@ -201,6 +206,23 @@ async def test_unavailable_model_fails_and_drops_runtime(
         with pytest.raises(CodexMemoryError, match="unavailable"):
             await client.chat("must not start a turn")
         assert runtime.is_alive is False
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_explicit_unlisted_memory_model_is_allowed(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path, allow_unlisted_models=True)
+    client = CodexMemoryLLMClient(
+        runtime=runtime,
+        chat_model="local-agents-a1",
+    )
+    try:
+        text, metadata = await client.chat("use the custom model")
+        assert json.loads(text)["prompt"] == "use the custom model"
+        assert metadata["model"] == "local-agents-a1"
     finally:
         await runtime.close()
 

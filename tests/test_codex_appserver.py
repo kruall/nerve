@@ -113,6 +113,34 @@ async def test_inventory_preflight_can_skip_unused_default_model(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_explicit_unlisted_model_passes_preflight_and_client_validation(
+    tmp_path,
+    monkeypatch,
+):
+    _mode(monkeypatch, "basic")
+    cfg = _config(
+        tmp_path,
+        model="local-agents-a1",
+        allow_unlisted_models=True,
+    )
+    backend = CodexBackend(_deps(cfg))
+
+    status = await backend.preflight(
+        force=True,
+        validate_default_model=True,
+    )
+    assert status["available"] is True
+    assert status["models"] == ["gpt-5.6-sol"]
+    assert status["allow_unlisted_models"] is True
+
+    client = await backend.create_client(_spec(cfg))
+    try:
+        assert client.native_session_id == "th_fake_1"
+    finally:
+        await client.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_basic_turn_streams_and_completes(tmp_path, monkeypatch):
     _mode(monkeypatch, "basic")
     cfg = _config(tmp_path)

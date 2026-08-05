@@ -318,6 +318,7 @@ class CodexBackend:
                     validate_default_model
                     and model_ids
                     and configured_default not in model_ids
+                    and not self.codex.allow_unlisted_models
                 ):
                     raise BackendError(
                         f"Configured Codex model {configured_default!r} is unavailable"
@@ -350,6 +351,7 @@ class CodexBackend:
                     "account_type": account_type,
                     "models": model_ids,
                     "default_model": self.default_model("web"),
+                    "allow_unlisted_models": self.codex.allow_unlisted_models,
                     "rate_limits": self._rate_limits,
                     "ultracode": plugin,
                     "langfuse_plugin": langfuse_plugin,
@@ -884,7 +886,11 @@ class CodexClient(AgentClient):
             for item in models if isinstance(item, dict)
         }
         ids.discard("")
-        if ids and self.model not in ids:
+        if (
+            ids
+            and self.model not in ids
+            and not self._backend.codex.allow_unlisted_models
+        ):
             raise BackendError(
                 f"Codex model {self.model!r} is unavailable for the current "
                 f"account (available: {sorted(ids)})"
