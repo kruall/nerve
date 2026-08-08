@@ -1131,7 +1131,10 @@ def doctor_report(config, config_source: str = "", check_api: bool = False) -> s
 
             from nerve.agent.backends.codex.backend import CodexBackend
 
-            backend = CodexBackend(SimpleNamespace(config=config))
+            # BackendDeps exposes the current config through a callable. A
+            # one-shot doctor command has no reload loop, but must retain the
+            # same contract as the running engine.
+            backend = CodexBackend(SimpleNamespace(config=lambda: config))
             # Doctor validates the exact active agent/memory models below.
             # Keep this probe inventory-only so an unused codex.model cannot
             # break a memory-only Codex configuration.

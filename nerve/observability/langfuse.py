@@ -55,14 +55,35 @@ def is_enabled() -> bool:
     return _enabled
 
 
-def get_status() -> dict[str, Any]:
-    """Status block for ``/api/diagnostics`` and the UI deep-link."""
-    return {
+def get_status(
+    config: Any | None = None,
+    *,
+    codex_plugin_status: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Status block for diagnostics and backend-aware UI deep-links."""
+    python_exporter = {
         "enabled": _enabled,
         "host": _host or None,
         "auth_ok": _auth_ok,
         "last_flush_at": _last_flush_at,
         "usage_rewriter": _usage_rewriter,
+    }
+    if codex_plugin_status is None and config is not None:
+        try:
+            from nerve.agent.backends.codex.langfuse_plugin import (
+                installation_status,
+            )
+            codex_plugin_status = installation_status(config)
+        except Exception as error:
+            logger.debug("Could not inspect Langfuse Codex plugin: %s", error)
+    plugin = dict(codex_plugin_status or {})
+    if plugin.get("auth_configured") and plugin.get("auth_ok") is None:
+        plugin["auth_ok"] = _auth_ok if _enabled else None
+    return {
+        # Preserve the flat Python exporter fields for API compatibility.
+        **python_exporter,
+        "python_exporter": python_exporter,
+        "codex_plugin": plugin,
     }
 
 
@@ -75,22 +96,43 @@ def init_langfuse(config: Any) -> bool:
     """
     global _enabled, _host, _redact_patterns, _auth_ok, _usage_rewriter
 
+    _enabled = False
+    _host = ""
+    _redact_patterns = []
+    _auth_ok = False
+    _usage_rewriter = False
+
     lf = getattr(config, "langfuse", None)
     if lf is None:
         return False
 
-    public_key = (getattr(lf, "public_key", "") or "").strip()
-    secret_key = (getattr(lf, "secret_key", "") or "").strip()
+    public_key = (
+        os.environ.get("LANGFUSE_PUBLIC_KEY")
+        or getattr(lf, "public_key", "")
+        or ""
+    ).strip()
+    secret_key = (
+        os.environ.get("LANGFUSE_SECRET_KEY")
+        or getattr(lf, "secret_key", "")
+        or ""
+    ).strip()
     if not public_key or not secret_key:
         logger.info("Langfuse: disabled (no public_key/secret_key in config)")
         return False
 
-    host = (getattr(lf, "host", "") or "https://cloud.langfuse.com").rstrip("/")
+    host = (
+        os.environ.get("LANGFUSE_BASE_URL")
+        or os.environ.get("LANGFUSE_HOST")
+        or getattr(lf, "base_url", "")
+        or getattr(lf, "host", "")
+        or "https://cloud.langfuse.com"
+    ).rstrip("/")
 
     # Set env vars before any import — both the Langfuse SDK and the
     # LangSmith integration read these at import / client-init time.
     os.environ["LANGFUSE_PUBLIC_KEY"] = public_key
     os.environ["LANGFUSE_SECRET_KEY"] = secret_key
+    os.environ["LANGFUSE_BASE_URL"] = host
     os.environ["LANGFUSE_HOST"] = host
     os.environ.setdefault("LANGSMITH_OTEL_ENABLED", "true")
     os.environ.setdefault("LANGSMITH_OTEL_ONLY", "true")

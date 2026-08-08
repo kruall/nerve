@@ -634,6 +634,25 @@ export const api = {
         host: string | null;
         auth_ok: boolean;
         last_flush_at: string | null;
+        python_exporter: {
+          enabled: boolean;
+          host: string | null;
+          auth_ok: boolean;
+          last_flush_at: string | null;
+          usage_rewriter: boolean;
+        };
+        codex_plugin: {
+          requested?: boolean;
+          installed?: boolean;
+          ready?: boolean;
+          auth_configured?: boolean;
+          auth_ok?: boolean | null;
+          version?: string | null;
+          expected_version?: string;
+          revision?: string | null;
+          expected_revision?: string | null;
+          last_error?: string | null;
+        };
       };
     }>('/observability/status'),
 

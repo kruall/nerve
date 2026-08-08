@@ -15,6 +15,7 @@ dependencies = [
     "uvicorn[standard]>=0.34.0",
     "aiosqlite>=0.21.0",
     "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
     "python-telegram-bot>=21.0",
     # Floor raised from 0.2.82 for mcp 2.x: 0.2.140 is the first release whose
     # own constraint is `mcp<3.0.0` (0.2.100 through 0.2.139 all declare

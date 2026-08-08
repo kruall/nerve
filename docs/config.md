@@ -45,6 +45,11 @@ comments-only. Two things to expect: `settings.yaml` is rewritten with
 file is in `settings.yaml.bak`), and changing an answer overwrites whatever
 someone else had under those keys, so review the diff before committing.
 
+The selected config directory may also contain a gitignored `.env` file for
+credentials and environment overrides. Process environment values take
+precedence over `.env`; Nerve never searches the current directory or parents
+for another dotenv file.
+
 Unknown keys are ignored but logged as warnings at startup (and shown by
 `nerve doctor`) so typos don't fail silently.
 
@@ -998,9 +1003,11 @@ back into the parent turn, and run read-only unless a workflow explicitly asks
 for a writable sandbox. `GET /api/codex/status` exposes preflight state and
 non-terminal journals available for recovery.
 
-Notes: prompt-cache TTL policy, Claude Code plugins, and Langfuse tracing are
-claude-only. PDF attachments are surfaced to Codex as explicit path/context
-notes rather than silently dropped. With the
+Notes: prompt-cache TTL policy and Claude Code plugins are claude-only.
+Langfuse's Python exporter covers Claude/memU; explicitly opted-in Codex
+transcript tracing uses the pinned official Codex plugin. PDF attachments are
+surfaced to Codex as explicit path/context notes rather than silently dropped.
+With the
 default `approval_policy: never` + full-access sandbox, codex sessions
 behave like claude's auto-approved tools; tightening the policy surfaces
 Approve/Decline cards in the web UI.

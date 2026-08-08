@@ -21,6 +21,7 @@ from nerve.coerce import coerced as _coerced
 from nerve.coerce import lenient_int as _lenient_int
 
 import yaml
+from dotenv import dotenv_values, load_dotenv
 
 logger = logging.getLogger(__name__)
 
@@ -2516,6 +2517,91 @@ _DEFAULT_LANGFUSE_REDACT_PATTERNS: tuple[str, ...] = (
 )
 
 
+def _env_value(name: str, fallback: Any) -> Any:
+    """Return an environment value when present, preserving YAML fallback."""
+    value = os.environ.get(name)
+    return fallback if value is None else value
+
+
+def _strict_bool(value: Any, *, field_name: str, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    raise ValueError(
+        f"{field_name} must be a boolean (true/false), got {value!r}"
+    )
+
+
+@dataclass
+class LangfuseCodexConfig:
+    """Managed official Langfuse Codex plugin configuration."""
+
+    enabled: bool = False
+    auto_install: bool = True
+    repository: str = "https://github.com/langfuse/codex-observability-plugin.git"
+    version: str = "0.1.0"
+    # Reviewed upstream revision. Upgrades are explicit config/code changes;
+    # a floating marketplace install is never launched.
+    revision: str = "33bc50ba75ef82ed1f3718df6fdd06cdbfc7c02e"
+    max_chars: int = 20_000
+
+    @classmethod
+    def from_dict(cls, raw: dict | None) -> "LangfuseCodexConfig":
+        d = raw or {}
+        env_enabled = os.environ.get("TRACE_TO_LANGFUSE")
+        enabled = _strict_bool(
+            env_enabled if env_enabled is not None else d.get("enabled"),
+            field_name="langfuse.codex.enabled/TRACE_TO_LANGFUSE",
+            default=False,
+        )
+        auto_install = _strict_bool(
+            d.get("auto_install"),
+            field_name="langfuse.codex.auto_install",
+            default=True,
+        )
+        version = str(d.get("version") or cls.version).strip()
+        revision = str(d.get("revision") or cls.revision).strip().lower()
+        max_chars = _lenient_int(d.get("max_chars"), cls.max_chars)
+        if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", version):
+            raise ValueError(
+                "langfuse.codex.version must be a semantic version, "
+                f"got {version!r}"
+            )
+        if revision and not re.fullmatch(r"[0-9a-f]{40}", revision):
+            raise ValueError(
+                "langfuse.codex.revision must be a pinned 40-char git SHA"
+            )
+        if max_chars < 1 or max_chars > 1_000_000:
+            raise ValueError("langfuse.codex.max_chars must be in [1, 1000000]")
+        return cls(
+            enabled=enabled,
+            auto_install=auto_install,
+            repository=str(d.get("repository") or cls.repository),
+            version=version,
+            revision=revision,
+            max_chars=max_chars,
+        )
+
+    def validate(self) -> list[str]:
+        problems: list[str] = []
+        if self.enabled and not re.fullmatch(r"[0-9a-f]{40}", self.revision):
+            problems.append(
+                "langfuse.codex.revision must be set to a verified 40-char git SHA"
+            )
+        if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", self.version):
+            problems.append("langfuse.codex.version must be a semantic version")
+        if not 1 <= self.max_chars <= 1_000_000:
+            problems.append("langfuse.codex.max_chars must be in [1, 1000000]")
+        return problems
+
+
 @dataclass
 class LangfuseConfig:
     """Langfuse observability — optional. Activated by setting both keys.
@@ -2527,7 +2613,9 @@ class LangfuseConfig:
 
     public_key: str = ""
     secret_key: str = ""
-    host: str = "https://cloud.langfuse.com"
+    host: str = "https://cloud.langfuse.com"  # legacy alias
+    base_url: str = ""
+    codex: LangfuseCodexConfig = field(default_factory=LangfuseCodexConfig)
     redact_patterns: list[str] = field(
         default_factory=lambda: list(_DEFAULT_LANGFUSE_REDACT_PATTERNS),
     )
@@ -2546,12 +2634,34 @@ class LangfuseConfig:
         patterns = d.get("redact_patterns")
         if patterns is None:
             patterns = list(_DEFAULT_LANGFUSE_REDACT_PATTERNS)
+        base_url = (
+            os.environ.get("LANGFUSE_BASE_URL")
+            or os.environ.get("LANGFUSE_HOST")
+            or d.get("base_url")
+            or d.get("host")
+            or "https://cloud.langfuse.com"
+        )
         return cls(
-            public_key=d.get("public_key", ""),
-            secret_key=d.get("secret_key", ""),
-            host=d.get("host", "https://cloud.langfuse.com"),
+            public_key=str(
+                _env_value("LANGFUSE_PUBLIC_KEY", d.get("public_key", "")) or ""
+            ).strip(),
+            secret_key=str(
+                _env_value("LANGFUSE_SECRET_KEY", d.get("secret_key", "")) or ""
+            ).strip(),
+            host=str(base_url).rstrip("/"),
+            base_url=str(base_url).rstrip("/"),
+            codex=LangfuseCodexConfig.from_dict(d.get("codex")),
             redact_patterns=_str_list(patterns),
         )
+
+    @property
+    def effective_base_url(self) -> str:
+        return (
+            self.base_url or self.host or "https://cloud.langfuse.com"
+        ).rstrip("/")
+
+    def validate(self) -> list[str]:
+        return self.codex.validate()
 
 
 @dataclass
@@ -2838,6 +2948,11 @@ class NerveConfig:
                 raise ValueError("; ".join(problems))
             for p in problems:
                 logger.warning("Inactive codex config problem: %s", p)
+        # Langfuse transcript export is optional and fail-open. Report pinning
+        # problems prominently, but never prevent the gateway or Codex backend
+        # from starting because observability is unavailable.
+        for problem in self.langfuse.validate():
+            logger.warning("Inactive Langfuse Codex plugin: %s", problem)
         if codex_selected:
             if self.codex.model not in {
                 k for k in self.codex.pricing
@@ -3020,15 +3135,33 @@ def load_config(config_dir: Path | None = None) -> NerveConfig:
     if config_dir is None:
         config_dir, _source = resolve_config_dir()
 
-    # Assemble config from workspace/config/settings.yaml + config.yaml +
-    # config.local.yaml (lowest→highest precedence) and resolve ${ENV_VAR} refs.
-    merged = _read_config_sources(config_dir)
+    # Load exactly the selected config directory's dotenv file. Existing
+    # process values win, so resolution is process env -> .env -> YAML ->
+    # defaults. Never search parent directories or the current working tree.
+    # Restore dotenv-only keys after parsing: resolved values live in the
+    # config object and repeated loads of another directory cannot inherit a
+    # stale dotenv layer. Runtime adapters explicitly populate child envs.
+    dotenv_path = config_dir / ".env"
+    dotenv_keys = set(dotenv_values(dotenv_path)) if dotenv_path.exists() else set()
+    missing = object()
+    previous = {key: os.environ.get(key, missing) for key in dotenv_keys}
+    load_dotenv(dotenv_path=dotenv_path, override=False)
+    try:
+        # Assemble config from workspace/config/settings.yaml + config.yaml +
+        # config.local.yaml (lowest→highest precedence) and resolve ${ENV_VAR} refs.
+        merged = _read_config_sources(config_dir)
 
-    # Surface typos and stale keys instead of silently ignoring them.
-    for warning in validate_config_keys(merged):
-        logger.warning("config: %s", warning)
+        # Surface typos and stale keys instead of silently ignoring them.
+        for warning in validate_config_keys(merged):
+            logger.warning("config: %s", warning)
 
-    config = NerveConfig.from_dict(merged)
+        config = NerveConfig.from_dict(merged)
+    finally:
+        for key, value in previous.items():
+            if value is missing:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
     config.config_dir = Path(config_dir)
     problems = lockdown_workspace_problems(config.workspace) if config.lockdown else []
     for problem in problems:

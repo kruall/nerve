@@ -190,6 +190,7 @@ class CodexAppServerClient:
         env: dict[str, str],
         server_request_handler: ServerRequestHandler,
         config_overrides: list[str] | None = None,
+        bypass_hook_trust: bool = False,
         client_name: str = "nerve",
         client_version: str = "1.0.0",
         request_timeout: float = 60.0,
@@ -198,6 +199,7 @@ class CodexAppServerClient:
         self._cwd = cwd
         self._env = env
         self._config_overrides = list(config_overrides or [])
+        self._bypass_hook_trust = bypass_hook_trust
         self._client_name = client_name
         self._client_version = client_version
         self._request_timeout = request_timeout
@@ -222,15 +224,21 @@ class CodexAppServerClient:
 
     # -- lifecycle ------------------------------------------------------ #
 
+    def _build_args(self) -> list[str]:
+        args = [self._bin_path]
+        if self._bypass_hook_trust:
+            args.append("--dangerously-bypass-hook-trust")
+        for kv in self._config_overrides:
+            args.extend(["--config", kv])
+        args.extend(["app-server", "--listen", "stdio://"])
+        return args
+
     async def start(self) -> dict:
         """Spawn the subprocess and run the ``initialize`` handshake.
 
         Returns the ``initialize`` response payload.
         """
-        args = [self._bin_path]
-        for kv in self._config_overrides:
-            args.extend(["--config", kv])
-        args.extend(["app-server", "--listen", "stdio://"])
+        args = self._build_args()
 
         try:
             self._proc = await asyncio.create_subprocess_exec(

@@ -26,6 +26,7 @@ from nerve.agent.backends.base import TurnInput
 from nerve.agent.interactive import InteractiveToolHandler
 from nerve.agent.interactive import InteractionOutcome
 from nerve.config import NerveConfig
+from nerve.config import LangfuseConfig
 
 FAKE_BIN = str(Path(__file__).parent / "fixtures" / "fake_codex_appserver.py")
 
@@ -215,6 +216,98 @@ def test_nerve_mcp_preapproved_for_noninteractive_sources(tmp_path):
     for source in ("workflow", "cron", "hook"):
         overrides = backend.build_config_overrides(_spec(cfg, source=source))
         assert approve in overrides, f"missing pre-approval for source={source}"
+
+@pytest.mark.asyncio
+async def test_langfuse_plugin_is_injected_only_after_verified_install(
+    tmp_path, monkeypatch,
+):
+    from nerve.agent.backends.codex import backend as backend_module
+
+    for name in (
+        "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY",
+        "LANGFUSE_BASE_URL", "LANGFUSE_HOST", "TRACE_TO_LANGFUSE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    cfg = _config(tmp_path)
+    cfg.langfuse = LangfuseConfig.from_dict({
+        "public_key": "pk-lf-test",
+        "secret_key": "sk-lf-test",
+        "base_url": "https://cloud.langfuse.com",
+        "codex": {
+            "enabled": True,
+            "revision": "0123456789abcdef0123456789abcdef01234567",
+        },
+    })
+
+    async def ready(config):
+        return {"ready": True}
+
+    monkeypatch.setattr(
+        backend_module, "ensure_langfuse_plugin_installed", ready,
+    )
+    backend = CodexBackend(_deps(cfg))
+    client = await backend.create_client(_spec(cfg))
+    try:
+        env = backend.build_env(_spec(cfg))
+        overrides = backend.build_config_overrides(_spec(cfg))
+        assert env["TRACE_TO_LANGFUSE"] == "true"
+        assert env["LANGFUSE_SECRET_KEY"] == "sk-lf-test"
+        assert "features.hooks=true" in overrides
+        assert "features.plugin_hooks=true" in overrides
+        assert (
+            'plugins."tracing@codex-observability-plugin".enabled=true'
+            in overrides
+        )
+        assert "sk-lf-test" not in " ".join(overrides)
+        args = client._transport._build_args()
+        assert "--dangerously-bypass-hook-trust" in args
+        assert "sk-lf-test" not in args
+        assert backend.thread_params(_spec(cfg))["config"] == {
+            "bypass_hook_trust": True,
+        }
+    finally:
+        await client.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_langfuse_plugin_failure_does_not_block_codex(
+    tmp_path, monkeypatch,
+):
+    from nerve.agent.backends.codex import backend as backend_module
+
+    for name in (
+        "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY",
+        "LANGFUSE_BASE_URL", "LANGFUSE_HOST", "TRACE_TO_LANGFUSE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    cfg = _config(tmp_path)
+    cfg.langfuse = LangfuseConfig.from_dict({
+        "public_key": "pk-lf-test",
+        "secret_key": "sk-lf-test",
+        "codex": {
+            "enabled": True,
+            "revision": "0123456789abcdef0123456789abcdef01234567",
+        },
+    })
+
+    async def fail(config):
+        raise RuntimeError("network unavailable")
+
+    monkeypatch.setattr(
+        backend_module, "ensure_langfuse_plugin_installed", fail,
+    )
+    backend = CodexBackend(_deps(cfg))
+    client = await backend.create_client(_spec(cfg))
+    try:
+        env = backend.build_env(_spec(cfg))
+        overrides = backend.build_config_overrides(_spec(cfg))
+        assert env["TRACE_TO_LANGFUSE"] == "false"
+        assert "features.hooks=true" not in overrides
+        assert "features.plugin_hooks=true" not in overrides
+        assert "--dangerously-bypass-hook-trust" not in client._transport._build_args()
+        assert "config" not in backend.thread_params(_spec(cfg))
+    finally:
+        await client.disconnect()
 
 
 def test_notification_backlog_fails_transport_instead_of_dropping(monkeypatch):

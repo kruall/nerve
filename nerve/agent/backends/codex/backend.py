@@ -46,6 +46,13 @@ from nerve.agent.backends.codex.appserver import (
     check_codex_cli_version,
 )
 from nerve.agent.backends.codex.diffs import reverse_apply_unified_diff
+from nerve.agent.backends.codex.langfuse_plugin import (
+    child_env as langfuse_child_env,
+    config_overrides as langfuse_config_overrides,
+    ensure_installed as ensure_langfuse_plugin_installed,
+    installation_status as langfuse_plugin_installation_status,
+    record_error as record_langfuse_plugin_error,
+)
 from nerve.agent.backends.codex.mcp_stdio_wrapper import EXTERNAL_MCP_ENV_PREFIX
 from nerve.agent.backends.codex.pricing import compute_cost
 from nerve.agent.backends.codex.ultracode import (
@@ -135,6 +142,7 @@ class CodexBackend:
         self._preflight_lock = asyncio.Lock()
         self._live_models: set[str] = set()
         self._rate_limits: dict[str, Any] | None = None
+        self._langfuse_plugin_ready = False
 
     @property
     def config(self):
@@ -204,6 +212,14 @@ class CodexBackend:
         await self._check_cli_version()
         if self.codex.ultracode.enabled:
             await ensure_ultracode_installed(self.config)
+        self._langfuse_plugin_ready = False
+        if self.config.langfuse.codex.enabled:
+            try:
+                plugin = await ensure_langfuse_plugin_installed(self.config)
+                self._langfuse_plugin_ready = bool(plugin.get("ready"))
+            except Exception as error:
+                # Optional transcript export must never make Codex unavailable.
+                record_langfuse_plugin_error(error, self.config)
         client = CodexClient(self, spec)
         try:
             await client.connect()
@@ -297,6 +313,9 @@ class CodexBackend:
                     # Diagnostics must be observational. Installation/repair
                     # occurs only when a real Codex client is created.
                     plugin = ultracode_installation_status(self.config)
+                langfuse_plugin = langfuse_plugin_installation_status(
+                    self.config,
+                )
                 result = {
                     "available": True,
                     "version": version,
@@ -310,6 +329,7 @@ class CodexBackend:
                     "default_model": self.codex.model,
                     "rate_limits": self._rate_limits,
                     "ultracode": plugin,
+                    "langfuse_plugin": langfuse_plugin,
                 }
             except Exception as e:
                 result = {"available": False, "reason": str(e)}
@@ -334,6 +354,15 @@ class CodexBackend:
     def build_env(self, spec: SessionSpec) -> dict[str, str]:
         env = os.environ.copy()
         env["CODEX_HOME"] = self._home_dir()
+        # The parent may use Langfuse for Python/Claude tracing. Codex
+        # transcript export is a separate explicit opt-in and stays disabled
+        # unless the exact plugin snapshot has been verified for this backend.
+        env["TRACE_TO_LANGFUSE"] = "false"
+        for key in tuple(env):
+            if key.startswith("LANGFUSE_CODEX_"):
+                env.pop(key, None)
+        if self._langfuse_plugin_ready:
+            env.update(langfuse_child_env(self.config))
         # Session-bound bearer token for the nerve MCP endpoint —
         # referenced from the MCP config via bearer_token_env_var so the
         # token never lands in any file.
@@ -463,7 +492,12 @@ class CodexBackend:
                 overrides.append(f"{key}={'true' if value else 'false'}")
             else:
                 overrides.append(f"{key}={value}")
+        if self._langfuse_plugin_ready:
+            overrides.extend(langfuse_config_overrides())
         return overrides
+
+    def langfuse_plugin_status(self) -> dict[str, Any]:
+        return langfuse_plugin_installation_status(self.config)
 
     _TOML_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -541,6 +575,12 @@ class CodexBackend:
             "approvalPolicy": self.codex.approval_policy,
             "developerInstructions": spec.system_prompt + _BACKEND_NOTES,
         }
+        if self._langfuse_plugin_ready:
+            # The app-server process flag alone does not reach the Config
+            # snapshot used by thread/start, thread/resume, and thread/fork.
+            # Forward the runtime-only override in every thread request so
+            # the already verified managed hook is not filtered as untrusted.
+            params["config"] = {"bypass_hook_trust": True}
         return params
 
     def map_effort(self, effort: str) -> str | None:
@@ -608,6 +648,11 @@ class CodexClient(AgentClient):
             env=env,
             server_request_handler=self._handle_server_request,
             config_overrides=config_overrides,
+            # Codex hooks execute outside its tool sandbox and therefore need
+            # explicit trust in headless app-server mode. Nerve grants it only
+            # after the managed plugin's pinned revision and runtime digest
+            # have been verified successfully.
+            bypass_hook_trust=backend._langfuse_plugin_ready,
         )
         self._thread_id: str | None = None
         self._turn_id: str | None = None

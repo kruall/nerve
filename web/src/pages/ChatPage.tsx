@@ -175,15 +175,18 @@ export function ChatPage() {
     return () => { document.title = 'Nerve'; };
   }, [activeSession, activeSessionRow]);
 
-  // Langfuse deep-link status — fetched once. Shows a small "external link"
-  // icon when observability is enabled so we can jump from a session to
-  // its trace in Langfuse.
-  const [langfuse, setLangfuse] = useState<{ host: string | null; enabled: boolean } | null>(null);
+  const activeSessionRecord = sessions.find(s => s.id === activeSession);
+
+  // Refresh when a native thread id appears: a first Codex turn can install
+  // the optional plugin and populate sdk_session_id after the page mounted.
+  const [langfuse, setLangfuse] = useState<
+    Awaited<ReturnType<typeof api.getObservabilityStatus>>['langfuse'] | null
+  >(null);
   useEffect(() => {
     api.getObservabilityStatus()
-      .then(s => setLangfuse({ host: s.langfuse.host, enabled: s.langfuse.enabled }))
-      .catch(() => setLangfuse({ host: null, enabled: false }));
-  }, []);
+      .then(s => setLangfuse(s.langfuse))
+      .catch(() => setLangfuse(null));
+  }, [activeSession, activeSessionRecord?.sdk_session_id]);
 
   useEffect(() => {
     loadSessions().then(() => {
@@ -214,6 +217,12 @@ export function ChatPage() {
     : STATUS_LABELS[agentStatus.state] || null;
 
   const fileCount = modifiedFiles.length || modifiedFilesCount;
+  const langfuseSessionId = activeSessionRecord?.backend === 'codex'
+    ? activeSessionRecord.sdk_session_id
+    : activeSession;
+  const langfuseReady = activeSessionRecord?.backend === 'codex'
+    ? Boolean(langfuse?.codex_plugin?.ready && activeSessionRecord.sdk_session_id)
+    : Boolean(langfuse?.python_exporter?.enabled ?? langfuse?.enabled);
   const filesPanelActive = panels.some(p => p.id === 'files-panel');
   // SidePanel renders nothing without a tab, so it only covers the column when
   // there is one.
@@ -362,9 +371,9 @@ export function ChatPage() {
                   <ContextBar usage={contextUsage} sessionCostUsd={activeSessionRow?.total_cost_usd} />
                 </div>
               )}
-              {langfuse?.enabled && langfuse.host && activeSession && (
+              {langfuseReady && langfuse?.host && langfuseSessionId && (
                 <a
-                  href={`${langfuse.host}/sessions?sessionId=${encodeURIComponent(activeSession)}`}
+                  href={`${langfuse.host}/sessions?sessionId=${encodeURIComponent(langfuseSessionId)}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="hidden md:flex items-center gap-1 px-2 py-1 rounded text-[12px] text-text-faint hover:text-text-secondary hover:bg-surface-raised transition-colors cursor-pointer"
