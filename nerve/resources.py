@@ -118,8 +118,16 @@ class LeaseService:
                 leases.append(acquired)
             return leases
         except asyncio.CancelledError:
-            await self.db.cancel_resource_requests(execution_id)
-            await self.release(execution_id=execution_id, leases=leases)
+            execution = await self.db.get_execution(execution_id)
+            for lease in leases:
+                await self.db.release_resource_lease(
+                    lease_id=str(lease.get("id")), execution_id=execution_id,
+                    fencing_token=int(lease.get("fencing_token", -1)),
+                )
+            if execution is not None and execution.get("status") == "cancelling":
+                await self.db.cancel_resource_requests(execution_id)
+            else:
+                await self.db.requeue_resource_requests(execution_id)
             raise
         except Exception:
             await self.release(execution_id=execution_id, leases=leases)

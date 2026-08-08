@@ -85,6 +85,12 @@ class ExecutionService:
             if status == "queued":
                 self._spawn_runner(row["id"])
                 continue
+            if status == "starting" and not row.get("selected_leases"):
+                # The durable resource request remains FIFO-queued across a
+                # crash. No backend was started, so resume scheduling rather
+                # than classifying the execution as a lost remote process.
+                self._spawn_runner(row["id"])
+                continue
             recovery = await self.backend.recover(row)
             if status == "cancelling":
                 if recovery.state == "reattachable":
@@ -222,15 +228,19 @@ class ExecutionService:
         row = await self.db.get_execution(execution_id)
         if row is None:
             return
-        if not await self.db.transition_execution(
-            execution_id, to_status="starting", expect=("queued",),
-            fields={"backend_name": self.backend.name},
-        ):
-            if row["status"] == "cancelling":
-                await self.db.finalize_execution_cancelled(execution_id)
-                await self._broadcast(execution_id)
+        if row["status"] == "queued":
+            if not await self.db.transition_execution(
+                execution_id, to_status="starting", expect=("queued",),
+                fields={"backend_name": self.backend.name},
+            ):
+                current = await self.db.get_execution(execution_id)
+                if current and current["status"] == "cancelling":
+                    await self.db.finalize_execution_cancelled(execution_id)
+                    await self._broadcast(execution_id)
+                return
+            await self._broadcast(execution_id)
+        elif row["status"] != "starting" or row.get("selected_leases"):
             return
-        await self._broadcast(execution_id)
         leases: Sequence[Mapping[str, Any]] = []
         try:
             leases = await self.resource_manager.acquire(
@@ -324,7 +334,7 @@ class ExecutionService:
             if won:
                 self._schedule_continuation(execution_id)
         finally:
-            if leases:
+            if leases and not self._stopping:
                 with contextlib.suppress(Exception):
                     await self.resource_manager.release(execution_id=execution_id, leases=leases)
 

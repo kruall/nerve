@@ -62,6 +62,16 @@ class ResourceStore:
         )
         return result.rowcount
 
+    async def requeue_resource_requests(self, execution_id: str) -> int:
+        """Restore pre-backend acquisitions interrupted by daemon shutdown."""
+        result = await self._write(
+            """UPDATE resource_lease_requests
+               SET state='queued', lease_id=NULL, settled_at=NULL
+               WHERE execution_id=? AND state='acquired'""",
+            (execution_id,),
+        )
+        return result.rowcount
+
     async def try_acquire_resource_request(
         self, *, request_id: str, lease_id: str, host_ids: list[str],
         ttl_seconds: int,
