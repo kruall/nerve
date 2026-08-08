@@ -579,6 +579,10 @@ def validate_skill_package(
             f"description must be at most {MAX_DESCRIPTION_LENGTH} characters",
             ("description",),
         ))
+    if not body.strip():
+        issues.append(SkillValidationIssue(
+            "empty_body", "SKILL.md instructions must not be empty", ("body",),
+        ))
 
     metadata_value = frontmatter.get("metadata", {})
     if not isinstance(metadata_value, dict):
@@ -708,8 +712,7 @@ def _build_skill_md(name: str, description: str, body: str = "", version: str = 
     fm.update(extra)
     yaml_str = yaml.dump(fm, default_flow_style=False, allow_unicode=True).strip()
     parts = [f"---\n{yaml_str}\n---"]
-    if body:
-        parts.append(body)
+    parts.append(body or f"# {name}\n\n{description}")
     return "\n\n".join(parts) + "\n"
 
 

@@ -452,6 +452,17 @@ async def test_canonical_package_is_indexed_with_namespaced_metadata(tmp_path, d
 
 
 @pytest.mark.asyncio
+async def test_create_generates_nonempty_codex_compatible_body(tmp_path, db):
+    manager = SkillManager(tmp_path / "ws", db)
+
+    skill = await manager.create_skill("Empty Body", "Generated instructions.")
+
+    raw = (tmp_path / "ws" / "skills" / skill.id / "SKILL.md").read_text(encoding="utf-8")
+    assert "# empty-body" in raw
+    assert "Generated instructions." in raw
+
+
+@pytest.mark.asyncio
 async def test_legacy_skill_loads_with_explicit_migration_diagnostic(tmp_path, db):
     workspace = tmp_path / "ws"
     _write_skill(
@@ -513,7 +524,7 @@ async def test_openai_agent_metadata_is_ignored_unless_dual_use_is_declared(tmp_
     _write_skill(
         workspace, "portable",
         "---\nname: portable\ndescription: Portable package.\nmetadata:\n"
-        "  nerve:\n    version: 1.0.0\n---\n",
+        "  nerve:\n    version: 1.0.0\n---\n\nInstructions.\n",
     )
     agents = skill_dir / "agents"
     agents.mkdir()
@@ -524,7 +535,7 @@ async def test_openai_agent_metadata_is_ignored_unless_dual_use_is_declared(tmp_
 
     (skill_dir / "SKILL.md").write_text(
         "---\nname: portable\ndescription: Portable package.\nmetadata:\n"
-        "  nerve:\n    version: 1.0.0\n    codex: true\n---\n",
+        "  nerve:\n    version: 1.0.0\n    codex: true\n---\n\nInstructions.\n",
         encoding="utf-8",
     )
     assert await manager.discover() == []

@@ -10,6 +10,9 @@ New packages must use this Codex-compatible shape. `name` is a lowercase,
 hyphenated identifier and must equal the directory name. `description` is
 required and is limited to 1024 characters. Nerve owns only the
 `metadata.nerve` namespace; portable top-level fields remain available to Codex.
+The Markdown instruction body is required. When the create API receives no
+body, it generates a minimal heading and description so the resulting package
+remains structurally valid for Codex.
 
 ```yaml
 ---
