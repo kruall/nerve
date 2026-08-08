@@ -16,6 +16,13 @@ from .backend import CodexBackend
 from .langfuse_plugin import ensure_installed, installation_status
 
 
+class _CanaryBackend(CodexBackend):
+    """Isolate the canary from daemon-only persisted MCP configuration."""
+
+    def build_config_overrides(self, spec: SessionSpec) -> list[str]:
+        return ["mcp_servers={}", *super().build_config_overrides(spec)]
+
+
 def _validate_usage(observations: list[Any]) -> list[str]:
     errors: list[str] = []
     if not observations:
@@ -60,7 +67,7 @@ async def run_langfuse_canary(config: Any, *, timeout: float = 60.0) -> dict[str
         tool_ctx_factory=lambda _session_id: None,
         external_mcp_servers=lambda: [],
     )
-    backend = CodexBackend(deps)
+    backend = _CanaryBackend(deps)
     canary_id = f"langfuse-canary-{uuid.uuid4().hex}"
     workspace = Path(config.workspace).expanduser()
     workspace.mkdir(parents=True, exist_ok=True)
