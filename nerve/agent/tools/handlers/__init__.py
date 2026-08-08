@@ -23,6 +23,7 @@ from nerve.agent.tools.handlers.sources import SOURCE_SPECS
 from nerve.agent.tools.handlers.tasks import TASK_SPECS
 from nerve.agent.tools.handlers.wakeups import WAKEUP_SPECS
 from nerve.agent.tools.handlers.workflow_runs import WORKFLOW_RUN_SPECS
+from nerve.agent.tools.handlers.workflow_presets import WORKFLOW_PRESET_SPECS
 
 
 def build_default_registry() -> ToolRegistry:
@@ -47,6 +48,7 @@ def build_default_registry() -> ToolRegistry:
         *RESOURCE_SPECS,
         *WAKEUP_SPECS,
         *WORKFLOW_RUN_SPECS,
+        *WORKFLOW_PRESET_SPECS,
         *REVIEW_LOOP_SPECS,
         *HOA_SPECS,
     ):

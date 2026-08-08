@@ -22,6 +22,11 @@ if TYPE_CHECKING:
 
 _service: WorkflowRunService | None = None
 
+from nerve.workflows.presets import (  # noqa: E402
+    ResolvedWorkflowPlan, WorkflowCatalogSnapshot, WorkflowPresetCatalog,
+    WorkflowPresetError, WorkflowPresetValidationError,
+)
+
 
 def init_workflow_run_service(
     config: NerveConfig, db: Database, engine: AgentEngine,

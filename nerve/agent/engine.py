@@ -268,6 +268,11 @@ class AgentEngine:
         # before swapping, so this object remains safe to hand to every session.
         self.execution_catalog = ExecutionCatalog(config.workspace)
         self.execution_catalog.reload()
+        # Presets only compile/pin static execution graphs here.  Their runtime
+        # controller is intentionally separate from the catalog.
+        from nerve.workflows.presets import WorkflowPresetCatalog
+        self.workflow_preset_catalog = WorkflowPresetCatalog(config.workspace, self.execution_catalog, config)
+        self.workflow_preset_catalog.reload()
         # Supplied by the separate lifecycle implementation. The catalog task
         # exposes start behind this boundary without owning processes itself.
         self.execution_service: ExecutionService | None = None

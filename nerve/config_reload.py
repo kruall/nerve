@@ -339,6 +339,18 @@ async def reload_all(engine, cron_service, config_dir: Path) -> dict:
             summary["executions"] = f"{_ERROR_PREFIX}{e}"
             logger.warning("execution catalog reload failed: %s", e, exc_info=True)
 
+    workflow_catalog = getattr(engine, "workflow_preset_catalog", None) if engine is not None else None
+    if workflow_catalog is not None:
+        try:
+            # Re-resolve models and MCP servers against the same newly loaded
+            # configuration that the engine will expose after this reload.
+            workflow_catalog.config = get_config()
+            snapshot = workflow_catalog.reload()
+            summary["workflow_presets"] = f"{len(snapshot.presets)} preset(s), generation {snapshot.generation}"
+        except Exception as e:  # noqa: BLE001
+            summary["workflow_presets"] = f"{_ERROR_PREFIX}{e}"
+            logger.warning("workflow preset catalog reload failed: %s", e, exc_info=True)
+
     # 3. MCP servers.
     if engine is not None:
         try:

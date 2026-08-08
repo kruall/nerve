@@ -36,6 +36,7 @@ from nerve.gateway.routes import (
     workflow_runs,
     review_loops,
     executions,
+    workflow_presets,
     config,
 )
 
@@ -70,5 +71,6 @@ def register_all_routes() -> APIRouter:
     router.include_router(workflow_runs.router)
     router.include_router(review_loops.router)
     router.include_router(executions.router)
+    router.include_router(workflow_presets.router)
     router.include_router(config.router)
     return router

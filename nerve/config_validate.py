@@ -310,6 +310,17 @@ def validate_config_bundle(
                 f"({execution_catalog.directory})"
             )
 
+    # Workflow presets are reviewed configuration too. Resolve them against the
+    # candidate execution catalog before they can be installed by reload.
+    from nerve.workflows.presets import WorkflowPresetCatalog, WorkflowPresetError
+    try:
+        workflow_snapshot = WorkflowPresetCatalog(workspace, execution_catalog, config).build_candidate()
+    except WorkflowPresetError as e:
+        result.errors.append(f"workflow preset catalog: {e}")
+    else:
+        if workflow_snapshot.presets or (workspace / "config/workflows/presets").exists():
+            result.info.append(f"workflow preset catalog: {len(workflow_snapshot.presets)} preset(s)")
+
     # Resolve the cron locations even if full typed construction failed above.
     if config is not None:
         cron_files = (
