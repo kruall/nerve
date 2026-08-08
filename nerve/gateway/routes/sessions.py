@@ -174,6 +174,18 @@ async def _pending_wakeup_map(deps) -> dict[str, str]:
     return {r["session_id"]: r["fire_at"] for r in rows if r.get("session_id")}
 
 
+async def _attach_execution_activity(sessions: list[dict]) -> None:
+    """Attach detached work without overloading the live-agent flag."""
+    from nerve.gateway.routes.executions import session_execution_activity
+
+    activity = await session_execution_activity([s["id"] for s in sessions])
+    for session in sessions:
+        summary = activity.get(session["id"], {})
+        count = summary.get("active_execution_count", 0)
+        session["active_execution_count"] = count
+        session["execution_statuses"] = summary.get("execution_statuses", [])
+        session["is_busy"] = bool(session.get("is_running") or count)
+
 async def _decorate(deps, sessions: list[dict]) -> list[dict]:
     """Attach the live per-row bits every sidebar list needs."""
     running_ids = deps.engine.sessions.get_running_ids()
@@ -188,6 +200,7 @@ async def _decorate(deps, sessions: list[dict]) -> list[dict]:
         s["awaiting_input"] = s["id"] in awaiting_ids
         s["pending_wakeup_at"] = wakeup_at.get(s["id"])
         s["has_background_tasks"] = deps.engine.has_live_background_tasks(s["id"])
+    await _attach_execution_activity(sessions)
     await _attach_review_loops(deps, sessions)
     return sessions
 
@@ -558,10 +571,17 @@ async def session_status(session_id: str, user: dict = Depends(require_auth)):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     is_running = deps.engine.is_session_running(session_id)
+    from nerve.gateway.routes.executions import session_execution_activity
+
+    activity = (await session_execution_activity([session_id])).get(session_id, {})
+    active_execution_count = activity.get("active_execution_count", 0)
     return {
         "session_id": session_id,
         "status": session.get("status", "unknown"),
         "is_running": is_running,
+        "active_execution_count": active_execution_count,
+        "execution_statuses": activity.get("execution_statuses", []),
+        "is_busy": bool(is_running or active_execution_count),
         "awaiting_input": session_id in get_awaiting_ids(),
         "sdk_session_id": session.get("sdk_session_id"),
         "connected_at": session.get("connected_at"),

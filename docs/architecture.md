@@ -73,6 +73,10 @@ Claude Agent SDK wrapper providing:
 - A reviewed declarative execution catalog (`nerve/executions/`) compiles typed
   kind arguments and resource-pool selections into immutable shell-free plans;
   process lifecycle is supplied through a separate `ExecutionService` boundary
+- The web gateway exposes a secret-free execution/resource projection. Session
+  busy state is derived from live agent turns plus durable executions, while
+  the two lifecycles remain separate in API and frontend stores. WebSocket
+  events are incremental hints; REST/DB state rehydrates reconnects.
 - API calls routed through configurable base URL (direct Anthropic API or local CLIProxyAPI proxy)
 
 ### Channels (`nerve/channels/`)

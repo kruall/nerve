@@ -14,6 +14,7 @@ from nerve.agent.tools.schemas import (
     EXECUTION_KIND_VALIDATE_SCHEMA,
 )
 from nerve.executions import ExecutionCatalog, OperationValidationError
+from nerve.executions.public import public_execution
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +97,7 @@ async def execution_kind_start_handler(ctx: ToolContext, args: dict) -> ToolResu
         "kind": plan.kind,
         "profile_version": plan.profile_version,
         "profile_hash": plan.profile_hash,
-        "execution": dict(started),
+        "execution": public_execution(started),
     })
 
 

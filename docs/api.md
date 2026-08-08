@@ -25,6 +25,38 @@ starting it. The returned immutable plan redacts secret arguments.
 Compile and submit the plan to the installed execution lifecycle service. Returns
 503 when that separate service is unavailable. See [executions.md](executions.md).
 
+### Detached executions and resources
+
+These endpoints are available when the detached lifecycle/resource service is
+installed. REST is the reconnect source of truth; `execution_update` and
+`resource_update` WebSocket messages are live hints that clients reconcile
+back to these endpoints.
+
+`execution_update` contains `session_id` plus the same public `execution`
+object returned by REST. `resource_update` contains only affected public IDs;
+clients refresh `GET /api/resources` instead of treating an event payload as a
+resource snapshot.
+
+- `GET /api/sessions/{id}/executions?include_terminal=true&limit=20` returns
+  recent session-owned executions.
+- `GET /api/executions/{id}` returns one execution.
+- `GET /api/executions/{id}/logs?limit=200&before=<sequence>` returns a bounded
+  tail. `limit` is clamped to 1–500, lines to 16 KiB, and the complete response
+  to 256 KiB. There is no full-log endpoint.
+- `POST /api/executions/{id}/cancel` accepts an optional short `reason`.
+- `POST /api/executions/{id}/retry` requires `profile_mode` to be `pinned` or
+  `current`; callers must make that semantic choice explicit.
+- `GET /api/resources` returns public pools, host states, leases, and queue
+  positions.
+- `POST /api/resources/hosts/{id}/drain` accepts `draining` and a matching
+  `confirm_host_id`.
+- `POST /api/resources/hosts/{id}/recover` requires a matching
+  `confirm_host_id` and `remote_quiescence_confirmed: true`.
+
+All payloads use an explicit allowlist. Raw hostnames, users, ports, SSH
+options, connection references, credentials, process handles, and complete
+logs are never returned by this facade.
+
 ### Auth
 
 #### `POST /api/auth/login`
@@ -48,6 +80,10 @@ Response: { "authenticated": true }
 Sidebar feed: one page of conversations plus every starred session.
 
 `sessions` is a single page of the conversation feed (page size = `sessions.sidebar_page_size`, default 50; `0` = unlimited). The window covers only non-archived, non-system (cron/hook), non-starred rows, so cron traffic can never displace conversations. On the first page (`offset=0`) all starred sessions are prepended in full and are never truncated; pass the returned `next_offset` back as `?offset=N` to load subsequent pages. `archived_count`/`system_count` are the collapsed-group badge counts, and `has_more`/`next_offset` drive the "…" load-more control.
+
+Each row keeps `is_running` for the live agent turn and separately returns
+`active_execution_count`, `execution_statuses`, and derived `is_busy`. Clients
+must not interpret detached execution activity as agent streaming.
 
 ```json
 Response: {

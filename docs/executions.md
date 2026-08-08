@@ -135,6 +135,33 @@ Equivalent REST endpoints are:
 The start surfaces return `503`/an MCP error until the lifecycle service is
 installed; catalog discovery and compilation remain available independently.
 
+## Web lifecycle and resource view
+
+The chat UI keeps agent streaming and detached work as separate state. A
+session is busy when either its agent turn is running or it owns active work,
+but the agent `is_running` flag is never rewritten to mean both. Session Stop
+therefore remains available after the initiating turn ends and asks the
+lifecycle service to cancel owned work.
+
+Execution cards show the requested pool separately from the selected physical
+host, queue position, duration, lease/revocation state, terminal result, and
+assistant-continuation state. `queued`, `running`, `cancelling`, `failed`,
+`cancelled`, and waiting-for-continuation are visually distinct. A failed
+execution is also distinct from a successful execution whose later assistant
+continuation failed.
+
+Logs are opt-in: Load/Refresh requests only the recent bounded tail. Follow is
+off by default and, when enabled, repeats the same bounded request; it never
+downloads the complete build log. Lifecycle WebSocket messages update the open
+view quickly, then the store reconciles from REST so reloads, reconnects, and
+overlapping events converge on durable state.
+
+The Resources drawer shows pool availability, physical hosts, current leases,
+and the FIFO queue. Draining and quarantine recovery are authenticated,
+confirmation-gated actions. A revoking or quarantined host stays visibly
+unavailable until the backend confirms remote quiescence; the UI cannot release
+a lease or clear quarantine merely because a heartbeat/TTL expired.
+
 Run `nerve config validate --workspace <workspace> --portable-only --strict-keys`
 before review. Copy the non-destructive examples from
 `examples/execution-kinds/` into the workspace catalog directory to try the

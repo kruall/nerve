@@ -8,6 +8,7 @@ from nerve.executions.catalog import (
     ExecutionService,
     OperationValidationError,
 )
+from nerve.executions.public import ExecutionUiService, ResourceUiService
 
 __all__ = [
     "CatalogSnapshot",
@@ -15,5 +16,7 @@ __all__ = [
     "ExecutionCatalog",
     "ExecutionProfileError",
     "ExecutionService",
+    "ExecutionUiService",
     "OperationValidationError",
+    "ResourceUiService",
 ]
