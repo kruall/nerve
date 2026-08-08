@@ -1,0 +1,1 @@
+"""Example standalone MCP package."""

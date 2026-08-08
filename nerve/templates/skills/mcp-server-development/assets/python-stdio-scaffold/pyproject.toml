@@ -1,0 +1,15 @@
+[project]
+name = "example-mcp"
+version = "0.1.0"
+description = "Independent stdio MCP server scaffold"
+requires-python = ">=3.12"
+
+[project.scripts]
+example-mcp = "example_mcp.server:main"
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/example_mcp"]

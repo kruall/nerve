@@ -8,7 +8,7 @@ description: >
   "build nerve UI", "nerve migration".
 metadata:
   nerve:
-    version: 1.0.0
+    version: 1.1.0
     context: domain
 ---
 
@@ -18,6 +18,23 @@ metadata:
 > the `nerve-workspace` skill instead — that covers the workspace, and which of a
 > pull request or a direct edit applies to this instance. This skill is for
 > developing the Nerve *application* codebase.
+
+## MCP placement gate
+
+Before selecting a repository, worktree, or implementation location for a new
+MCP capability, load `mcp-server-development` and record a placement decision:
+state owner; session/lifecycle owner; reuse by non-Nerve clients; dependency and
+failure isolation; transport and credentials; and Nerve UI/API coupling.
+
+Using a capability through Nerve is not a reason to add a Nerve tool handler.
+Generic local capabilities default to a standalone stdio MCP server with its own
+repository/version-control owner, runtime, and lockfile; Nerve only configures
+it as a client. Embed a tool only when Nerve concretely owns the required state
+or lifecycle (for example, detached execution cancellation and continuations).
+The built-in Nerve MCP surface exposes Nerve-owned services; it is distinct from
+a standalone MCP server registered under `mcp_servers`. Do not choose an
+application worktree until this decision is recorded. `nerve-dev` is suggested
+for a standalone server only when its Nerve registration or integration changes.
 
 ## Repository
 
