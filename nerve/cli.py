@@ -172,7 +172,7 @@ def _docker_compose(
 # Commands that must keep working when the config itself is broken -- they are
 # how an operator diagnoses or repairs it. They receive ctx.obj["config"] = None
 # and ctx.obj["config_error"], and are responsible for reporting.
-_SELF_DIAGNOSING_COMMANDS = frozenset({"config", "doctor", "init", "migrate"})
+_SELF_DIAGNOSING_COMMANDS = frozenset({"config", "doctor", "init", "migrate", "remote-supervisor"})
 
 
 @click.group()

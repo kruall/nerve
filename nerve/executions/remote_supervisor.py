@@ -95,9 +95,13 @@ def _cancel(request: Mapping[str, Any]) -> dict[str, Any]:
     pgid = int(state["process_group"])
     if _alive(pgid):
         signal_kind = signal.SIGINT if request.get("mode") == "interrupt" else signal.SIGTERM
-        os.killpg(pgid, signal_kind); deadline = time.monotonic() + max(0, int(request.get("grace_seconds", 5)))
+        try: os.killpg(pgid, signal_kind)
+        except (ProcessLookupError, PermissionError): pass
+        deadline = time.monotonic() + max(0, int(request.get("grace_seconds", 5)))
         while _alive(pgid) and time.monotonic() < deadline: time.sleep(.05)
-        if _alive(pgid): os.killpg(pgid, signal.SIGKILL)
+        if _alive(pgid):
+            try: os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError): pass
         deadline = time.monotonic() + 5
         while _alive(pgid) and time.monotonic() < deadline: time.sleep(.05)
     quiescent = not _alive(pgid)
