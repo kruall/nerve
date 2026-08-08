@@ -20,7 +20,10 @@ class _CanaryBackend(CodexBackend):
     """Isolate the canary from daemon-only persisted MCP configuration."""
 
     def build_config_overrides(self, spec: SessionSpec) -> list[str]:
-        return ["mcp_servers={}", *super().build_config_overrides(spec)]
+        return [
+            value for value in super().build_config_overrides(spec)
+            if not value.startswith("mcp_servers.")
+        ]
 
 
 def _validate_usage(observations: list[Any]) -> list[str]:

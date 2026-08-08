@@ -55,7 +55,13 @@ def test_legacy_keys_and_zero_detail_cost_fail():
 def test_canary_clears_persisted_mcp_servers(tmp_path):
     config = NerveConfig.from_dict({
         "workspace": str(tmp_path),
-        "codex": {"home_dir": str(tmp_path / "codex-home")},
+        "codex": {
+            "home_dir": str(tmp_path / "codex-home"),
+            "extra_config": {
+                "mcp_servers.nerve.default_tools_approval_mode": "prompt",
+                "approvals_reviewer": "user",
+            },
+        },
     })
     backend = _CanaryBackend(BackendDeps(
         config=lambda: config,
@@ -69,4 +75,9 @@ def test_canary_clears_persisted_mcp_servers(tmp_path):
         system_prompt="canary", cwd=str(tmp_path),
     )
 
-    assert backend.build_config_overrides(spec)[0] == "mcp_servers={}"
+    overrides = backend.build_config_overrides(spec)
+    assert all(
+        not value.startswith("mcp_servers.")
+        for value in overrides
+    )
+    assert 'approvals_reviewer="user"' in overrides
