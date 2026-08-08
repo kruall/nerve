@@ -1,266 +1,349 @@
-# Virtual task manager: research proposal
+# Виртуальный менеджер задач: целевая архитектура
 
-## Status
+## Статус и решение
 
-This document records the initial proposal and research questions. It is not an
-implementation design or a commitment to extend the current Nerve task model.
+Это результат исследования. Он определяет отдельный домен **планирования
+пользовательской работы** и не является планом расширения существующего Nerve
+Task.
 
-## Desired outcome
+Главное решение: пользовательские обязательства и внутренние обязательства
+ассистента хранятся в разных ограниченных контекстах. В пользовательском
+контексте Goal, Project и остальные рабочие элементы используют общую
+типизированную модель. Внутренний контекст продолжает использовать Nerve Task,
+sessions, workflow runs, executions и cron. Между ними допускаются только
+явные ссылки с определённым направлением и правилами видимости.
 
-Nerve should be able to help a person turn intentions into verifiable outcomes,
-decompose them into manageable work, represent uncertainty, and track how the
-forecast changes over time. The system should preserve manual control over
-priorities and execution order.
+Это устраняет неявное смешивание из inbox, уведомлений, timeline и расчётов
+ёмкости, но позволяет показать пользователю состояние делегированной работы как
+состояние его собственного рабочего элемента.
 
-The target is not merely a smarter task list. It is a model of commitments with
-explicit ownership, scope, dependencies, uncertainty, history, and current
-forecast.
+## Термины и границы
 
-## First boundary to research: whose task is it?
+| Контур | Назначение | Владелец и видимость | Текущее или целевое хранилище |
+|---|---|---|---|
+| Пользовательское планирование | Личные и совместно обсуждаемые обязательства, результаты, порядок работы и прогноз | Пользователь; по умолчанию видно в портфеле и обзорах | Новый planning domain в SQLite |
+| Исполнение ассистентом | Делегированные Nerve обязательства: исследовать, реализовать, проверить, подготовить артефакт | Ассистент; пользователю видна только связанная сводка | Существующие Nerve Task, plan, session, workflow run, execution |
+| Операционный контур | Действия для работы платформы: cron, синхронизация, retries, leases, maintenance | Только Nerve, кроме диагностических экранов | Существующие сервисы и их записи |
+| Внешняя работа | Работа другого человека или системы, от которой зависит результат | Пользовательский элемент с ответственным внешним актором | Новый planning domain; внешняя система остаётся источником истины |
 
-Nerve currently has one persistent task collection backed by Markdown files and
-a SQLite search index. A task has a status, deadline, source, tags, and free-form
-content, but no explicit owner, workspace, hierarchy, dependency graph, estimate,
-or planning baseline.
+**Делегированная работа не становится общим task.** Пользовательский work item
+остаётся описанием обязательства и результата. Nerve создаёт один или несколько
+внутренних execution/task records и связывает их через `execution_link`. В
+пользовательском представлении это даёт «делегировано, ожидается артефакт X», а
+не раскрывает внутренние попытки, cron-задачи и технические статусы.
 
-Before extending this model, the research must distinguish at least:
+### Почему не единая сущность
 
-- a user commitment: something the human intends to accomplish;
-- an assistant commitment: autonomous or delegated work Nerve owes the user;
-- an operational action: internal work needed to run a session, workflow, cron
-  job, or execution;
-- a shared project item: work whose state matters to both the user and the
-  assistant.
+Рассмотрены три модели.
 
-These categories may share storage primitives, but must not be silently mixed in
-inboxes, progress reports, timelines, reminders, or capacity calculations.
+| Модель | Итог |
+|---|---|
+| Отдельные store и доменные модели | Выбрана. Изоляция по умолчанию, понятные права и отсутствие ложной общей семантики. |
+| Один универсальный `work_item` с `owner` и `visibility` | Отклонена для первой версии: почти все запросы, FTS, напоминания и UI обязаны фильтровать чувствительные состояния, а жизненный цикл cron и человеческого обязательства различается. |
+| Только пользовательские элементы со ссылками на старые Nerve Task | Недостаточна: не даёт пользователю собственную иерархию, baseline, историю и прогноз; связь нужна как интеграционный механизм, но не как сама модель. |
 
-Candidate approaches to compare:
+У контуров могут быть общими инфраструктурные механизмы: идентификаторы,
+аудит, timestamps, полнотекстовый поиск внутри контекста, ссылки на артефакты,
+уведомления и UI-компоненты. Они не разделяют таблицу, default query или
+очередь напоминаний.
 
-1. Separate domain models and stores.
-2. One work-item model with explicit owner, actor, workspace, visibility, and
-   purpose.
-3. A user-facing project model that references existing Nerve tasks used for
-   assistant execution.
+### Сквозные сценарии
 
-The choice should be based on concrete end-to-end scenarios rather than schema
-convenience. A single universal work-item model is only acceptable if it keeps
-the user-facing and operational views unambiguous.
+| Сценарий | Создание и исполнение | Что видит пользователь | Уведомление |
+|---|---|---|---|
+| «Подготовить архитектурный документ» | Создаётся пользовательский work package. После явной делегации Nerve создаёт внутреннюю задачу и сессию. | Результат, выбранный статус «делегировано», ссылка на артефакт и краткий риск. | Только событие, требующее решения, или готовый результат. |
+| «Согласовать договор» | Пользовательский action с внешним ответственным и ожиданием. | «Ожидание внешнего ответа»; это не расходует активную ёмкость. | Напоминание по дате follow-up. |
+| Cron переиндексации | Создаётся и исполняется операционным сервисом. | Ничего в портфеле, кроме диагностик при необходимости. | Только системная ошибка по политике ops. |
+| Внутренняя реализация Nerve для пользовательского проекта | Несколько agent tasks и executions связаны с одним work package. | Один пользовательский элемент; техническая детализация открывается только явным переходом к диагностике. | Уведомление агрегируется по пользовательскому обязательству и не дублирует internal retries. |
 
-## Conceptual work hierarchy
+Инварианты: внутренний объект не попадает в пользовательский список без
+`execution_link`; пользовательский элемент не получает технический статус
+`retrying`; удаление или завершение link не удаляет объект в другом контуре;
+права и search всегда начинаются с границы контура.
 
-The initial hierarchy is:
+## Модель пользовательской работы
+
+### Общая сущность и её типы
+
+В новом planning domain используется одна таблица `work_items` с неизменяемым
+ID, `item_type`, `project_id`, опциональным `parent_id`, owner, ответственным
+актором, состоянием, title, outcome contract, scope и timestamps. Общая модель
+нужна для дерева, graph relation, поиска, событий и единых ссылок; тип определяет
+дополнительные поля и правила завершения.
+
+| Тип | Смысл | Обязательный критерий завершения |
+|---|---|---|
+| `goal` | Долгосрочное желаемое изменение; может включать несколько проектов | Наблюдаемое целевое состояние или решение прекратить цель |
+| `project` | Ограниченное во времени изменение с результатом, scope и владельцем | Принятый outcome/evidence либо явное закрытие без результата |
+| `milestone` | Значимая проверяемая точка проекта, не обязательно работа | Достигнутый факт, решение или принятый артефакт |
+| `work_package` | Упорядочиваемый и оцениваемый объём работы | Результат и evidence, достаточные без скрытого крупного решения |
+| `next_action` | Следующее физическое или коммуникационное действие | Совершённое действие и его наблюдаемый эффект |
+
+`goal` может существовать без `project`; `project` может быть связан с goal или
+быть самостоятельным. `milestone`, `work_package` и `next_action` принадлежат
+одному проекту. `next_action` не обязан иметь SMART-контракт, но обязан иметь
+понятный результат. Планирование прекращает декомпозицию, когда пакет
+проверяем, имеет одного ответственного, измерим, достаточно мал для оценки и не
+скрывает решение, которое ещё предстоит принять.
+
+У каждого элемента отдельно хранятся:
+
+- `owner_actor_id` — чьё обязательство это в планировании; в первой версии
+  пользователь;
+- `responsible_actor` — человек, ассистент или внешний участник, который должен
+  совершить работу;
+- `visibility` — `user` или ограниченный `shared`; `internal` не является
+  допустимой видимостью пользовательского work item;
+- `state` — семантический рабочий статус (`draft`, `ready`, `active`, `waiting`,
+  `blocked`, `done`, `cancelled`), не статус выполнения процесса;
+- `completion_evidence` и `outcome_contract` — условия приёмки, scope,
+  non-goals, измерение и срок/окно, если применимо.
+
+Первую версию нужно ограничить одним владельцем. Совместное редактирование,
+ACL и назначение нескольких исполнителей требуют отдельной модели доступа, а не
+маскируются текстовым полем.
+
+### Дерево и граф связей
+
+Иерархия `parent_id` отвечает только на «частью чего является элемент». Связи
+являются продолжением модели рабочих элементов на пользовательском уровне, но
+технически реализуются отдельным graph-компонентом `work_item_relations`.
+
+Поддерживаемые relation types:
+
+- `contains` — материализованное представление parent/child, не редактируется
+  отдельно;
+- `blocks` — источник должен завершиться или изменить состояние, прежде чем
+  цель станет доступна;
+- `requires` — нужный вход/условие без утверждения о полном блокировании;
+- `related` — контекстная связь без расчётного эффекта;
+- `alternative` — взаимоисключающие варианты scope или решения.
+
+`blocks` не должен образовывать цикл; insertion проверяет reachability и
+отклоняет связь с объяснением найденного пути. Циклы `contains` запрещены также.
+`related` не участвует в forecast, `alternative` требует выбранного варианта до
+расчёта, а `requires` либо преобразуется в `blocks`, либо явно помечается как
+неблокирующий. Рабочий элемент `ready` только если он не завершён, не ждёт
+внешнего события, имеет приемлемый scope и не имеет активного blocking path.
+
+## PERT: skill + MCP
+
+### Граница ответственности
+
+`pert-estimation` skill ведёт беседу: устанавливает единицу активного effort,
+отделяет неизвестный scope от случайной неопределённости, собирает optimistic
+(O), most likely (M), pessimistic (P), assumptions и triggers риска. Он не
+придумывает числа и предлагает декомпозицию, если P/O велико, отсутствует
+результат или один из сценариев является другим проектом.
+
+MCP принимает явно подтверждённые значения и детерминированно хранит и считает:
 
 ```text
-Area
-└── Goal
-    └── Project
-        ├── Outcome or milestone
-        │   └── Work package
-        │       └── Next action
-        └── Outcome or milestone
+E = (O + 4M + P) / 6
+variance = ((P - O) / 6)^2
+sigma = (P - O) / 6
 ```
 
-SMART is primarily a contract for goals, project outcomes, and milestones. It
-should not be mechanically applied to every next action.
+Оценка всегда имеет `unit` (`active_hours` в v1), estimate revision,
+assumptions, method/version, recorded_by и timestamp. Новая оценка добавляет
+revision, не перезаписывает старую. Фактические active hours и остаточная оценка
+хранятся отдельно: завершённая работа не должна становиться «нулевой оценкой».
 
-A SMART contract should capture:
+Минимальные MCP-операции: `pert_estimate_record`, `pert_estimate_list`,
+`pert_estimate_current`, `actual_effort_record`, `remaining_estimate_record` и
+`pert_calculate`. Результат расчёта содержит и входы, и формулу, чтобы skill/UI
+могли объяснить его без собственной арифметики.
 
-- the expected outcome;
-- the initial and target states;
-- a metric or binary completion condition;
-- a deadline or time window;
-- relevance to a larger goal;
-- constraints, scope, and explicit non-goals;
-- acceptable evidence of completion.
+История образует будущую калибровку только после достаточного числа однородных
+наблюдений. V1 показывает историю O/M/P, actual и ошибку, но не меняет оценки
+автоматически и не заявляет статистическую точность при зависимых работах.
 
-Research work needs a variant: a question, a time budget, and the decision or
-artifact expected at the end.
+## Ёмкость и ручное планирование
 
-## Decomposition and relationships
+### Выбранная минимальная модель ёмкости
 
-Decomposition continues until a work package is verifiable, assignable, small
-enough to estimate, and does not hide a major unresolved decision.
+V1 использует **недельный бюджет активной работы + календарные исключения**,
+а не поминутное расписание и не многоресурсное выравнивание.
 
-Relationships are conceptually a continuation of the work-item model, not a
-separate user-facing feature. They remain a distinct technical subdomain because
-dependency graphs have their own invariants, queries, and failure modes.
+`capacity_profile` задаёт timezone, рабочие дни и `active_hours_per_week`.
+`capacity_exception` уменьшает либо увеличивает доступность в интервале
+(отпуск, болезнь, неделя с командировкой). `capacity_reservation` фиксирует
+неплановые и внешние обязательства как количество часов на неделю или интервал;
+она не создаёт order между проектами. В forecast учитывается только остаток
+активной ёмкости.
 
-Candidate relation types:
+Состояния `waiting` и `blocked` не потребляют active capacity, но могут сдвигать
+дату готовности следующего элемента. Context switching не моделируется
+отдельным ресурсом в V1: его цена отражается консервативным weekly budget и
+явной `context_switch_allowance` на профиль. Это меньше ложной точности и проще
+поддерживать актуальным.
 
-- parent / child;
-- blocks / blocked by;
-- requires;
-- related;
-- alternative.
+Полный календарь слотов, многопользовательские ресурсы и автоматическое
+разрешение конфликтов откладываются. Когда weekly budget перестанет объяснять
+наблюдаемое отклонение, нужен отдельный эксперимент на 4–6 недель: сравнить
+прогноз по бюджету с фактическим effort и только затем вводить дневной календарь.
 
-The model must detect cycles in blocking relations and explain why an item is or
-is not currently actionable.
+### Не scheduler, а forecast engine
 
-## PERT: confirmed skill and MCP split
+Пользователь задаёт приоритет и порядок через versioned `forecast_scenario`:
+список выбранных work packages/actions, режимы `parallel`/`serial` только там,
+где он их указал, и допущения. Непомеченный элемент не получает выдуманную дату
+старта; его показывают как `unsequenced`.
 
-PERT must be implemented as both a skill and an MCP capability.
+Forecast engine не меняет sequence, priority, state или baseline. Он может:
 
-The skill should:
+- проверить, что выбранный порядок и зависимости реализуемы;
+- развернуть remaining effort в доступную ёмкость и дать диапазон дат;
+- показать deadline risk, overcommitment, critical blocking chain и последствия
+  изменения scope, оценки, доступности или sequence;
+- объяснить каждый сдвиг через набор event IDs и изменившихся входов.
 
-- conduct the estimation conversation;
-- ask about optimistic, most likely, and pessimistic scenarios;
-- expose assumptions and sources of uncertainty;
-- avoid presenting invented numbers as user estimates;
-- interpret the result and identify estimates that need decomposition or risk
-  reduction.
+Для независимых оценок диапазон усилий складывает E и variance; отображаемый
+уровень уверенности и допущение независимости обязательны. Преобразование
+effort в календарную дату выполняется только согласно явному profile и scenario.
+Это прогноз, не обещание и не автоматическое назначение работы.
 
-The MCP should:
+## Baseline, actual и forecast
 
-- persist O/M/P values, units, assumptions, author, and timestamp;
-- calculate expected duration and variance deterministically;
-- preserve revisions rather than overwrite history;
-- record remaining estimates and actual duration;
-- provide historical data for later calibration.
+### Неизменяемые записи
 
-For one estimate:
+`baseline` — именованный, явно принятый пользователем снимок project scope:
+дерево элементов, выбранные estimate revisions, relation graph, deadlines,
+capacity assumptions и scenario sequence. Он versioned и immutable; новая
+версия создаётся явно, предыдущая остаётся сравнимой.
 
-```text
-expected = (optimistic + 4 * most_likely + pessimistic) / 6
-sigma = (pessimistic - optimistic) / 6
-```
+`planning_event` — append-only журнал факта или изменения: создание/изменение
+scope, start, completion, block/unblock, effort, remaining estimate, связь,
+available capacity, deadline, delegation и user decision. Событие содержит
+actor, timestamp, source, correlation ID и человеческую reason. Редактирование
+исправляет факт compensating event, а не переписывает историю.
 
-PERT estimates work; they do not by themselves determine calendar dates.
+`forecast_run` — воспроизводимый результат расчёта: version алгоритма,
+scenario, срез входных revisions/event IDs, output, confidence assumptions и
+`change_explanation`. Он disposable как кэш, но значимые runs сохраняются для
+сравнения с baseline и прошлым review.
 
-## Capacity: required separate research
+### Правила перепланирования
 
-A forecast requires some representation of available capacity, but the correct
-model is not yet known. The research should examine:
+1. Skill или UI фиксирует actual/изменение через MCP с причиной.
+2. Engine пересчитывает forecast выбранного сценария; baseline не меняется.
+3. Snapshot показывает изменение даты, remaining effort и причинную цепочку.
+4. Пользователь принимает новую baseline только когда меняет обязательство:
+   scope, milestone/deadline, согласованный порядок или capacity assumption.
 
-- working hours and calendar exceptions;
-- allocation across projects and life areas;
-- existing commitments;
-- context switching and limits on parallel work;
-- external waiting time versus active effort;
-- whether capacity belongs to a person, agent, shared resource, or project;
-- how much detail can be maintained without turning planning into bookkeeping.
+Изменение actual, новый PERT revision, блокировка и календарное исключение не
+требуют подтверждать запись, но требуют reason, если влияют на прогноз.
+Создание/замена baseline, закрытие проекта без outcome и принятие изменения
+scope требуют явного подтверждения. Малые события могут быть рассмотрены одним
+weekly review, но не должны автоматически становиться baseline.
 
-The first version may need a deliberately coarse capacity model rather than a
-precise calendar.
+### Сквозной пример
 
-## Scheduling: manual authority, computed consequences
+Пользователь создаёт проект с milestone и двумя work packages. PERT skill
+сохраняет O/M/P для пакетов. Пользователь добавляет их в serial scenario и
+указывает 12 активных часов в неделю; engine создаёт forecast с диапазоном дат.
+После принятия плана создаётся baseline v1. Затем первый пакет блокируется
+внешним ожиданием на три дня и получает новую remaining estimate. События
+остаются в журнале, engine строит новый forecast и объясняет сдвиг ожиданием и
+изменением remaining effort. Пользователь выбирает: изменить sequence, сократить
+scope или принять baseline v2. Ни skill, ни engine не делают этот выбор сами.
 
-Automatic selection of execution order is not a current goal. The user should
-retain authority over priority, sequencing, and trade-offs.
+## Timeline и project snapshot
 
-The useful deterministic capability may instead be a forecast or feasibility
-engine that:
+Snapshot существует не для процента готовности, а для пяти решений: что
+доступно сейчас; где риск и причина; что изменилось; какой blocker имеет
+наибольший downstream impact; что будет при принятии/переносе работы.
 
-- accepts a manually chosen order and explicit dependencies;
-- calculates likely dates and uncertainty ranges;
-- detects impossible deadline or capacity constraints;
-- shows the consequences of moving, pausing, or resizing work;
-- explains why a forecast changed;
-- optionally identifies a critical dependency chain without automatically
-  scheduling the user's work.
+Минимальный `project_snapshot` возвращает:
 
-The research should decide whether this is a constrained planning engine, a
-forecast engine, or simply a family of calculations. Naming it a scheduler too
-early risks implying authority the system should not have.
+- выбранный scenario и baseline version;
+- ближайшие ready actions и причины недоступности остальных;
+- milestone forecast range, deadline delta и уровень допущений;
+- completed outcomes/evidence, actual active effort, remaining expected effort
+  и waiting/blocked duration как разные измерения;
+- изменения с предыдущего snapshot: входное событие, affected item и forecast
+  delta;
+- top blocking/critical paths и вопросы, для которых требуется решение;
+- указание `unsequenced` work, которое не вошло в прогноз.
 
-## Baseline, actual, and forecast
+UI сначала показывает текстовые секции **Сейчас**, **Изменилось**, **Риски**,
+**Что будет, если**. Гантт, burn-up и агрегированный progress добавляются только
+если каждая метрика сохраняет определённую семантику: outcome completion не
+подменяется затраченным временем, а «процент» не выводится из числа открытых
+тикетов без модели веса.
 
-Replanning requires three distinct views:
+## Ответственность компонентов
 
-- baseline: the explicitly accepted plan at a point in time;
-- actual: recorded starts, completions, blocks, scope changes, and elapsed work;
-- forecast: the current projection based on remaining work and current
-  constraints.
+| Слой | Ответственность | Не делает |
+|---|---|---|
+| Skills | SMART-формулировка, декомпозиция, оценочная беседа, review и объяснение trade-offs | Не ведут собственное состояние, не считают формулы, не меняют порядок без пользователя |
+| Planning MCP | Валидирует команды, хранит модель/события/revisions, считает PERT и forecast, строит snapshot | Не интерпретирует намерение пользователя и не делает необъяснённых рекомендаций |
+| Nerve core | Auth, SQLite migration, audit, транзакции, link к sessions/executions, notification delivery, cron lifecycle | Не смешивает planning tables с `tasks` и не выбирает приоритет |
+| UI | Явное редактирование и подтверждения, объяснение forecast, переключение сценариев и сравнение baseline | Не дублирует расчётную логику и не скрывает допущения |
+| Review jobs | Формируют daily/weekly запрос на review из snapshot и отправляют только значимые отклонения | Не создают baseline, не меняют sequence/state и не эскалируют internal retries как пользовательский риск |
 
-Material changes should be recorded as events. Reforecasting must not erase the
-baseline or the reasons for deviation.
+### Предлагаемый MCP-фасад V1
 
-Open questions include baseline versioning, what requires explicit acceptance,
-and whether small changes can be grouped into review checkpoints.
+| Группа | Операции |
+|---|---|
+| Проекты и элементы | `project_create/list/read`, `work_item_create/read/list/update`, `work_item_complete` |
+| Структура и граф | `work_item_move`, `relation_add/remove/list`, `actionability_explain` |
+| Оценки и факты | `pert_estimate_record/list/current/calculate`, `actual_effort_record`, `remaining_estimate_record`, `planning_event_list` |
+| Ёмкость | `capacity_profile_set/read`, `capacity_exception_record`, `capacity_reservation_record` |
+| План и прогноз | `forecast_scenario_create/update/read`, `forecast_calculate`, `forecast_compare`, `project_snapshot` |
+| History и delegation | `baseline_create/list/compare`, `execution_link_create/read` |
 
-## Progress and timeline view: purpose before schema
+Операции записи принимают `reason` там, где меняется прогноз, и возвращают IDs
+событий. Все list/search API по умолчанию ограничены planning domain и owner;
+внутренние task APIs остаются отдельными.
 
-The proposed project or timeline snapshot is not yet sufficiently defined. It
-should not become a generic dashboard of percentages.
+### Skills V1
 
-Research should begin with decisions the view must support:
+- `task-management` — входная точка: распознаёт намерение, выбирает нужный
+  review/skill и не превращает обычную просьбу в плановый объект без согласия;
+- `smart-goal-design` и `work-breakdown` — outcome contract и декомпозиция;
+- `pert-estimation` — обязательный методический слой над PERT MCP;
+- `capacity-review` — поддерживает реалистичный weekly budget и исключения;
+- `forecast-review` — объясняет сценарии и предлагает вопросы, не порядок;
+- `progress-review` — daily/weekly interpretation snapshot.
 
-- What should I work on now?
-- Which commitment is at risk, and why?
-- What changed since the last review?
-- Which blocker or decision has the largest downstream impact?
-- What must be deferred if a new commitment is accepted?
-- How confident are we in a milestone date?
+## Граница первой полезной версии
 
-Possible inputs include completed work packages, achieved outcomes, remaining
-estimates, time spent blocked, baseline deviation, and forecast movement. Manual
-"percent complete" should not be treated as authoritative without a defined
-meaning.
+V1 включает одного пользователя, Goal/Project/Milestone/Work package/Next
+action, дерево, `blocks`/`requires`/`related`, PERT active-hours, weekly
+capacity с исключениями и reservations, ручной scenario, immutable baseline,
+append-only events, forecast/snapshot и минимальный UI проекта. Делегирование
+показывается через read-only link к внутреннему execution/task summary.
 
-## Candidate capabilities
+V1 не включает: автоматический scheduler или переназначение приоритетов,
+дневное/поминутное расписание, shared editing/ACL, многоресурсное выравнивание,
+автоматическую калибровку оценок, импорт календаря, полноценный Gantt,
+двустороннюю синхронизацию внешних трекеров и превращение текущих Nerve Tasks в
+пользовательские элементы.
 
-The initial proposal separates methodology from deterministic state changes and
-calculations.
+## Риски, проверки и последующие задачи
 
-### Skills
+| Риск или открытый вопрос | Снижение риска / эксперимент |
+|---|---|
+| Weekly capacity слишком груба | Вести 4–6 недель actual effort и forecast error; вводить дневной календарь только при устойчивой необъяснимой ошибке. |
+| PERT создаёт ложную статистическую уверенность | Всегда показывать unit, допущения, revision и происхождение; не агрегировать зависимые пакеты как независимые без предупреждения. |
+| Скрытая утечка internal задач в пользовательский UI | Контурный фильтр в repository/API как default, тесты на search/list/notifications/snapshot и только явный `execution_link`. |
+| Модель слишком тяжела для быстрого capture | `task-management` сначала предлагает лёгкий next action или inbox capture; полный project создаётся при подтверждённой потребности. |
+| Неясна полезность timeline | Проверить snapshot на трёх реальных проектах: каждое поле должно приводить к одному из пяти заявленных решений. Удалять неиспользуемые поля. |
+| Семантика внешнего ожидания | В первом пилоте фиксировать `waiting` и причину, но не прогнозировать поведение внешнего участника вероятностной моделью. |
 
-- `task-management`: orchestration and review cadence;
-- `smart-goal-design`: outcome contracts;
-- `work-breakdown`: decomposition and dependency discovery;
-- `pert-estimation`: estimation interview and interpretation;
-- `capacity-review`: eliciting and maintaining usable capacity assumptions;
-- `forecast-review`: interpreting consequences without taking sequencing
-  authority from the user;
-- `progress-review`: daily and weekly review;
-- `portfolio-prioritization`: later cross-project trade-offs;
-- `estimation-retrospective`: calibration against actual outcomes.
+После утверждения этого исследования предлагается декомпозировать реализацию в
+следующем порядке:
 
-### Deterministic tool domains
+1. Новый planning schema, repository и MCP CRUD с контурными инвариантами.
+2. Graph relations и actionability с проверкой циклов.
+3. PERT skill, estimate history и deterministic calculator.
+4. Capacity profile/events, manual forecast scenario и forecast engine.
+5. Baseline/event store, comparison и explanation chain.
+6. Project snapshot/API и минимальные UI views.
+7. Read-only execution links и review notifications.
+8. Пилот на реальных проектах, затем решение о календаре, visual timeline и
+   калибровке.
 
-- work-item storage and ownership;
-- relation graph and validation;
-- PERT estimate storage, calculation, and history;
-- capacity and calendar assumptions;
-- baseline and event history;
-- forecast and feasibility calculations;
-- project and timeline projections for UI and review skills.
-
-Exact MCP operations should be designed only after the domain boundaries and
-user/assistant ownership model are decided.
-
-## Research deliverable
-
-The research should produce:
-
-1. An explicit ownership and isolation model for user, assistant, operational,
-   and shared work.
-2. End-to-end scenarios covering capture, decomposition, estimation, manual
-   sequencing, execution, blocking, and replanning.
-3. A domain model with lifecycle and invariants.
-4. A responsibility map across skills, MCP tools, Nerve core, background jobs,
-   and UI.
-5. A decision on the minimum useful capacity and forecast models.
-6. A definition of the timeline view in terms of user decisions it supports.
-7. A narrow first version and a set of subsequent implementation tasks.
-
-## Current decisions and open questions
-
-Confirmed directions:
-
-- PERT is a skill plus MCP capability.
-- Capacity is necessary and needs focused research.
-- Manual control owns priority and execution order.
-- Baseline history is necessary for replanning.
-- Relations continue the work-item model conceptually but may be implemented as
-  a separate graph component.
-
-Open questions:
-
-- Should user and assistant tasks use separate stores, one typed model, or
-  references between two models?
-- Which concepts belong in the current task system, and which require a new
-  project-planning domain?
-- What is the smallest capacity model that improves forecasts without excessive
-  maintenance?
-- How much forecast computation is useful when sequencing remains manual?
-- What decisions and actions should the timeline snapshot expose?
+Ни одну из этих implementation-задач не следует создавать или начинать до
+подтверждения архитектуры и выбора первого пилотного проекта.
