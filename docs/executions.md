@@ -225,6 +225,10 @@ host-level `flock` while the process group exists. A cancellation reply is
 accepted only when the worker reports that process group quiescent. Transport
 ambiguity therefore quarantines the lease rather than releasing the host.
 
+The shipped `ydb.build` and `ydb.test` examples select only `ydb-build` and
+`ydb-test` pools. The test profile requires `GOOD` and final `Ok`, and rejects
+known build/test failure markers; a zero exit status alone is not success.
+
 Run `nerve config validate --workspace <workspace> --portable-only --strict-keys`
 before review. Copy the non-destructive examples from
 `examples/execution-kinds/` into the workspace catalog directory to try the

@@ -350,6 +350,23 @@ class ExecutionService:
         success_codes = set(plan.get("result", {}).get("success_exit_codes", [0]))
         status = "succeeded" if backend_result.exit_code in success_codes else "failed"
         result = backend_result.as_dict()
+        # Some tools (notably ssh_ya's historical test wrapper) return a zero
+        # pipeline status even when the textual test summary failed.  Reviewed
+        # profiles can therefore require/forbid bounded log markers.
+        rules = plan.get("result", {})
+        required_output = list(rules.get("required_output", []))
+        forbidden_output = list(rules.get("forbidden_output", []))
+        if required_output or forbidden_output:
+            tail = await self.db.tail_execution_logs(execution_id, limit=2000)
+            output = "".join(str(entry.get("text", "")) for entry in tail.get("entries", []))
+            missing_output = [needle for needle in required_output if needle not in output]
+            present_forbidden = [needle for needle in forbidden_output if needle in output]
+            if missing_output or present_forbidden:
+                status = "failed"
+                result["error"] = "textual result validation failed"
+                result["missing_output"] = missing_output
+                result["forbidden_output"] = present_forbidden
+                result["summary"] = "textual result validation failed"
         if status == "succeeded":
             missing: list[str] = []
             artifacts = plan.get("artifacts", {})

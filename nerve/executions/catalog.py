@@ -200,6 +200,8 @@ class ResultRules:
     success_exit_codes: tuple[int, ...] = (0,)
     required_artifacts: tuple[str, ...] = ()
     output_capture: str | None = None
+    required_output: tuple[str, ...] = ()
+    forbidden_output: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -277,6 +279,8 @@ class ExecutionProfile:
                 "success_exit_codes": list(self.result.success_exit_codes),
                 "required_artifacts": list(self.result.required_artifacts),
                 "output_capture": self.result.output_capture,
+                "required_output": list(self.result.required_output),
+                "forbidden_output": list(self.result.forbidden_output),
             },
             "cleanup": {
                 "when": self.cleanup.when,
@@ -383,6 +387,8 @@ class CompiledExecutionPlan:
                 "success_exit_codes": list(self.result.success_exit_codes),
                 "required_artifacts": list(self.result.required_artifacts),
                 "output_capture": self.result.output_capture,
+                "required_output": list(self.result.required_output),
+                "forbidden_output": list(self.result.forbidden_output),
             },
             "timeout_seconds": self.timeout_seconds,
             "cleanup": {
@@ -665,7 +671,7 @@ def _parse_profile(raw: Any, source: Path) -> ExecutionProfile:
                 "without a default but is required by a command"
             )
     result_raw = _mapping(data.get("result", {}), f"{source}.result")
-    _fields(result_raw, f"{source}.result", allowed={"success_exit_codes", "required_artifacts", "output_capture"})
+    _fields(result_raw, f"{source}.result", allowed={"success_exit_codes", "required_artifacts", "output_capture", "required_output", "forbidden_output"})
     success = result_raw.get("success_exit_codes", [0])
     if not isinstance(success, list) or not success or not all(isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 255 for v in success):
         raise ExecutionProfileError(f"{source}.result.success_exit_codes must be a non-empty list of integers from 0 to 255")
@@ -679,7 +685,13 @@ def _parse_profile(raw: Any, source: Path) -> ExecutionProfile:
     output_capture = result_raw.get("output_capture")
     if output_capture is not None and output_capture not in captures:
         raise ExecutionProfileError(f"{source}.result.output_capture must reference a declared capture")
-    result = ResultRules(tuple(success), tuple(required_artifacts), output_capture)
+    required_output = result_raw.get("required_output", [])
+    forbidden_output = result_raw.get("forbidden_output", [])
+    if not isinstance(required_output, list) or not all(isinstance(x, str) and x for x in required_output):
+        raise ExecutionProfileError(f"{source}.result.required_output must be non-empty strings")
+    if not isinstance(forbidden_output, list) or not all(isinstance(x, str) and x for x in forbidden_output):
+        raise ExecutionProfileError(f"{source}.result.forbidden_output must be non-empty strings")
+    result = ResultRules(tuple(success), tuple(required_artifacts), output_capture, tuple(required_output), tuple(forbidden_output))
     timeout = _positive_int(data.get("timeout_seconds", 3600), f"{source}.timeout_seconds")
     cleanup_raw = _mapping(data.get("cleanup", {}), f"{source}.cleanup")
     _fields(cleanup_raw, f"{source}.cleanup", allowed={"when", "timeout_seconds", "steps"})
@@ -768,7 +780,7 @@ def _profile_canonical(profile: ExecutionProfile) -> dict[str, Any]:
             for name, a in profile.artifacts.items()
         },
         "steps": [_step_canonical(s) for s in profile.steps],
-        "result": {"success_exit_codes": list(profile.result.success_exit_codes), "required_artifacts": list(profile.result.required_artifacts), "output_capture": profile.result.output_capture},
+        "result": {"success_exit_codes": list(profile.result.success_exit_codes), "required_artifacts": list(profile.result.required_artifacts), "output_capture": profile.result.output_capture, "required_output": list(profile.result.required_output), "forbidden_output": list(profile.result.forbidden_output)},
         "timeout_seconds": profile.timeout_seconds,
         "cleanup": {"when": profile.cleanup.when, "timeout_seconds": profile.cleanup.timeout_seconds, "steps": [_step_canonical(s) for s in profile.cleanup.steps]},
         "cancellation": {"mode": profile.cancellation.mode, "grace_seconds": profile.cancellation.grace_seconds, "run_cleanup": profile.cancellation.run_cleanup},

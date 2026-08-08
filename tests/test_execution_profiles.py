@@ -379,7 +379,7 @@ def test_shipped_example_profiles_are_valid(tmp_path):
     for source in examples.glob("*.yaml"):
         (destination / source.name).write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
     snapshot = ExecutionCatalog(tmp_path).reload()
-    assert set(snapshot.profiles) == {"local.echo", "local.file_size"}
+    assert set(snapshot.profiles) == {"local.echo", "local.file_size", "ydb.build", "ydb.test"}
 
 
 def test_engine_startup_rejects_malformed_catalog(tmp_path):

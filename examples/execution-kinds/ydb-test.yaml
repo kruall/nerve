@@ -1,0 +1,38 @@
+schema_version: 1
+kind: ydb.test
+version: 1
+title: Test YDB on a leased SSH worker
+description: Runs a validated YDB test target and checks its textual summary.
+arguments:
+  target:
+    type: path
+    required: true
+    description: Relative YDB test target.
+  filters:
+    type: string_list
+    default: []
+    max_items: 20
+    description: Reviewed test filters.
+resource_slots:
+  worker:
+    description: Dedicated test worker.
+    allowed_pools: [ydb-test]
+    default_pool: ydb-test
+    required: true
+steps:
+  - id: test
+    type: command
+    transport: resource
+    resource_slot: worker
+    executable: ./ya
+    argv: [{literal: test}, {arg: target}, {spread: filters}]
+    cwd: workspace
+    capture_stdout: test_log
+    capture_stderr: test_log_err
+result:
+  success_exit_codes: [0]
+  required_output: ["GOOD", "Ok"]
+  forbidden_output: ["Build failed", "FAIL", "Error:"]
+timeout_seconds: 14400
+cleanup: {when: always, timeout_seconds: 60, steps: []}
+cancellation: {mode: terminate, grace_seconds: 30, run_cleanup: true}

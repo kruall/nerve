@@ -1,0 +1,32 @@
+schema_version: 1
+kind: ydb.build
+version: 1
+title: Build YDB on a leased SSH worker
+description: Builds one validated target in an uploaded worktree snapshot.
+arguments:
+  target:
+    type: path
+    required: true
+    description: Relative YDB target.
+resource_slots:
+  worker:
+    description: Dedicated build worker.
+    allowed_pools: [ydb-build]
+    default_pool: ydb-build
+    required: true
+steps:
+  - id: build
+    type: command
+    transport: resource
+    resource_slot: worker
+    executable: ./ya
+    argv: [{literal: make}, {arg: target}]
+    cwd: workspace
+    capture_stdout: build_log
+    capture_stderr: build_log_err
+result:
+  success_exit_codes: [0]
+  forbidden_output: ["Build failed"]
+timeout_seconds: 14400
+cleanup: {when: always, timeout_seconds: 60, steps: []}
+cancellation: {mode: terminate, grace_seconds: 30, run_cleanup: true}

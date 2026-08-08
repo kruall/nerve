@@ -200,6 +200,29 @@ async def test_required_artifact_controls_terminal_success(
 
 
 @pytest.mark.asyncio
+async def test_textual_result_rules_override_success_exit_code(db, owner, tmp_path, broadcast_stub):
+    class TextPlan(StubPlan):
+        def as_dict(self, *, redact_secrets=True):
+            data = super().as_dict(redact_secrets=redact_secrets)
+            data["result"].update({"required_output": ["GOOD", "Ok"], "forbidden_output": ["FAIL"]})
+            return data
+    backend = ControlledBackend(result=BackendResult(0, summary="pipeline exited zero"))
+    service = ExecutionService(db=db, engine=_engine(), workspace=tmp_path, catalog=SimpleNamespace(), backend=backend, execution_root=tmp_path / "runs")
+    await service.initialize()
+    execution_id = (await service.start(session_id=owner, plan=TextPlan()))["id"]
+    await backend.started_event.wait(); backend.release_event.set()
+    row = await _eventually(lambda: _textual_done(db, execution_id))
+    assert row["status"] == "failed"
+    assert row["result"]["missing_output"] == ["GOOD", "Ok"]
+    await service.shutdown()
+
+
+async def _textual_done(db, execution_id):
+    row = await db.get_execution(execution_id)
+    return row if row["continuation_state"] == "completed" else None
+
+
+@pytest.mark.asyncio
 async def test_local_backend_executes_without_shell_and_drains_output(
     db, owner, tmp_path, broadcast_stub,
 ):

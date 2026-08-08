@@ -181,7 +181,7 @@ class SshExecutionBackend:
         result: list[str] = [str(step["executable"])]
         for token in step.get("argv", []):
             kind, value = token.get("type"), token.get("value")
-            if kind == "arg": result.append(str(values[str(value)]))
+            if kind in {"arg", "value"}: result.append(str(value) if kind == "value" else str(values[str(value)]))
             elif kind == "spread": result.extend(str(x) for x in values[str(value)])
             elif kind == "literal": result.append(str(value))
             else: raise SshTransportError("SSH steps only permit literal and validated argument argv tokens")
