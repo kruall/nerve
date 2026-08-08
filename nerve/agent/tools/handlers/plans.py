@@ -269,9 +269,14 @@ async def plan_approve_handler(ctx: ToolContext, args: dict) -> ToolResult:
         else:
             prompt += (
                 "The plan contains a skill revision. "
+                "Reload the target skill with `skill_get` immediately before applying it. "
                 "Use the `skill_update` tool to update the existing skill. "
                 "Pass the skill ID (directory name) as the name parameter and the full SKILL.md content "
-                "(frontmatter + body).\n"
+                "(frontmatter + body). If the approved plan names an amendments revision, it must "
+                "still match the revision shown by skill_get; pass clear_amendments=true and that "
+                "revision as amendments_revision. If it changed, do not update or clear anything: "
+                "leave a task note saying that the proposal is stale and needs revision. If the plan "
+                "states that there were no amendments, update without clearing amendments.\n"
             )
         prompt += (
             "\nAfter the skill is created/updated, mark the task as done using "

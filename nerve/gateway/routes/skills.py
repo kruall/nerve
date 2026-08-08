@@ -70,6 +70,8 @@ async def get_skill_detail(skill_id: str, user: dict = Depends(require_auth)):
     stats = await deps.db.get_skill_stats(skill_id)
     usage = await deps.db.get_skill_usage(skill_id, limit=20)
     refs = await mgr.list_references(skill_id)
+    amendments = await mgr.read_amendments(skill_id)
+    amendments_revision = await mgr.amendments_revision(skill_id)
 
     return {
         "id": skill.id,
@@ -80,12 +82,18 @@ async def get_skill_detail(skill_id: str, user: dict = Depends(require_auth)):
         "user_invocable": skill.user_invocable,
         "model_invocable": skill.model_invocable,
         "allowed_tools": skill.allowed_tools,
+        "dependencies": [
+            {"skill": dependency.skill, "mode": dependency.mode, "when": dependency.when}
+            for dependency in skill.dependencies
+        ],
         "has_references": skill.has_references,
         "has_scripts": skill.has_scripts,
         "has_assets": skill.has_assets,
         "content": skill.content,
         "raw": skill.raw,
         "references": refs,
+        "pending_amendments": amendments,
+        "amendments_revision": amendments_revision,
         "stats": stats[0] if stats else {"total_invocations": 0, "success_count": 0, "avg_duration_ms": None, "last_used": None},
         "recent_usage": usage,
         "created_at": db_row.get("created_at") if db_row else None,

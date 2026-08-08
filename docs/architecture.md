@@ -123,9 +123,16 @@ Filesystem-based skill system (Claude SDK compatible):
 - Optional `references/`, `scripts/`, `assets/` subdirectories
 - SQLite index for metadata + usage statistics (`skills`, `skill_usage` tables)
 - Progressive disclosure: name+description in system prompt, full content loaded on demand via `skill_get` tool
-- Agent can create/update skills dynamically via `skill_create`/`skill_update` MCP tools
+- Agent can create skills, append evidence-backed lessons, and install reviewed
+  revisions via `skill_create`/`skill_amend`/`skill_update` MCP tools
+- `references/AMENDMENTS.md` is append-only between revisions and is loaded with
+  the stable instructions; content revisions prevent a consolidation from
+  clearing notes that arrived after review
+- Frontmatter dependencies support required skills (loaded transitively with
+  cycle/depth limits) and suggested skills with human-readable activation hints
 - Automated extraction: `skill-extractor` cron identifies repeated workflows and proposes new skills via task+plan system
-- Automated revision: `skill-reviser` cron reviews existing skills for accuracy, completeness, and quality
+- Automated revision: `skill-reviser` cron consolidates pending amendments and
+  reviews existing skills for accuracy, completeness, and quality
 - Plan approval handler creates/updates skills directly when approving skill-extractor/skill-reviser proposals
 
 ### House of Agents (retired)

@@ -618,6 +618,35 @@ SKILL_CREATE_SCHEMA = {
     "required": ["name", "description"],
 }
 
+SKILL_AMEND_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {
+            "type": "string",
+            "description": "Skill ID (directory name) to amend",
+        },
+        "title": {
+            "type": "string",
+            "description": "Short title for the reusable lesson",
+        },
+        "observation": {
+            "type": "string",
+            "description": "What was observed while using the skill",
+        },
+        "change": {
+            "type": "string",
+            "description": "The concrete instruction or knowledge that should be added",
+        },
+        "evidence": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Optional source paths, commands, or results supporting the amendment",
+            "default": [],
+        },
+    },
+    "required": ["name", "title", "observation", "change"],
+}
+
 SKILL_UPDATE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -625,6 +654,22 @@ SKILL_UPDATE_SCHEMA = {
         "content": {
             "type": "string",
             "description": "Full SKILL.md content (frontmatter + body)",
+        },
+        "clear_amendments": {
+            "type": "boolean",
+            "description": (
+                "Delete pending AMENDMENTS.md after installing a reviewed consolidation. "
+                "Requires amendments_revision so newer notes cannot be lost."
+            ),
+            "default": False,
+        },
+        "amendments_revision": {
+            "type": "string",
+            "description": (
+                "Pending amendments revision shown by skill_get. Required when "
+                "clear_amendments is true; a stale revision is rejected."
+            ),
+            "default": "",
         },
     },
     "required": ["name", "content"],

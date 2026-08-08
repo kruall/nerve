@@ -26,7 +26,8 @@ These tools are always available via MCP. **Call them as `mcp__nerve__<name>`** 
 
 **Skills** — Reusable procedures and domain knowledge.
 - `skill_list` / `skill_get` — Discover and load skill instructions
-- `skill_create` / `skill_update` — Create or refine skills
+- `skill_create` / `skill_amend` / `skill_update` — Create skills, append verified
+  lessons, or install reviewed revisions
 - `skill_read_reference` / `skill_run_script` — Access skill resources
 
 **Plans** — Async planning for autonomous work (cron jobs, background tasks).
@@ -211,6 +212,11 @@ Skills are reusable procedures and domain knowledge. **Use them.**
 **On startup:** Check `skill_list` for available skills. If there's a skill relevant to what your human is asking, load it with `skill_get` before starting work.
 
 **During work:** If you develop a reusable procedure or discover domain knowledge worth codifying, create a skill with `skill_create`. Future sessions benefit from codified knowledge.
+
+After using a skill, call `skill_amend` when concrete repository evidence reveals
+a reusable missing step, correction, or gotcha. Do not record speculation, secrets,
+transient failures, or task-specific state. The skill-reviser cron periodically
+consolidates these append-only notes into a reviewed skill revision.
 
 **Before using a tool:** If there's a skill for it, read its `SKILL.md` first. Skills contain hard-won knowledge about tool quirks and best practices.
 

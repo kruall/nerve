@@ -1,5 +1,5 @@
 """Skill tool handlers — skill_list, skill_get, skill_read_reference,
-skill_run_script, skill_create, skill_update.
+skill_run_script, skill_create, skill_amend, skill_update.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ import time
 
 from nerve.agent.tools.registry import ToolContext, ToolResult, ToolSpec
 from nerve.agent.tools.schemas import (
+    SKILL_AMEND_SCHEMA,
     SKILL_CREATE_SCHEMA,
     SKILL_GET_SCHEMA,
     SKILL_LIST_SCHEMA,
@@ -17,6 +18,7 @@ from nerve.agent.tools.schemas import (
     SKILL_RUN_SCRIPT_SCHEMA,
     SKILL_UPDATE_SCHEMA,
 )
+from nerve.skills.manager import AMENDMENTS_REFERENCE
 
 logger = logging.getLogger(__name__)
 
@@ -58,31 +60,85 @@ async def skill_get_handler(ctx: ToolContext, args: dict) -> ToolResult:
             skill_id=skill_id, invoked_by="model", duration_ms=duration_ms, success=True,
         )
 
+        dependencies, dependency_warnings = (
+            await ctx.skill_manager.resolve_required_dependencies(skill_id)
+        )
+        bundle = [*dependencies, skill]
         parts = [f"# Skill: {skill.name} (v{skill.version})\n"]
-        parts.append(skill.content)
 
-        if skill.has_references:
-            refs = await ctx.skill_manager.list_references(skill_id)
-            if refs:
-                parts.append(f"\n**References available** (use `skill_read_reference` to load):")
-                for r in refs:
-                    parts.append(f"  - `{r}`")
+        for bundled in bundle:
+            if bundled.id != skill_id:
+                parts.append(
+                    f"\n## Required dependency: {bundled.name} "
+                    f"(`{bundled.id}`, v{bundled.version})\n"
+                )
+            elif dependencies:
+                parts.append("\n## Main skill instructions\n")
+            parts.append(bundled.content)
 
-        if skill.has_scripts:
-            scripts_dir = ctx.skill_manager.skills_dir / skill_id / "scripts"
-
-            def _list_scripts() -> list[str]:
-                return sorted(
-                    str(f.relative_to(scripts_dir))
-                    for f in scripts_dir.rglob("*")
-                    if f.is_file()
+            amendments = await ctx.skill_manager.read_amendments(bundled.id)
+            if amendments:
+                revision = await ctx.skill_manager.amendments_revision(bundled.id)
+                parts.append(
+                    "\n### Pending amendments "
+                    f"(`{bundled.id}`, revision `{revision}`)\n\n"
+                    "These append-only notes are provisional additions to the skill. "
+                    "Follow them when they apply; if they conflict, prefer the newest "
+                    "amendment. A consolidation must use the displayed revision.\n\n"
+                    f"{amendments}"
                 )
 
-            scripts = await asyncio.to_thread(_list_scripts)
-            if scripts:
-                parts.append(f"\n**Scripts available** (use `skill_run_script` to execute):")
-                for s in scripts:
-                    parts.append(f"  - `{s}`")
+        suggestions = []
+        seen_suggestions: set[str] = set()
+        for bundled in bundle:
+            for dependency in bundled.dependencies:
+                if dependency.mode != "suggested" or dependency.skill in seen_suggestions:
+                    continue
+                seen_suggestions.add(dependency.skill)
+                condition = f" — {dependency.when}" if dependency.when else ""
+                suggestions.append(f"- `{dependency.skill}`{condition}")
+        if suggestions:
+            parts.append(
+                "\n## Suggested related skills\n\n"
+                "Load these with `skill_get` only when their condition applies:\n"
+                + "\n".join(suggestions)
+            )
+
+        for warning in dependency_warnings:
+            parts.append(f"\n**Dependency warning:** {warning}")
+
+        for bundled in bundle:
+            if bundled.has_references:
+                refs = [
+                    ref for ref in await ctx.skill_manager.list_references(bundled.id)
+                    if ref != AMENDMENTS_REFERENCE
+                ]
+                if refs:
+                    parts.append(
+                        f"\n**References available for `{bundled.id}`** "
+                        "(use `skill_read_reference` to load):"
+                    )
+                    for ref in refs:
+                        parts.append(f"  - `{ref}`")
+
+            if bundled.has_scripts:
+                scripts_dir = ctx.skill_manager.skills_dir / bundled.id / "scripts"
+
+                def _list_scripts() -> list[str]:
+                    return sorted(
+                        str(f.relative_to(scripts_dir))
+                        for f in scripts_dir.rglob("*")
+                        if f.is_file()
+                    )
+
+                scripts = await asyncio.to_thread(_list_scripts)
+                if scripts:
+                    parts.append(
+                        f"\n**Scripts available for `{bundled.id}`** "
+                        "(use `skill_run_script` to execute):"
+                    )
+                    for script in scripts:
+                        parts.append(f"  - `{script}`")
 
         return ToolResult.text("\n".join(parts))
     except Exception as e:
@@ -155,6 +211,34 @@ async def skill_create_handler(ctx: ToolContext, args: dict) -> ToolResult:
         return ToolResult.text(f"Error creating skill: {e}")
 
 
+async def skill_amend_handler(ctx: ToolContext, args: dict) -> ToolResult:
+    skill_id = args["name"]
+
+    if not ctx.skill_manager:
+        return ToolResult.text("Skills system not available.")
+
+    try:
+        amendment_id, revision = await ctx.skill_manager.append_amendment(
+            skill_id,
+            title=args["title"],
+            observation=args["observation"],
+            change=args["change"],
+            evidence=args.get("evidence") or [],
+            session_id=ctx.session_id,
+        )
+        await ctx.skill_manager.record_usage(
+            skill_id=skill_id, session_id=ctx.session_id,
+            invoked_by="model", success=True,
+        )
+        return ToolResult.text(
+            f"Amendment `{amendment_id}` appended to `{skill_id}`. "
+            f"Pending amendments revision: `{revision}`."
+        )
+    except Exception as e:
+        logger.error("skill_amend failed: %s", e)
+        return ToolResult.text(f"Error appending skill amendment: {e}", is_error=True)
+
+
 async def skill_update_handler(ctx: ToolContext, args: dict) -> ToolResult:
     skill_id = args["name"]
     content = args["content"]
@@ -163,7 +247,12 @@ async def skill_update_handler(ctx: ToolContext, args: dict) -> ToolResult:
         return ToolResult.text("Skills system not available.")
 
     try:
-        meta = await ctx.skill_manager.update_skill(skill_id, content)
+        meta = await ctx.skill_manager.update_skill(
+            skill_id,
+            content,
+            clear_amendments=args.get("clear_amendments", False),
+            amendments_revision=args.get("amendments_revision", ""),
+        )
         if not meta:
             return ToolResult.text(f"Skill not found: {skill_id}")
 
@@ -224,6 +313,19 @@ SKILL_CREATE_SPEC = ToolSpec(
     handler=skill_create_handler,
 )
 
+SKILL_AMEND_SPEC = ToolSpec(
+    name="skill_amend",
+    description=(
+        "Append a verified, reusable lesson to a skill's pending Markdown amendments. "
+        "Use after applying a skill when repository evidence shows that its instructions "
+        "are incomplete or inaccurate. Record observations and concrete evidence, not "
+        "speculation, secrets, transient failures, or one-off task state. The weekly "
+        "skill-reviser consolidates pending amendments into a reviewed SKILL.md revision."
+    ),
+    input_schema=SKILL_AMEND_SCHEMA,
+    handler=skill_amend_handler,
+)
+
 SKILL_UPDATE_SPEC = ToolSpec(
     name="skill_update",
     description=(
@@ -243,5 +345,6 @@ SKILL_SPECS = [
     SKILL_READ_REFERENCE_SPEC,
     SKILL_RUN_SCRIPT_SPEC,
     SKILL_CREATE_SPEC,
+    SKILL_AMEND_SPEC,
     SKILL_UPDATE_SPEC,
 ]

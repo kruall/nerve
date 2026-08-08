@@ -138,18 +138,20 @@ PRODUCTIVITY_CRONS = [
         "id": "skill-reviser",
         "name": "Skill Reviser",
         "schedule": "0 3 * * 0",
-        "description": "Weekly review of existing skills — checks if instructions are still accurate, complete, and well-written. Proposes fixes through the approval flow.",
+        "description": "Weekly review of existing skills — consolidates pending amendments and proposes other accuracy or quality fixes through the approval flow.",
         "requires": None,
         "session_mode": "persistent",
         "context_rotate_hours": 168,
         "reminder_mode": False,
         "prompt": (
-            "You are a skill revision agent. Review existing skills and propose improvements.\n\n"
-            "1. Load all skills and their content\n"
-            "2. Check accuracy (outdated paths, commands, URLs)\n"
-            "3. Check completeness (missing steps, known gotchas)\n"
-            "4. Check quality (clear descriptions, good trigger phrases)\n"
-            "5. For skills needing changes (max 3): create task + propose plan with updated SKILL.md\n\n"
+            "You are a skill revision agent. Consolidate pending amendments and propose other skill improvements.\n\n"
+            "1. Load all skills with skill_get; prioritize skills that show Pending amendments\n"
+            "2. Check every amendment against its evidence, deduplicate it, and either incorporate it or explain why it should be rejected\n"
+            "3. Check accuracy (outdated paths, commands, URLs), completeness, and trigger quality\n"
+            "4. For each skill needing changes (max 3), bump its patch version and prepare one complete replacement SKILL.md without the amendments section\n"
+            "5. Create a task with source=\"skill-reviser\". Include the skill ID, the exact amendments revision shown by skill_get (or state that there were none), and a short consolidation report\n"
+            "6. Propose a plan containing that metadata plus the complete replacement SKILL.md\n\n"
+            "Never silently discard an amendment. If its evidence is insufficient, record that in the consolidation report.\n"
             "If all skills look good, say so and stop.\n"
             "After proposing, use `notify` to alert the user.\n"
         ),

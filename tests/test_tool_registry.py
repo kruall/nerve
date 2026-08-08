@@ -156,7 +156,7 @@ class TestDefaultRegistry:
             "plan_propose", "plan_update", "plan_list", "plan_read",
             "plan_approve", "plan_decline", "plan_revise",
             # skills
-            "skill_list", "skill_get", "skill_create",
+            "skill_list", "skill_get", "skill_create", "skill_amend",
             # sources
             "list_sources", "poll_source",
             # notifications

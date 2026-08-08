@@ -445,13 +445,22 @@ These ship in `<workspace>/config/cron/system.yaml` and are managed by `nerve in
 | `inbox-processor` | Every 30 min | persistent (24h rotation, reminder mode) | Polls all sync sources (email, GitHub, Telegram). Triages, creates tasks, memorizes facts, sends notifications for urgent items. | ✅ default | — |
 | `task-planner` | Every 4 hours | persistent (168h rotation) | Reviews open tasks, explores codebases, proposes implementation plans via plan-approve workflow. Gated on `tasks` (status `pending`) — stays idle when there's nothing to plan. | ✅ default | ✅ default |
 | `skill-extractor` | Every 12 hours | persistent | Identifies repeated workflows from recent conversations, memory, and completed tasks. Proposes new skills via task+plan system. | ✅ optional | ✅ default |
-| `skill-reviser` | Weekly (Sun 3 AM) | persistent | Reviews existing skills for accuracy (outdated paths, credentials), completeness (missing steps), and quality (trigger phrases, examples). Proposes revisions via task+plan. | ✅ optional | ✅ default |
+| `skill-reviser` | Weekly (Sun 3 AM) | persistent | Consolidates append-only skill amendments, then reviews accuracy, completeness, and trigger quality. Proposes a complete version-bumped SKILL.md via task+plan. | ✅ optional | ✅ default |
 
 **Mode defaults:**
 - **Personal** — `memory-maintenance` (always on) + `inbox-processor` + `task-planner` enabled by default. `skill-extractor` and `skill-reviser` are presented as optional during `nerve init`.
 - **Worker** — `memory-maintenance` (always on) + `task-planner` + `skill-extractor` + `skill-reviser` enabled by default. `inbox-processor` is not included (workers don't have sync sources).
 
 Both skill jobs use `source="skill-extractor"` or `source="skill-reviser"` on created tasks. When their plans are approved, the plan approval handler creates/updates the skill directly from the plan content (which is a full SKILL.md file) instead of spawning an implementation session.
+
+`skill_amend` stores verified reusable lessons in
+`skills/<id>/references/AMENDMENTS.md`. `skill_get` loads those notes after the
+stable instructions and reports a content revision. A reviser proposal records
+that revision; approval refuses to clear the file if a newer amendment arrived
+after review. Successful consolidation rewrites the complete `SKILL.md`, bumps
+its patch version, and removes the incorporated amendments. In a Git-backed
+workspace the SKILL.md replacement and amendment removal appear together in the
+same reviewed change; locked instances continue to require their normal PR flow.
 
 ## Persistent Timers
 
