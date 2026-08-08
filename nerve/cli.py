@@ -1838,6 +1838,7 @@ def codex_doctor(
                 "phase": "exception",
                 "errors": [str(error)],
             }
+        status["langfuse_plugin"] = backend.langfuse_plugin_status()
     if json_output:
         click.echo(json.dumps(report, indent=2, sort_keys=True))
     else:
