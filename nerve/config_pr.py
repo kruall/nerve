@@ -72,9 +72,7 @@ def _committer_args(cwd: Path) -> list[str]:
 # MEMORY.md, TASK.md or memory/: those are runtime state the instance rewrites
 # for itself, and routing them through review would mean a pull request per
 # thought while telling the reviewer nothing.
-_ALLOWED_ROOT_FILES = frozenset({
-    "SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md",
-})
+from nerve.config_history import REVIEWED_ROOT_FILES as _ALLOWED_ROOT_FILES
 
 # Names that decide how git renders or tracks the rest of the subtree. A
 # ``.gitattributes`` marking ``config/`` binary or generated collapses every

@@ -84,6 +84,8 @@ async def skill_get_handler(ctx: ToolContext, args: dict) -> ToolResult:
         bundle = resolution.bundle
         parts = [f"# Skill: {skill.name} (v{skill.version})\n"]
         parts.append(f"Installed skill revision: `{skill.skill_revision}`\n")
+        if skill.git_commit:
+            parts.append(f"Reviewed Git commit: `{skill.git_commit}`\n")
 
         for bundled in bundle:
             if bundled.id != skill_id:

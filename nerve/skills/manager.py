@@ -174,6 +174,7 @@ class SkillMeta:
     created_at: str = ""
     updated_at: str = ""
     skill_revision: str = ""
+    git_commit: str = ""
     update_outcome: str = "loaded"
 
 
@@ -765,6 +766,7 @@ class SkillManager:
     """Discovers, loads, and manages skills from the filesystem."""
 
     def __init__(self, workspace: Path, db: Database):
+        self.workspace = workspace
         self.skills_dir = workspace / "skills"
         self.db = db
         self._cache: dict[str, SkillMeta] = {}
@@ -783,6 +785,12 @@ class SkillManager:
         }
         extra_meta = {key: value for key, value in package.frontmatter.items() if key not in known_keys}
         extra_meta["nerve"] = package.metadata.get("nerve", {})
+        git_commit = ""
+        try:
+            from nerve.config_history import skill_commit
+            git_commit = skill_commit(self.workspace, package.skill_id)
+        except Exception:  # Git provenance is optional and must not block loading.
+            logger.debug("Could not determine Git provenance for skill %s", package.skill_id)
         return SkillMeta(
             id=package.skill_id, name=package.name, description=package.description,
             version=package.version, enabled=enabled,
@@ -798,6 +806,7 @@ class SkillManager:
             metadata=extra_meta, schema_source=package.schema_source,
             diagnostics=package.diagnostics,
             skill_revision=skill_revision(raw) if raw else "",
+            git_commit=git_commit,
         )
 
     @staticmethod
@@ -937,6 +946,7 @@ class SkillManager:
                 created_at=cached.created_at,
                 updated_at=cached.updated_at,
                 skill_revision=skill_revision(raw),
+                git_commit=cached.git_commit,
                 content=_parse_skill_md_strict(raw)[1],
                 raw=raw,
             )

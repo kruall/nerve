@@ -211,6 +211,28 @@ drop the key, or install the ref you deploy (`nerve @ git+...@v1.2.3`) instead.
 credential pasted into a tracked file. See [Setting up the config
 repo](#setting-up-the-config-repo) for the generated file and the end-to-end setup.
 
+## Git history and recovery
+
+The workspace root is the config repository root; do not create a second,
+silently-synced repository. The reviewed surface is exactly `skills/`,
+`config/`, and root instruction files `SOUL.md`, `IDENTITY.md`, `USER.md`,
+`AGENTS.md`, and `TOOLS.md`, plus the review metadata `.gitignore`,
+`.gitleaks.toml`, `README.md`, and `.github/`. Runtime state, `MEMORY.md`, tasks, databases,
+uploads, tool workspaces, `.nerve/`, and machine-local configuration are not
+reviewed content.
+
+Before the first commit, make a normal file-system backup of the reviewed paths,
+run `nerve config verify-repo --workspace <workspace>`, inspect the complete
+staged diff, and run gitleaks. `init-repo` only scaffolds: it never initializes
+Git, creates a remote, or publishes a repository.
+
+`nerve config rollback-plan <reviewed-commit>` is read-only and lists only
+allowlisted files that a recoverable rollback would restore. After explicit
+operator approval, validate the restored bundle and re-scan skills, then commit
+the restoration as a new commit. Never use `reset`, `clean`, or force-push. If
+sync/reload fails, leave the previous active service state intact, repair or
+roll back in a new reviewed commit, then retry sync.
+
 ## Hot-Reload
 
 Many config changes apply without a restart. Not all do, and a config file

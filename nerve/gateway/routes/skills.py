@@ -119,6 +119,7 @@ async def get_skill_detail(skill_id: str, user: dict = Depends(require_auth)):
         "pending_amendments": amendments,
         "amendments_revision": amendments_revision,
         "skill_revision": skill.skill_revision,
+        "git_commit": skill.git_commit or None,
         "stats": stats[0] if stats else {"total_invocations": 0, "success_count": 0, "avg_duration_ms": None, "last_used": None},
         "recent_usage": usage,
         "created_at": db_row.get("created_at") if db_row else None,

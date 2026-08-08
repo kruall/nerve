@@ -126,6 +126,9 @@ skills; use its diagnostics as the migration report.
 
 Every loaded skill exposes `skill_revision`, the full SHA-256 digest of the
 exact installed `SKILL.md` bytes. Resources do not participate in this token.
+When the workspace is a verified config repository it also exposes
+`git_commit`, the commit that last changed the skill package. It is provenance,
+not a second concurrency token: replacements still use `skill_revision`.
 Every replacement must pass that token as `expected_skill_revision`; stale
 tokens are rejected before filesystem or registry changes. Consolidation also
 passes the independent `amendments_revision`, so new append-only notes cannot

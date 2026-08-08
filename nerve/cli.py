@@ -1762,6 +1762,59 @@ def config_init_repo(
     )
 
 
+@config_group.command("verify-repo")
+@click.option("--workspace", type=click.Path(), default=None)
+@click.pass_context
+def config_verify_repo(ctx: click.Context, workspace: str | None) -> None:
+    """Verify that Git tracks only the reviewed config workspace surface."""
+    from nerve.config_history import ReviewedSurfaceError, verify_reviewed_surface
+    ws = Path(workspace).expanduser() if workspace else Path(ctx.obj["config"].workspace)
+    try:
+        paths = verify_reviewed_surface(ws)
+    except ReviewedSurfaceError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Reviewed surface verified: {len(paths)} tracked paths")
+
+
+@config_group.command("rollback-plan")
+@click.argument("commit")
+@click.option("--workspace", type=click.Path(), default=None)
+@click.pass_context
+def config_rollback_plan(ctx: click.Context, commit: str, workspace: str | None) -> None:
+    """Show the reviewed files a recoverable rollback would restore."""
+    from nerve.config_history import ReviewedSurfaceError, plan_rollback
+    ws = Path(workspace).expanduser() if workspace else Path(ctx.obj["config"].workspace)
+    try:
+        plan = plan_rollback(ws, commit)
+    except ReviewedSurfaceError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Current: {plan.current}\nTarget: {plan.target}")
+    for path in plan.changed_paths:
+        click.echo(f"  {path}")
+    click.echo("Create a new commit after validation; this command never changes files.")
+
+
+@config_group.command("rollback")
+@click.argument("commit")
+@click.option("--workspace", type=click.Path(), default=None)
+@click.option("--apply", "apply_changes", is_flag=True,
+              help="Stage the reviewed reverse patch; required to change files.")
+@click.pass_context
+def config_rollback(ctx: click.Context, commit: str, workspace: str | None,
+                    apply_changes: bool) -> None:
+    """Stage a recoverable, reviewed-surface rollback without rewriting history."""
+    if not apply_changes:
+        raise click.ClickException("refusing to modify files without --apply; use rollback-plan first")
+    from nerve.config_history import ReviewedSurfaceError, apply_rollback
+    ws = Path(workspace).expanduser() if workspace else Path(ctx.obj["config"].workspace)
+    try:
+        plan = apply_rollback(ws, commit)
+    except ReviewedSurfaceError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Staged {len(plan.changed_paths)} reviewed paths from {commit}.")
+    click.echo("Validate the bundle and re-scan skills, then create a new rollback commit.")
+
+
 @main.group()
 def codex() -> None:
     """Inspect and authenticate the Codex integration."""
