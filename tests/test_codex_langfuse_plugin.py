@@ -47,16 +47,16 @@ def _materialize_marketplace(config: NerveConfig) -> Path:
         Path(config.codex.home_dir)
         / ".tmp" / "marketplaces" / "codex-observability-plugin"
     )
-    (root / ".git").mkdir(parents=True)
+    (root / ".git").mkdir(parents=True, exist_ok=True)
     (root / ".git" / "HEAD").write_text(REVISION)
     plugin_root = root / "plugins" / "tracing"
     entrypoint = plugin_root / "dist" / "index.mjs"
-    entrypoint.parent.mkdir(parents=True)
+    entrypoint.parent.mkdir(parents=True, exist_ok=True)
     entrypoint.write_text("\n".join(
         original for original, _ in plugin._BUNDLE_USAGE_REPLACEMENTS
     ))
     source = plugin_root / "src" / "trace.ts"
-    source.parent.mkdir()
+    source.parent.mkdir(exist_ok=True)
     source.write_text("\n".join(
         original for original, _ in plugin._SOURCE_USAGE_REPLACEMENTS
     ))
@@ -70,15 +70,15 @@ def _materialize_runtime(config: NerveConfig) -> Path:
         / "tracing" / "0.1.0"
     )
     manifest = root / ".codex-plugin" / "plugin.json"
-    manifest.parent.mkdir(parents=True)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(json.dumps({"name": "tracing", "version": "0.1.0"}))
     entrypoint = root / "dist" / "index.mjs"
-    entrypoint.parent.mkdir()
+    entrypoint.parent.mkdir(exist_ok=True)
     entrypoint.write_text("\n".join(
         original for original, _ in plugin._BUNDLE_USAGE_REPLACEMENTS
     ))
     source = root / "src" / "trace.ts"
-    source.parent.mkdir()
+    source.parent.mkdir(exist_ok=True)
     source.write_text("\n".join(
         original for original, _ in plugin._SOURCE_USAGE_REPLACEMENTS
     ))
@@ -86,9 +86,9 @@ def _materialize_runtime(config: NerveConfig) -> Path:
 
 
 def _materialize_installed(config: NerveConfig) -> Path:
-    _materialize_marketplace(config)
+    staging = _materialize_marketplace(config)
+    plugin._materialize_managed_marketplace(config, staging)
     root = _materialize_runtime(config)
-    plugin._apply_usage_patch(plugin._marketplace_plugin_root(config))
     plugin._apply_usage_patch(root)
     plugin._write_install_receipt(config, root, "0.1.0")
     return root
@@ -161,10 +161,13 @@ async def test_legacy_verified_install_is_patched_without_network(
     root = _materialize_runtime(config)
     _write_legacy_receipt(config, root)
 
-    async def unexpected_run(*args, **kwargs):
-        raise AssertionError("legacy repair must not invoke Codex or the network")
+    async def local_reinstall(*args, **kwargs):
+        assert "https://" not in args
+        if args[1:3] == ("plugin", "add"):
+            _materialize_runtime(config)
+        return "{}"
 
-    monkeypatch.setattr(plugin, "_run", unexpected_run)
+    monkeypatch.setattr(plugin, "_run", local_reinstall)
     status = await plugin.ensure_installed(config)
 
     assert status["ready"] is True
@@ -183,12 +186,13 @@ async def test_verified_unpatched_current_receipt_is_repaired_without_network(
     # that claims the normalization patch while its verified bytes are original.
     plugin._write_install_receipt(config, root, "0.1.0")
 
-    async def unexpected_run(*args, **kwargs):
-        raise AssertionError(
-            "verified cache repair must not invoke Codex or the network"
-        )
+    async def local_reinstall(*args, **kwargs):
+        assert "https://" not in args
+        if args[1:3] == ("plugin", "add"):
+            _materialize_runtime(config)
+        return "{}"
 
-    monkeypatch.setattr(plugin, "_run", unexpected_run)
+    monkeypatch.setattr(plugin, "_run", local_reinstall)
     status = await plugin.ensure_installed(config)
 
     assert status["ready"] is True
@@ -252,7 +256,7 @@ async def test_post_start_repair_rejects_unreviewed_runtime_cache(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_usage_patch_mismatch_disables_tracing_without_network(
+async def test_usage_patch_mismatch_is_rebuilt_from_pinned_snapshot(
     tmp_path, monkeypatch,
 ):
     config = _config(tmp_path)
@@ -265,15 +269,17 @@ async def test_usage_patch_mismatch_disables_tracing_without_network(
     ))
     _write_legacy_receipt(config, root)
 
-    async def unexpected_run(*args, **kwargs):
-        raise AssertionError("a reviewed-artifact mismatch must fail open")
+    async def local_reinstall(*args, **kwargs):
+        assert "https://" not in args
+        if args[1:3] == ("plugin", "add"):
+            _materialize_runtime(config)
+        return "{}"
 
-    monkeypatch.setattr(plugin, "_run", unexpected_run)
+    monkeypatch.setattr(plugin, "_run", local_reinstall)
     status = await plugin.ensure_installed(config)
 
-    assert status["ready"] is False
-    assert status["usage_normalization"] is None
-    assert "does not match the reviewed plugin" in status["last_error"]
+    assert status["ready"] is True
+    assert status["usage_normalization"] == "exclusive-usage-v2"
 
 
 def test_local_marketplace_source_tree_is_not_runtime_ready(tmp_path):
@@ -343,7 +349,10 @@ async def test_install_is_idempotent_under_concurrent_startup(tmp_path, monkeypa
     async def fake_run(*args, env, timeout=90.0):
         calls.append(tuple(args))
         assert "LANGFUSE_SECRET_KEY" not in env
-        if args[1:4] == ("plugin", "marketplace", "add"):
+        if (
+            args[1:4] == ("plugin", "marketplace", "add")
+            and "https://" in args[4]
+        ):
             _materialize_marketplace(config)
         if args[1:3] == ("plugin", "add"):
             _materialize_runtime(config)
@@ -357,7 +366,7 @@ async def test_install_is_idempotent_under_concurrent_startup(tmp_path, monkeypa
 
     assert first["ready"] is True
     assert second["ready"] is True
-    assert len(calls) == 4
+    assert len(calls) == 6
     assert calls[0][1:4] == ("plugin", "remove", "tracing@codex-observability-plugin")
     assert calls[1][1:5] == (
         "plugin", "marketplace", "remove", "codex-observability-plugin",
@@ -367,7 +376,12 @@ async def test_install_is_idempotent_under_concurrent_startup(tmp_path, monkeypa
         "https://github.com/langfuse/codex-observability-plugin.git",
         "--ref", REVISION, "--json",
     )
-    assert calls[3][1:3] == ("plugin", "add")
+    assert calls[3][1:5] == (
+        "plugin", "marketplace", "remove", "codex-observability-plugin",
+    )
+    assert calls[4][1:4] == ("plugin", "marketplace", "add")
+    assert calls[4][4] == str(plugin._managed_marketplace_root(config))
+    assert calls[5][1:3] == ("plugin", "add")
 
 
 @pytest.mark.asyncio

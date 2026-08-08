@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import time
 from pathlib import Path
@@ -90,7 +91,7 @@ def managed_dir(home: str | Path) -> Path:
     return Path(home).expanduser() / "nerve-managed" / "langfuse"
 
 
-def _marketplace_root(config: Any) -> Path:
+def _codex_marketplace_cache_root(config: Any) -> Path:
     return (
         Path(config.codex.home_dir).expanduser()
         / ".tmp" / "marketplaces" / _MARKETPLACE
@@ -105,8 +106,51 @@ def _runtime_root(config: Any) -> Path:
     )
 
 
+def _managed_marketplace_root(config: Any) -> Path:
+    return managed_dir(config.codex.home_dir) / "marketplace"
+
+
+def _marketplace_root(config: Any) -> Path:
+    managed = _managed_marketplace_root(config)
+    return managed if (managed / ".nerve-revision").is_file() else (
+        _codex_marketplace_cache_root(config)
+    )
+
+
 def _marketplace_plugin_root(config: Any) -> Path:
     return _marketplace_root(config) / "plugins" / _PLUGIN
+
+
+def _marketplace_revision(config: Any) -> str:
+    root = _marketplace_root(config)
+    try:
+        revision = (root / ".nerve-revision").read_text(encoding="utf-8").strip()
+    except OSError:
+        revision = _git_revision(root)
+    return revision if re.fullmatch(r"[0-9a-f]{40}", revision) else ""
+
+
+def _materialize_managed_marketplace(config: Any, source: Path) -> Path:
+    """Copy the pinned checkout into a git-less snapshot Codex cannot reset."""
+    revision = _git_revision(source)
+    if revision != config.langfuse.codex.revision:
+        raise RuntimeError("Langfuse marketplace source is not the pinned revision")
+    destination = _managed_marketplace_root(config)
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    if temporary.exists():
+        shutil.rmtree(temporary)
+    shutil.copytree(
+        source,
+        temporary,
+        symlinks=False,
+        ignore=shutil.ignore_patterns(".git"),
+    )
+    _atomic_write(temporary / ".nerve-revision", revision + "\n")
+    _apply_usage_patch(temporary / "plugins" / _PLUGIN)
+    if destination.exists():
+        shutil.rmtree(destination)
+    temporary.replace(destination)
+    return destination
 
 
 def _hook_entrypoint(root: Path) -> Path:
@@ -343,7 +387,7 @@ async def repair_after_appserver_start(config: Any) -> dict[str, Any]:
             if not (
                 manifest.get("name") == _PLUGIN
                 and manifest.get("version") == plugin.version
-                and _git_revision(_marketplace_root(config)) == plugin.revision
+                and _marketplace_revision(config) == plugin.revision
                 and _usage_patch_applied(_marketplace_plugin_root(config))
                 and _hook_entrypoint(root).is_file()
                 and _runtime_matches_marketplace_snapshot(config, root)
@@ -381,7 +425,7 @@ def installation_status(config: Any) -> dict[str, Any]:
     """Inspect plugin state without invoking Codex or the network."""
     plugin = config.langfuse.codex
     root = _runtime_root(config)
-    marketplace_revision = _git_revision(_marketplace_root(config))
+    marketplace_revision = _marketplace_revision(config)
     try:
         manifest = json.loads(
             (root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
@@ -523,13 +567,42 @@ async def ensure_installed(config: Any) -> dict[str, Any]:
             repairable_snapshot = bool(
                 manifest.get("name") == _PLUGIN
                 and manifest.get("version") == plugin.version
-                and _git_revision(_marketplace_root(config)) == plugin.revision
+                and _marketplace_revision(config) == plugin.revision
                 and receipt_matches_runtime
                 and _hook_entrypoint(root).is_file()
             )
             if repairable_snapshot:
                 try:
-                    _apply_usage_patch(_marketplace_plugin_root(config))
+                    source = _marketplace_root(config)
+                    if source == _codex_marketplace_cache_root(config):
+                        managed_marketplace = _materialize_managed_marketplace(
+                            config, source,
+                        )
+                        env = {
+                            key: value for key, value in os.environ.items()
+                            if not key.startswith("LANGFUSE_")
+                            and key != "TRACE_TO_LANGFUSE"
+                        }
+                        env["CODEX_HOME"] = str(
+                            Path(config.codex.home_dir).expanduser(),
+                        )
+                        await _remove_if_present(
+                            config.codex.bin_path, "plugin", "remove",
+                            f"{_PLUGIN}@{_MARKETPLACE}", "--json", env=env,
+                        )
+                        await _remove_if_present(
+                            config.codex.bin_path, "plugin", "marketplace",
+                            "remove", _MARKETPLACE, "--json", env=env,
+                        )
+                        await _run(
+                            config.codex.bin_path, "plugin", "marketplace", "add",
+                            str(managed_marketplace), "--json", env=env,
+                        )
+                        await _run(
+                            config.codex.bin_path, "plugin", "add",
+                            f"{_PLUGIN}@{_MARKETPLACE}", "--json", env=env,
+                        )
+                        root = _runtime_root(config)
                     _apply_usage_patch(root)
                     _write_install_receipt(config, root, plugin.version)
                     status = installation_status(config)
@@ -572,11 +645,24 @@ async def ensure_installed(config: Any) -> dict[str, Any]:
                     "--ref", plugin.revision, "--json",
                     env=env,
                 )
-                if _git_revision(_marketplace_root(config)) != plugin.revision:
+                staging = _codex_marketplace_cache_root(config)
+                if _git_revision(staging) != plugin.revision:
                     raise RuntimeError(
                         "Codex marketplace snapshot does not match the pinned revision"
                     )
-                _apply_usage_patch(_marketplace_plugin_root(config))
+                managed_marketplace = _materialize_managed_marketplace(
+                    config, staging,
+                )
+                await _remove_if_present(
+                    config.codex.bin_path,
+                    "plugin", "marketplace", "remove", _MARKETPLACE, "--json",
+                    env=env,
+                )
+                await _run(
+                    config.codex.bin_path,
+                    "plugin", "marketplace", "add", str(managed_marketplace),
+                    "--json", env=env,
+                )
                 await _run(
                     config.codex.bin_path,
                     "plugin", "add", f"{_PLUGIN}@{_MARKETPLACE}", "--json",
