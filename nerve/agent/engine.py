@@ -66,7 +66,7 @@ from nerve.agent.tools import (
 from nerve.agent.tools import init_tools
 from nerve.config import NerveConfig, RESUME_QUEUE_FILE, load_mcp_servers
 from nerve.db import Database
-from nerve.executions import ExecutionCatalog, ExecutionService
+from nerve.executions import ExecutionCatalog, ExecutionService, LeaseService, ResourceInventory
 from nerve.observability.langfuse import attributes as lf_attrs
 from nerve.skills.manager import SkillManager
 
@@ -534,11 +534,16 @@ class AgentEngine:
         # Detached execution is a first-class engine subsystem, not an MCP
         # process. Its startup reconciliation runs after the DB and engine are
         # ready, and before the gateway begins accepting tool calls.
+        inventory = ResourceInventory(self.db, getattr(self.config, "resources", {}))
+        await inventory.initialize()
+        resource_service = LeaseService(db=self.db, inventory=inventory)
+        self.resource_service = resource_service
         execution_service = ExecutionService(
             db=self.db,
             engine=self,
             workspace=self.config.workspace,
             catalog=self.execution_catalog,
+            resource_manager=resource_service,
         )
         self.set_execution_service(execution_service)
         await execution_service.initialize(dispatch_continuations=False)

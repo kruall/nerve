@@ -198,6 +198,21 @@ confirmation-gated actions. A revoking or quarantined host stays visibly
 unavailable until the backend confirms remote quiescence; the UI cannot release
 a lease or clear quarantine merely because a heartbeat/TTL expired.
 
+## SSH resource inventory and leases
+
+`resources` defines opaque `connection_ref` names, hosts, and named pools.
+Operations request only a declared pool through their resource slot; raw host,
+user, port, and SSH options are rejected. A pool can list members and/or select
+them by labels. Overlap is safe because a partial-unique database index covers
+the physical host, independent of the pool through which it was selected.
+
+A lease carries a monotonically increasing fencing token. Release and heartbeat
+compare the execution ID and token, so a stale owner cannot affect a later
+lease. Cancellation or restart uncertainty quarantines the host. TTL/heartbeat
+loss changes no host to available: an administrator must confirm remote
+quiescence through the guarded recovery endpoint before quarantined leases are
+retired and scheduling resumes.
+
 Run `nerve config validate --workspace <workspace> --portable-only --strict-keys`
 before review. Copy the non-destructive examples from
 `examples/execution-kinds/` into the workspace catalog directory to try the

@@ -543,6 +543,15 @@ class ExecutionService:
                 grace_seconds=int(policy.get("grace_seconds", 5)),
                 mode=str(policy.get("mode", "terminate")),
             )
+            if not cancelled and row.get("selected_leases"):
+                # A timeout/cancel acknowledgement is not proof that remote
+                # work stopped.  Keep the physical host unavailable until an
+                # administrator confirms quiescence.
+                await self.resource_manager.quarantine(
+                    execution_id=execution_id,
+                    leases=row["selected_leases"],
+                    reason="cancellation could not confirm backend quiescence",
+                )
             if not cancelled and row["status"] in {"queued", "starting"}:
                 await self.db.finalize_execution_cancelled(execution_id)
         await self._broadcast(execution_id)
@@ -567,6 +576,12 @@ class ExecutionService:
                 grace_seconds=int(policy.get("grace_seconds", 5)),
                 mode=str(policy.get("mode", "terminate")),
             )
+            if not cancelled and row.get("selected_leases"):
+                await self.resource_manager.quarantine(
+                    execution_id=execution_id,
+                    leases=row["selected_leases"],
+                    reason="session cancellation could not confirm backend quiescence",
+                )
             if not cancelled and row["status"] == "cancelling":
                 await self.db.finalize_execution_cancelled(execution_id)
             await self._broadcast(execution_id)

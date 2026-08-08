@@ -260,6 +260,24 @@ memory:
 #   path: /mcp/v1
 #   include_hoa: false   # Expose the deprecated houseofagents stub tools externally (default off)
 
+# SSH resource inventory — opaque connection references only. Hostnames,
+# users, ports and SSH options must remain in deployment-local trusted
+# connection providers, never in execution arguments or this model-visible
+# inventory. Pools may overlap; the lease is exclusive per physical host.
+# resources:
+#   connections: [lab-ssh]
+#   hosts:
+#     - id: builder-a
+#       connection_ref: lab-ssh
+#       labels: {rack: a, role: builder}
+#       capabilities: {cpu: 16}
+#       enabled: true
+#   pools:
+#     - id: builds
+#       members: [builder-a]
+#     - id: rack-a
+#       selector: {rack: a}
+
 # Observability (optional) — Python/Claude tracing plus an independently
 # opted-in managed Codex transcript plugin. Prefer credentials in .env.
 # See docs/observability.md for setup details.

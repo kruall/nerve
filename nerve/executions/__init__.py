@@ -16,6 +16,7 @@ from nerve.executions.backend import (
     ResourceLeaseManager,
 )
 from nerve.executions.public import ExecutionUiService, ResourceUiService
+from nerve.resources import LeaseService, ResourceInventory
 
 __all__ = [
     "CatalogSnapshot",
@@ -31,4 +32,6 @@ __all__ = [
     "ExecutionUiService",
     "OperationValidationError",
     "ResourceUiService",
+    "LeaseService",
+    "ResourceInventory",
 ]

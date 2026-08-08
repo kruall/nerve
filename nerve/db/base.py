@@ -26,6 +26,7 @@ from nerve.db.migrations.runner import discover_migrations, run_migrations
 from nerve.db.notifications import NotificationStore
 from nerve.db.plans import PlanStore
 from nerve.db.review_loops import ReviewLoopStore
+from nerve.db.resources import ResourceStore
 from nerve.db.sessions import SessionStore
 from nerve.db.skills import SkillStore
 from nerve.db.sources import SourceStore
@@ -106,6 +107,7 @@ class Database(
     WakeupStore,
     WorkflowRunStore,
     ReviewLoopStore,
+    ResourceStore,
     ExecutionStore,
     MaintenanceStore,
 ):

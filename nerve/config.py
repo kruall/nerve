@@ -2748,6 +2748,10 @@ class NerveConfig:
     mcp_endpoint: McpEndpointConfig = field(default_factory=McpEndpointConfig)
     mcp_servers: list[McpServerConfig] = field(default_factory=list)
     external_agents: ExternalAgentsConfig = field(default_factory=ExternalAgentsConfig)
+    # Trusted resource inventory. Connection values are opaque references; raw
+    # SSH endpoint coordinates deliberately belong only to deployment-local
+    # connection providers, never operation arguments or profile files.
+    resources: dict[str, Any] = field(default_factory=dict)
 
     # API keys (from config.local.yaml)
     anthropic_api_key: str = ""
@@ -3021,6 +3025,7 @@ class NerveConfig:
             mcp_endpoint=McpEndpointConfig.from_dict(d.get("mcp_endpoint", {})),
             mcp_servers=_parse_mcp_servers(d),
             external_agents=ExternalAgentsConfig.from_dict(d.get("external_agents", {})),
+            resources=dict(d.get("resources", {})) if isinstance(d.get("resources", {}), dict) else {},
             anthropic_api_key=d.get("anthropic_api_key", ""),
             openai_api_key=d.get("openai_api_key", ""),
             brave_search_api_key=d.get("brave_search_api_key", ""),
