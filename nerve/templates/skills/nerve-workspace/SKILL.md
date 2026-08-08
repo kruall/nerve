@@ -1,5 +1,5 @@
 ---
-name: Nerve Workspace Config
+name: nerve-workspace
 description: >
   Change your own configuration — skills, cron jobs, sources, and settings that
   live in the workspace. Covers both routes: a pull request when the workspace is
@@ -8,8 +8,10 @@ description: >
   a cron job, create or change a skill, adjust settings, or "change your config".
   Triggers on "add a cron", "change your schedule", "edit your config",
   "update settings", "propose a config change".
-version: 1.0.0
-context: domain
+metadata:
+  nerve:
+    version: 1.0.0
+    context: domain
 ---
 
 # Managing Your Own Configuration

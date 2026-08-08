@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from nerve.gateway.auth import require_auth
 from nerve.gateway.routes._deps import get_deps
+from nerve.skills.manager import SkillValidationError
 
 router = APIRouter()
 
@@ -54,7 +55,14 @@ async def sync_skills(user: dict = Depends(require_auth)):
     """Re-scan filesystem and sync skills to DB."""
     mgr = _require_skill_manager()
     skills = await mgr.discover()
-    return {"synced": len(skills), "skills": [{"id": s.id, "name": s.name} for s in skills]}
+    return {
+        "synced": len(skills),
+        "skills": [{"id": s.id, "name": s.name} for s in skills],
+        "diagnostics": {
+            skill_id: [issue.to_dict() for issue in issues]
+            for skill_id, issues in mgr.all_diagnostics().items()
+        },
+    }
 
 
 @router.get("/api/skills/{skill_id}")
@@ -64,6 +72,11 @@ async def get_skill_detail(skill_id: str, user: dict = Depends(require_auth)):
     mgr = _require_skill_manager()
     skill = await mgr.get_skill(skill_id)
     if not skill:
+        diagnostics = mgr.diagnostics(skill_id)
+        if diagnostics:
+            raise HTTPException(
+                status_code=422, detail=[issue.to_dict() for issue in diagnostics],
+            )
         raise HTTPException(status_code=404, detail="Skill not found")
 
     db_row = await deps.db.get_skill_row(skill_id)
@@ -91,6 +104,8 @@ async def get_skill_detail(skill_id: str, user: dict = Depends(require_auth)):
         "dependency_errors": [
             issue.to_dict() for issue in skill.dependency_errors
         ],
+        "schema_source": skill.schema_source,
+        "diagnostics": [issue.to_dict() for issue in skill.diagnostics],
         "dependency_resolution": dependency_resolution.to_dict(),
         "has_references": skill.has_references,
         "has_scripts": skill.has_scripts,
@@ -111,10 +126,17 @@ async def get_skill_detail(skill_id: str, user: dict = Depends(require_auth)):
 async def create_skill(req: SkillCreateRequest, user: dict = Depends(require_auth)):
     """Create a new skill."""
     mgr = _require_skill_manager()
-    skill = await mgr.create_skill(
-        name=req.name, description=req.description,
-        content=req.content, version=req.version,
-    )
+    try:
+        skill = await mgr.create_skill(
+            name=req.name, description=req.description,
+            content=req.content, version=req.version,
+        )
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SkillValidationError as exc:
+        raise HTTPException(
+            status_code=422, detail=[issue.to_dict() for issue in exc.issues],
+        ) from exc
     return {"id": skill.id, "name": skill.name, "created": True}
 
 
@@ -122,7 +144,14 @@ async def create_skill(req: SkillCreateRequest, user: dict = Depends(require_aut
 async def update_skill(skill_id: str, req: SkillUpdateRequest, user: dict = Depends(require_auth)):
     """Update a skill's SKILL.md content."""
     mgr = _require_skill_manager()
-    skill = await mgr.update_skill(skill_id, req.content)
+    try:
+        skill = await mgr.update_skill(skill_id, req.content)
+    except SkillValidationError as exc:
+        raise HTTPException(
+            status_code=422, detail=[issue.to_dict() for issue in exc.issues],
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if not skill:
         raise HTTPException(status_code=404, detail="Skill not found")
     return {"id": skill.id, "name": skill.name, "updated": True}

@@ -1,13 +1,15 @@
 ---
-name: Nerve Development
+name: nerve-dev
 description: >
   Nerve backend (Python) and frontend (React/TS) development and code contribution.
   Use when writing Python code for Nerve, fixing bugs, adding features, reviewing Nerve PRs,
   building the frontend, running tests, or working with the Nerve codebase.
   Triggers on "nerve code", "nerve PR", "fix nerve", "nerve feature", "nerve test",
   "build nerve UI", "nerve migration".
-version: 1.0.0
-context: domain
+metadata:
+  nerve:
+    version: 1.0.0
+    context: domain
 ---
 
 # Nerve Development Skill

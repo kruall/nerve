@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -38,6 +39,9 @@ AMENDMENTS_REFERENCE = "AMENDMENTS.md"
 AMENDMENTS_HEADER = "# Pending amendments\n"
 MAX_DEPENDENCY_DEPTH = 5
 MAX_DEPENDENCIES = 20
+MAX_DESCRIPTION_LENGTH = 1024
+_CANONICAL_SKILL_NAME_RE = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*\Z")
+_RESOURCE_DIRS = ("references", "scripts", "assets", "agents")
 
 
 @dataclass(frozen=True)
@@ -67,6 +71,32 @@ class SkillDependencyIssue:
             "dependency": self.dependency or None,
             "path": list(self.path),
         }
+
+
+@dataclass(frozen=True)
+class SkillValidationIssue:
+    """A package-level schema error or migration diagnostic."""
+
+    code: str
+    message: str
+    path: tuple[str, ...] = ()
+    severity: str = "error"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "message": self.message,
+            "path": list(self.path),
+            "severity": self.severity,
+        }
+
+
+class SkillValidationError(ValueError):
+    """Raised before a mutating operation when a skill package is invalid."""
+
+    def __init__(self, issues: list[SkillValidationIssue]):
+        self.issues = issues
+        super().__init__("; ".join(issue.message for issue in issues))
 
 
 @dataclass(frozen=True)
@@ -103,6 +133,8 @@ class SkillMeta:
     has_scripts: bool = False
     has_assets: bool = False
     metadata: dict = field(default_factory=dict)
+    schema_source: str = "canonical"
+    diagnostics: list[SkillValidationIssue] = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
 
@@ -212,6 +244,32 @@ def _parse_skill_md(raw: str) -> tuple[dict, str]:
                 logger.warning("Failed to parse SKILL.md frontmatter: %s", e)
 
     return frontmatter, body
+
+
+def _parse_skill_md_strict(raw: str) -> tuple[dict[str, Any], str]:
+    """Parse a complete SKILL.md package without accepting malformed YAML.
+
+    Discovery uses this same parser as the write paths.  The old reader logged
+    a YAML error and then treated the package as empty frontmatter, which made
+    malformed skills appear valid and allowed an update to destroy a good file.
+    """
+    match = re.match(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", raw, re.DOTALL)
+    if not match:
+        raise SkillValidationError([SkillValidationIssue(
+            "missing_frontmatter",
+            "SKILL.md must start with a YAML frontmatter block delimited by ---",
+        )])
+    try:
+        frontmatter = yaml.safe_load(match.group(1))
+    except yaml.YAMLError as exc:
+        raise SkillValidationError([SkillValidationIssue(
+            "invalid_yaml", f"invalid YAML frontmatter: {exc}",
+        )]) from exc
+    if not isinstance(frontmatter, dict):
+        raise SkillValidationError([SkillValidationIssue(
+            "invalid_frontmatter", "SKILL.md frontmatter must be a mapping",
+        )])
+    return frontmatter, raw[match.end():].strip()
 
 
 def _parse_dependencies(
@@ -440,9 +498,213 @@ def _parse_dependencies(
     return dependencies, source, issues
 
 
+@dataclass(frozen=True)
+class NormalizedSkillPackage:
+    """The one internal representation used by discovery and all writers."""
+
+    skill_id: str
+    name: str
+    description: str
+    version: str
+    body: str
+    frontmatter: dict[str, Any]
+    metadata: dict[str, Any]
+    dependencies: list[SkillDependency]
+    dependency_source: str
+    dependency_errors: list[SkillDependencyIssue]
+    user_invocable: bool
+    model_invocable: bool
+    allowed_tools: list[str] | None
+    schema_source: str
+    diagnostics: list[SkillValidationIssue]
+
+
+def _resource_issues(skill_dir: Path) -> list[SkillValidationIssue]:
+    """Reject optional resources that escape the package through symlinks."""
+    issues: list[SkillValidationIssue] = []
+    package_root = skill_dir.resolve()
+    for dirname in _RESOURCE_DIRS:
+        root = skill_dir / dirname
+        if not root.exists():
+            continue
+        try:
+            root.resolve().relative_to(package_root)
+        except ValueError:
+            issues.append(SkillValidationIssue(
+                "unsafe_resource_path", f"{dirname} escapes the skill package",
+                (dirname,),
+            ))
+            continue
+        for path in root.rglob("*"):
+            try:
+                path.resolve().relative_to(package_root)
+            except ValueError:
+                issues.append(SkillValidationIssue(
+                    "unsafe_resource_path",
+                    f"resource path escapes the skill package: {path.relative_to(skill_dir)}",
+                    tuple(path.relative_to(skill_dir).parts),
+                ))
+    return issues
+
+
+def validate_skill_package(
+    raw: str, skill_id: str, *, skill_dir: Path | None = None,
+    allow_legacy: bool = True,
+) -> NormalizedSkillPackage:
+    """Validate and normalize a portable Nerve skill package in memory.
+
+    Canonical packages use Codex-compatible ``name`` and ``description`` at
+    the top level, with Nerve fields only under ``metadata.nerve``.  Old flat
+    Nerve fields are intentionally read-only compatibility input; every such
+    package carries an explicit migration diagnostic.
+    """
+    issues: list[SkillValidationIssue] = []
+    try:
+        skill_id = _skill_id(skill_id)
+    except SkillIdError as exc:
+        raise SkillValidationError([SkillValidationIssue("invalid_skill_id", str(exc))]) from exc
+    frontmatter, body = _parse_skill_md_strict(raw)
+
+    name = frontmatter.get("name")
+    description = frontmatter.get("description")
+    if not isinstance(name, str) or not name.strip():
+        issues.append(SkillValidationIssue("missing_name", "name is required and must be text", ("name",)))
+    if not isinstance(description, str) or not description.strip():
+        issues.append(SkillValidationIssue(
+            "missing_description", "description is required and must be text", ("description",),
+        ))
+    elif len(description) > MAX_DESCRIPTION_LENGTH:
+        issues.append(SkillValidationIssue(
+            "description_too_long",
+            f"description must be at most {MAX_DESCRIPTION_LENGTH} characters",
+            ("description",),
+        ))
+
+    metadata_value = frontmatter.get("metadata", {})
+    if not isinstance(metadata_value, dict):
+        issues.append(SkillValidationIssue("invalid_metadata", "metadata must be a mapping", ("metadata",)))
+        metadata_value = {}
+    nerve_value = metadata_value.get("nerve", {})
+    if "nerve" in metadata_value and not isinstance(nerve_value, dict):
+        issues.append(SkillValidationIssue(
+            "invalid_nerve_metadata", "metadata.nerve must be a mapping", ("metadata", "nerve"),
+        ))
+        nerve_value = {}
+
+    has_nerve_namespace = "nerve" in metadata_value
+    legacy_fields = {"version", "context", "dependencies", "agent"} & set(frontmatter)
+    canonical_name = (
+        isinstance(name, str)
+        and bool(_CANONICAL_SKILL_NAME_RE.match(name))
+        and name == skill_id
+    )
+    legacy_name = not has_nerve_namespace and not canonical_name
+    canonical = not legacy_fields and canonical_name
+    if legacy_fields or legacy_name:
+        if not allow_legacy:
+            issues.append(SkillValidationIssue(
+                "legacy_schema_not_allowed",
+                "legacy flat Nerve fields are not allowed for create or update",
+                severity="error",
+            ))
+        else:
+            issues.append(SkillValidationIssue(
+                "legacy_schema",
+                "legacy skill schema is supported temporarily; move Nerve fields under metadata.nerve and make name match the directory",
+                severity="warning",
+            ))
+
+    version = nerve_value.get("version", frontmatter.get("version", "1.0.0"))
+    context = nerve_value.get("context", frontmatter.get("context"))
+    if not isinstance(version, str) or not version.strip():
+        issues.append(SkillValidationIssue(
+            "invalid_nerve_version", "metadata.nerve.version must be non-empty text", ("metadata", "nerve", "version"),
+        ))
+    if context is not None and not isinstance(context, str):
+        issues.append(SkillValidationIssue(
+            "invalid_nerve_context", "metadata.nerve.context must be text", ("metadata", "nerve", "context"),
+        ))
+    for field_name in ("user-invocable", "disable-model-invocation"):
+        if field_name in frontmatter and not isinstance(frontmatter[field_name], bool):
+            issues.append(SkillValidationIssue(
+                "invalid_portable_field", f"{field_name} must be boolean", (field_name,),
+            ))
+    allowed_nerve = {"version", "context", "dependencies", "codex"}
+    if isinstance(nerve_value, dict):
+        for key in sorted(set(nerve_value) - allowed_nerve):
+            issues.append(SkillValidationIssue(
+                "unsupported_nerve_metadata", f"unsupported metadata.nerve field: {key}",
+                ("metadata", "nerve", str(key)),
+            ))
+    if "codex" in nerve_value and not isinstance(nerve_value["codex"], bool):
+        issues.append(SkillValidationIssue(
+            "invalid_codex_metadata", "metadata.nerve.codex must be boolean", ("metadata", "nerve", "codex"),
+        ))
+
+    if has_nerve_namespace and not canonical:
+        if not isinstance(name, str) or not _CANONICAL_SKILL_NAME_RE.match(name):
+            issues.append(SkillValidationIssue(
+                "invalid_canonical_name", "canonical name must be a lowercase hyphenated identifier", ("name",),
+            ))
+        elif name != skill_id:
+            issues.append(SkillValidationIssue(
+                "name_directory_mismatch", f"name {name!r} must match skill directory {skill_id!r}", ("name",),
+            ))
+
+    dependencies, dependency_source, dependency_errors = _parse_dependencies(frontmatter, skill_id)
+    issues.extend(SkillValidationIssue(issue.code, issue.message, issue.path) for issue in dependency_errors)
+    allowed_tools_raw = frontmatter.get("allowed-tools")
+    allowed_tools: list[str] | None = None
+    if allowed_tools_raw is not None:
+        if isinstance(allowed_tools_raw, str):
+            allowed_tools = [item.strip() for item in allowed_tools_raw.split(",") if item.strip()]
+        elif isinstance(allowed_tools_raw, list) and all(isinstance(item, str) for item in allowed_tools_raw):
+            allowed_tools = list(allowed_tools_raw)
+        else:
+            issues.append(SkillValidationIssue(
+                "invalid_allowed_tools", "allowed-tools must be text or a list of text", ("allowed-tools",),
+            ))
+
+    if skill_dir is not None:
+        issues.extend(_resource_issues(skill_dir))
+        agent_file = skill_dir / "agents" / "openai.yaml"
+        # Nerve-only packages ignore Codex' optional agent metadata.  A package
+        # explicitly marked dual-use must at least carry a YAML mapping there.
+        if nerve_value.get("codex") is True and agent_file.exists():
+            try:
+                agent_data = yaml.safe_load(agent_file.read_text(encoding="utf-8"))
+            except (OSError, yaml.YAMLError) as exc:
+                issues.append(SkillValidationIssue(
+                    "invalid_codex_agent", f"invalid agents/openai.yaml: {exc}", ("agents", "openai.yaml"),
+                ))
+            else:
+                if not isinstance(agent_data, dict):
+                    issues.append(SkillValidationIssue(
+                        "invalid_codex_agent", "agents/openai.yaml must be a mapping", ("agents", "openai.yaml"),
+                    ))
+
+    errors = [issue for issue in issues if issue.severity == "error"]
+    if errors:
+        raise SkillValidationError(issues)
+    return NormalizedSkillPackage(
+        skill_id=skill_id, name=name.strip(), description=description.strip(),
+        version=version.strip(), body=body, frontmatter=frontmatter,
+        metadata=metadata_value, dependencies=dependencies,
+        dependency_source=dependency_source, dependency_errors=dependency_errors,
+        user_invocable=frontmatter.get("user-invocable", True),
+        model_invocable=not frontmatter.get("disable-model-invocation", False),
+        allowed_tools=allowed_tools, schema_source="canonical" if canonical else "legacy",
+        diagnostics=issues,
+    )
+
+
 def _build_skill_md(name: str, description: str, body: str = "", version: str = "1.0.0", **extra) -> str:
     """Build a SKILL.md file from components."""
-    fm: dict[str, Any] = {"name": name, "description": description, "version": version}
+    fm: dict[str, Any] = {
+        "name": name,
+        "description": description,
+        "metadata": {"nerve": {"version": version}},
+    }
     fm.update(extra)
     yaml_str = yaml.dump(fm, default_flow_style=False, allow_unicode=True).strip()
     parts = [f"---\n{yaml_str}\n---"]
@@ -458,7 +720,36 @@ class SkillManager:
         self.skills_dir = workspace / "skills"
         self.db = db
         self._cache: dict[str, SkillMeta] = {}
+        self._diagnostics: dict[str, list[SkillValidationIssue]] = {}
         self._amendment_locks: dict[str, asyncio.Lock] = {}
+        self._discovered_once = False
+
+    def _meta_from_package(
+        self, package: NormalizedSkillPackage, *, enabled: bool,
+        skill_dir: Path,
+    ) -> SkillMeta:
+        """Build index metadata from the shared normalized package model."""
+        known_keys = {
+            "name", "description", "user-invocable", "disable-model-invocation",
+            "allowed-tools", "license", "argument-hint", "metadata",
+        }
+        extra_meta = {key: value for key, value in package.frontmatter.items() if key not in known_keys}
+        extra_meta["nerve"] = package.metadata.get("nerve", {})
+        return SkillMeta(
+            id=package.skill_id, name=package.name, description=package.description,
+            version=package.version, enabled=enabled,
+            user_invocable=package.user_invocable,
+            model_invocable=package.model_invocable,
+            allowed_tools=package.allowed_tools,
+            dependencies=package.dependencies,
+            dependency_source=package.dependency_source,
+            dependency_errors=package.dependency_errors,
+            has_references=(skill_dir / "references").is_dir(),
+            has_scripts=(skill_dir / "scripts").is_dir(),
+            has_assets=(skill_dir / "assets").is_dir(),
+            metadata=extra_meta, schema_source=package.schema_source,
+            diagnostics=package.diagnostics,
+        )
 
     async def discover(self) -> list[SkillMeta]:
         """Scan skills_dir for SKILL.md files, parse frontmatter, sync to DB.
@@ -469,6 +760,8 @@ class SkillManager:
         await asyncio.to_thread(self.skills_dir.mkdir, parents=True, exist_ok=True)
         discovered: list[SkillMeta] = []
         found_ids: set[str] = set()
+        self._cache.clear()
+        self._diagnostics.clear()
 
         def _scan_skill_dirs() -> list[tuple[Path, str]]:
             """Collect (skill_dir, raw SKILL.md) pairs off the event loop."""
@@ -490,80 +783,32 @@ class SkillManager:
             found_ids.add(skill_id)
 
             try:
-                fm, body = _parse_skill_md(raw)
-
-                name = fm.get("name", skill_id)
-                description = fm.get("description", "")
-                if not description:
-                    # Use first non-empty line of body as fallback
-                    for line in body.split("\n"):
-                        line = line.strip()
-                        if line and not line.startswith("#"):
-                            description = line[:200]
-                            break
-
-                version = fm.get("version", "1.0.0")
-                dependencies, dependency_source, dependency_errors = (
-                    _parse_dependencies(fm, skill_id)
-                )
-                user_invocable = fm.get("user-invocable", True)
-                model_invocable = not fm.get("disable-model-invocation", False)
-                allowed_tools_raw = fm.get("allowed-tools")
-                allowed_tools = None
-                if allowed_tools_raw:
-                    if isinstance(allowed_tools_raw, str):
-                        allowed_tools = [t.strip() for t in allowed_tools_raw.split(",")]
-                    elif isinstance(allowed_tools_raw, list):
-                        allowed_tools = allowed_tools_raw
-
-                # Check for optional subdirectories
-                has_references = (skill_dir / "references").is_dir()
-                has_scripts = (skill_dir / "scripts").is_dir()
-                has_assets = (skill_dir / "assets").is_dir()
-
-                # Extra metadata (everything not in known fields)
-                known_keys = {"name", "description", "version", "user-invocable",
-                              "disable-model-invocation", "allowed-tools", "license",
-                              "argument-hint", "context", "agent"}
-                extra_meta = {k: v for k, v in fm.items() if k not in known_keys}
-
                 # Preserve runtime state across filesystem re-discovery.
                 existing = await self.db.get_skill_row(skill_id)
                 enabled = existing["enabled"] if existing else True
-
-                meta = SkillMeta(
-                    id=skill_id,
-                    name=name,
-                    description=description,
-                    version=str(version),
-                    enabled=enabled,
-                    user_invocable=user_invocable,
-                    model_invocable=model_invocable,
-                    allowed_tools=allowed_tools,
-                    dependencies=dependencies,
-                    dependency_source=dependency_source,
-                    dependency_errors=dependency_errors,
-                    has_references=has_references,
-                    has_scripts=has_scripts,
-                    has_assets=has_assets,
-                    metadata=extra_meta,
-                )
+                package = validate_skill_package(raw, skill_id, skill_dir=skill_dir)
+                meta = self._meta_from_package(package, enabled=enabled, skill_dir=skill_dir)
                 discovered.append(meta)
                 self._cache[skill_id] = meta
+                self._diagnostics[skill_id] = meta.diagnostics
 
                 # Sync to DB
                 await self.db.upsert_skill(
                     skill_id=skill_id,
-                    name=name,
-                    description=description,
-                    version=str(version),
+                    name=meta.name,
+                    description=meta.description,
+                    version=meta.version,
                     enabled=enabled,
-                    user_invocable=user_invocable,
-                    model_invocable=model_invocable,
-                    allowed_tools=allowed_tools,
-                    metadata=extra_meta,
+                    user_invocable=meta.user_invocable,
+                    model_invocable=meta.model_invocable,
+                    allowed_tools=meta.allowed_tools,
+                    metadata=meta.metadata,
                 )
 
+            except SkillValidationError as e:
+                self._cache.pop(skill_id, None)
+                self._diagnostics[skill_id] = e.issues
+                logger.warning("Invalid skill package %s: %s", skill_id, e)
             except Exception as e:
                 logger.error("Failed to load skill %s: %s", skill_id, e)
 
@@ -575,7 +820,16 @@ class SkillManager:
                 await self.db.delete_skill_row(db_skill["id"])
 
         logger.info("Discovered %d skills", len(discovered))
+        self._discovered_once = True
         return discovered
+
+    def diagnostics(self, skill_id: str) -> list[SkillValidationIssue]:
+        """Return discovery diagnostics without treating an invalid package as usable."""
+        return list(self._diagnostics.get(skill_id, ()))
+
+    def all_diagnostics(self) -> dict[str, list[SkillValidationIssue]]:
+        """Return a snapshot for discovery and API reporting."""
+        return {skill_id: list(issues) for skill_id, issues in self._diagnostics.items() if issues}
 
     async def get_skill(self, skill_id: str) -> SkillContent | None:
         """Load full SKILL.md content + metadata for a skill."""
@@ -585,7 +839,6 @@ class SkillManager:
             return None
 
         raw = await asyncio.to_thread(skill_md.read_text, encoding="utf-8")
-        fm, body = _parse_skill_md(raw)
 
         # Get metadata from cache or DB
         cached = self._cache.get(skill_id)
@@ -603,33 +856,27 @@ class SkillManager:
                 has_scripts=cached.has_scripts,
                 has_assets=cached.has_assets,
                 metadata=cached.metadata,
+                schema_source=cached.schema_source,
+                diagnostics=list(cached.diagnostics),
                 created_at=cached.created_at,
                 updated_at=cached.updated_at,
-                content=body,
+                content=_parse_skill_md_strict(raw)[1],
                 raw=raw,
             )
 
-        # Fallback: parse from file
-        name = fm.get("name", skill_id)
-        description = fm.get("description", "")
-        dependencies, dependency_source, dependency_errors = _parse_dependencies(
-            fm, skill_id
-        )
+        # Fallback is intentionally the same validator used by discovery.
+        try:
+            package = validate_skill_package(raw, skill_id, skill_dir=skill_dir)
+        except SkillValidationError as exc:
+            self._diagnostics[skill_id] = exc.issues
+            return None
         db_row = await self.db.get_skill_row(skill_id)
-        return SkillContent(
-            id=skill_id, name=name, description=description,
-            version=fm.get("version", "1.0.0"),
-            enabled=db_row["enabled"] if db_row else True,
-            user_invocable=fm.get("user-invocable", True),
-            model_invocable=not fm.get("disable-model-invocation", False),
-            dependencies=dependencies,
-            dependency_source=dependency_source,
-            dependency_errors=dependency_errors,
-            content=body, raw=raw,
-            has_references=(skill_dir / "references").is_dir(),
-            has_scripts=(skill_dir / "scripts").is_dir(),
-            has_assets=(skill_dir / "assets").is_dir(),
+        meta = self._meta_from_package(
+            package, enabled=db_row["enabled"] if db_row else True, skill_dir=skill_dir,
         )
+        self._cache[skill_id] = meta
+        self._diagnostics[skill_id] = meta.diagnostics
+        return SkillContent(**meta.__dict__, content=package.body, raw=raw)
 
     async def create_skill(
         self,
@@ -643,26 +890,35 @@ class SkillManager:
         skill_id = _slugify(name)
         skill_dir = self.skills_dir / _skill_id(skill_id)
 
-        # Build SKILL.md
-        raw = _build_skill_md(name, description, content, version)
+        # Creation always emits canonical packages; validate the complete
+        # replacement before making a directory or touching the database.
+        raw = _build_skill_md(skill_id, description, content, version)
+        package = validate_skill_package(raw, skill_id, allow_legacy=False)
+        if skill_dir.exists() or await self.db.get_skill_row(skill_id):
+            raise FileExistsError(f"Skill already exists: {skill_id}")
 
         def _write_skill() -> None:
-            skill_dir.mkdir(parents=True, exist_ok=True)
-            (skill_dir / "SKILL.md").write_text(raw, encoding="utf-8")
+            self.skills_dir.mkdir(parents=True, exist_ok=True)
+            skill_dir.mkdir()
+            temp = skill_dir / f".SKILL.md.{uuid.uuid4().hex}.tmp"
+            try:
+                temp.write_text(raw, encoding="utf-8")
+                os.replace(temp, skill_dir / "SKILL.md")
+            except BaseException:
+                temp.unlink(missing_ok=True)
+                skill_dir.rmdir()
+                raise
 
         await asyncio.to_thread(_write_skill)
-
-        # Sync to DB
+        meta = self._meta_from_package(package, enabled=True, skill_dir=skill_dir)
         await self.db.upsert_skill(
-            skill_id=skill_id, name=name, description=description,
-            version=version,
-        )
-
-        meta = SkillMeta(
-            id=skill_id, name=name, description=description,
-            version=version,
+            skill_id=meta.id, name=meta.name, description=meta.description,
+            version=meta.version, user_invocable=meta.user_invocable,
+            model_invocable=meta.model_invocable, allowed_tools=meta.allowed_tools,
+            metadata=meta.metadata,
         )
         self._cache[skill_id] = meta
+        self._diagnostics[skill_id] = meta.diagnostics
         return meta
 
     async def update_skill(
@@ -680,6 +936,10 @@ class SkillManager:
         if not skill_md.exists():
             return None
 
+        # Validate in memory before either SKILL.md or the DB can change.
+        package = validate_skill_package(content, skill_id, skill_dir=skill_dir,
+                                         allow_legacy=True)
+
         lock = self._amendment_locks.setdefault(skill_id, asyncio.Lock())
         async with lock:
             if clear_amendments:
@@ -694,59 +954,33 @@ class SkillManager:
                         "prepared; reload the skill and consolidate the new revision"
                     )
 
-            await asyncio.to_thread(skill_md.write_text, content, encoding="utf-8")
+            def _replace() -> None:
+                temp = skill_dir / f".SKILL.md.{uuid.uuid4().hex}.tmp"
+                try:
+                    temp.write_text(content, encoding="utf-8")
+                    os.replace(temp, skill_md)
+                finally:
+                    temp.unlink(missing_ok=True)
+
+            await asyncio.to_thread(_replace)
 
             if clear_amendments:
                 amendments = skill_dir / "references" / AMENDMENTS_REFERENCE
                 if amendments.exists():
                     await asyncio.to_thread(amendments.unlink)
 
-        # Re-parse and sync
-        fm, body = _parse_skill_md(content)
-        name = fm.get("name", skill_id)
-        description = fm.get("description", "")
-        version = fm.get("version", "1.0.0")
-        dependencies, dependency_source, dependency_errors = _parse_dependencies(
-            fm, skill_id
-        )
-        allowed_tools_raw = fm.get("allowed-tools")
-        allowed_tools = None
-        if isinstance(allowed_tools_raw, str):
-            allowed_tools = [t.strip() for t in allowed_tools_raw.split(",") if t.strip()]
-        elif isinstance(allowed_tools_raw, list):
-            allowed_tools = allowed_tools_raw
-
-        known_keys = {"name", "description", "version", "user-invocable",
-                      "disable-model-invocation", "allowed-tools", "license",
-                      "argument-hint", "context", "agent"}
-        extra_meta = {k: v for k, v in fm.items() if k not in known_keys}
-
-        await self.db.upsert_skill(
-            skill_id=skill_id, name=name, description=description,
-            version=str(version),
-            user_invocable=fm.get("user-invocable", True),
-            model_invocable=not fm.get("disable-model-invocation", False),
-            allowed_tools=allowed_tools,
-            metadata=extra_meta,
-        )
-
         existing = await self.db.get_skill_row(skill_id)
-        meta = SkillMeta(
-            id=skill_id, name=name, description=description,
-            version=str(version),
-            enabled=existing["enabled"] if existing else True,
-            user_invocable=fm.get("user-invocable", True),
-            model_invocable=not fm.get("disable-model-invocation", False),
-            allowed_tools=allowed_tools,
-            dependencies=dependencies,
-            dependency_source=dependency_source,
-            dependency_errors=dependency_errors,
-            has_references=(skill_dir / "references").is_dir(),
-            has_scripts=(skill_dir / "scripts").is_dir(),
-            has_assets=(skill_dir / "assets").is_dir(),
-            metadata=extra_meta,
+        meta = self._meta_from_package(
+            package, enabled=existing["enabled"] if existing else True, skill_dir=skill_dir,
+        )
+        await self.db.upsert_skill(
+            skill_id=meta.id, name=meta.name, description=meta.description,
+            version=meta.version, enabled=meta.enabled,
+            user_invocable=meta.user_invocable, model_invocable=meta.model_invocable,
+            allowed_tools=meta.allowed_tools, metadata=meta.metadata,
         )
         self._cache[skill_id] = meta
+        self._diagnostics[skill_id] = meta.diagnostics
         return meta
 
     async def delete_skill(self, skill_id: str) -> bool:
@@ -757,6 +991,7 @@ class SkillManager:
             await asyncio.to_thread(shutil.rmtree, skill_dir)
         await self.db.delete_skill_row(skill_id)
         self._cache.pop(skill_id, None)
+        self._diagnostics.pop(skill_id, None)
         return True
 
     async def toggle_skill(self, skill_id: str, enabled: bool) -> bool:
@@ -1064,6 +1299,8 @@ class SkillManager:
         db_skills = await self.db.list_skills()
         summaries = []
         for s in db_skills:
+            if self._discovered_once and s["id"] not in self._cache:
+                continue
             if s["enabled"] and s["model_invocable"]:
                 summaries.append({
                     "id": s["id"],

@@ -213,6 +213,19 @@ export function SkillDetailPage() {
             </div>
           </div>
 
+          {selectedSkill.diagnostics.length > 0 && (
+            <div className="p-4 border-b border-border">
+              <h3 className="mb-2 text-xs font-medium text-text-muted">Schema diagnostics</h3>
+              <div className="space-y-1.5 rounded border border-amber-500/30 bg-amber-500/10 p-2">
+                {selectedSkill.diagnostics.map((diagnostic, index) => (
+                  <div key={`${diagnostic.code}-${index}`} className="text-[10px] text-hue-amber">
+                    <span className="font-mono">{diagnostic.code}</span>: {diagnostic.message}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Dependencies */}
           {(selectedSkill.dependency_source !== 'none' || selectedSkill.dependency_resolution.errors.length > 0) && (
             <div className="p-4 border-b border-border">

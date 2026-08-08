@@ -414,6 +414,11 @@ Get full skill content, metadata, references, and usage stats.
 #### `POST /api/skills`
 Create a new skill.
 
+The service derives the lowercase-hyphenated ID from `name`, emits canonical
+`metadata.nerve.version`, and returns `409` when that directory or registry ID
+already exists. Schema failures return `422` with an array of `{code, message,
+path, severity}` diagnostics.
+
 ```json
 Request:  { "name": "code-review", "description": "This skill should be used when...", "content": "## Steps\n..." }
 Response: { "id": "code-review", "name": "code-review", "created": true }
@@ -421,6 +426,9 @@ Response: { "id": "code-review", "name": "code-review", "created": true }
 
 #### `PUT /api/skills/{id}`
 Update a skill's SKILL.md content (full raw file including frontmatter).
+
+The complete replacement is validated before the current file or registry is
+changed. Invalid YAML and schema errors return `422` with structured diagnostics.
 
 ```json
 Request:  { "content": "---\nname: code-review\ndescription: ...\n---\n\n# Instructions\n..." }

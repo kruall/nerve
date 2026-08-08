@@ -4,6 +4,41 @@ Nerve discovers skill packages at `workspace/skills/<skill-id>/SKILL.md`. A
 skill's Markdown body contains instructions; YAML frontmatter contains portable
 fields and Nerve-specific metadata.
 
+## Canonical package schema
+
+New packages must use this Codex-compatible shape. `name` is a lowercase,
+hyphenated identifier and must equal the directory name. `description` is
+required and is limited to 1024 characters. Nerve owns only the
+`metadata.nerve` namespace; portable top-level fields remain available to Codex.
+
+```yaml
+---
+name: deploy-service
+description: Deploy a service safely.
+metadata:
+  nerve:
+    version: 1.0.0
+    context: domain
+    dependencies:
+      required: [release-checklist]
+      suggested:
+        - skill: kubernetes
+          when: The service runs on Kubernetes.
+---
+```
+
+`version`, `context`, and `dependencies` are Nerve metadata. `agents/openai.yaml`
+is ignored for Nerve-only packages. Set `metadata.nerve.codex: true` only for a
+dual-use package; then Nerve also checks that this optional file is valid YAML.
+References, scripts, assets, and agent metadata must resolve inside the skill
+directory; symlinks outside it are rejected.
+
+The shared validator is used by discovery, tool and HTTP create/update, and
+plan-driven skill installation. It validates a full replacement before writing,
+uses atomic file replacement, and refuses a create when either the target
+directory or a registry entry already exists. Invalid writes leave the existing
+file and registry unchanged.
+
 ## Dependency declarations
 
 Put new dependency declarations in the canonical Nerve metadata namespace:
@@ -78,6 +113,13 @@ Move the value under `metadata.nerve.dependencies`, rename `requires` to
 Do not keep both forms: simultaneous canonical and legacy declarations are an
 explicit validation error rather than a precedence rule. Canonical and migrated
 legacy declarations otherwise produce the same sorted bundle.
+
+Other old flat Nerve fields (`version`, `context`, and `agent`) are also loaded
+with a `legacy_schema` diagnostic. Create always emits canonical packages;
+updates retain the compatibility path so installed skills keep working while
+they are migrated. Migrate fields into `metadata.nerve` and make `name` match
+the directory on the next update. Discovery never rewrites user or third-party
+skills; use its diagnostics as the migration report.
 
 Invalid IDs, duplicate edges, required/suggested conflicts, self-dependencies,
 conditional required edges, unsupported fields, and malformed group types are

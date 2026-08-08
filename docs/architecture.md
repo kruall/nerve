@@ -129,6 +129,9 @@ Dual-layer memory:
 ### Skills (`nerve/skills/`)
 Filesystem-based skill system (Claude SDK compatible):
 - Skills stored as `workspace/skills/<name>/SKILL.md` with YAML frontmatter
+- Canonical packages use a lowercase-hyphenated directory-matching `name` and
+  keep Nerve lifecycle fields under `metadata.nerve`; legacy flat fields load
+  with diagnostics during migration
 - Optional `references/`, `scripts/`, `assets/` subdirectories
 - SQLite index for metadata + usage statistics (`skills`, `skill_usage` tables)
 - Progressive disclosure: name+description in system prompt, full content loaded on demand via `skill_get` tool
@@ -139,6 +142,8 @@ Filesystem-based skill system (Claude SDK compatible):
   clearing notes that arrived after review
 - Namespaced frontmatter dependencies have deterministic, fail-closed required
   composition and advisory suggested edges; see [Skills](skills.md)
+- One package validator normalizes discovery and all mutation paths before an
+  atomic filesystem replacement and registry update; see [Skills](skills.md)
 - Automated extraction: `skill-extractor` cron identifies repeated workflows and proposes new skills via task+plan system
 - Automated revision: `skill-reviser` cron consolidates pending amendments and
   reviews existing skills for accuracy, completeness, and quality

@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from types import SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,11 +19,16 @@ def _write_skill(workspace: Path, skill_id: str, raw: str) -> None:
 
 
 def _raw_skill(name: str, body: str, *, version: str = "1.0.0", extra: str = "") -> str:
+    nerve_metadata = (
+        ""
+        if extra.lstrip().startswith("metadata:")
+        else "metadata:\n  nerve:\n" f"    version: {version}\n"
+    )
     return (
         "---\n"
         f"name: {name}\n"
         f"description: {name} description\n"
-        f"version: {version}\n"
+        f"{nerve_metadata}"
         f"{extra}"
         "---\n\n"
         f"{body}\n"
@@ -240,8 +246,7 @@ async def test_invalid_dependency_metadata_is_actionable(tmp_path, db):
     )
     manager = SkillManager(workspace, db)
     await manager.discover()
-    resolution = await manager.resolve_required_dependencies("root")
-    codes = {issue.code for issue in resolution.errors}
+    codes = {issue.code for issue in manager.diagnostics("root")}
 
     assert {
         "duplicate_dependency",
@@ -249,7 +254,7 @@ async def test_invalid_dependency_metadata_is_actionable(tmp_path, db):
         "unsupported_dependency_field",
         "conflicting_dependency_modes",
     } <= codes
-    assert any("version constraints are deferred" in issue.message for issue in resolution.errors)
+    assert any("version constraints are deferred" in issue.message for issue in manager.diagnostics("root"))
 
 
 @pytest.mark.asyncio
@@ -426,3 +431,133 @@ async def test_consolidation_refuses_stale_amendments_revision(tmp_path, db, mon
     assert updated.version == "1.0.1"
     assert skill_path.read_text(encoding="utf-8") == replacement
     assert not amendments_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_canonical_package_is_indexed_with_namespaced_metadata(tmp_path, db):
+    workspace = tmp_path / "ws"
+    raw = (
+        "---\nname: deploy-service\ndescription: Deploy safely.\nmetadata:\n"
+        "  nerve:\n    version: 2.1.0\n    context: domain\n---\n\nInstructions.\n"
+    )
+    _write_skill(workspace, "deploy-service", raw)
+    manager = SkillManager(workspace, db)
+
+    skills = await manager.discover()
+
+    assert [skill.id for skill in skills] == ["deploy-service"]
+    assert skills[0].schema_source == "canonical"
+    assert skills[0].version == "2.1.0"
+    assert manager.diagnostics("deploy-service") == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_skill_loads_with_explicit_migration_diagnostic(tmp_path, db):
+    workspace = tmp_path / "ws"
+    _write_skill(
+        workspace, "legacy-skill",
+        "---\nname: Legacy Skill\ndescription: Old package.\nversion: 1.0.0\n"
+        "context: domain\n---\n\nInstructions.\n",
+    )
+    manager = SkillManager(workspace, db)
+
+    skills = await manager.discover()
+
+    assert [skill.id for skill in skills] == ["legacy-skill"]
+    assert skills[0].schema_source == "legacy"
+    assert [issue.code for issue in manager.diagnostics("legacy-skill")] == ["legacy_schema"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_update_and_duplicate_create_are_atomic(tmp_path, db):
+    workspace = tmp_path / "ws"
+    manager = SkillManager(workspace, db)
+    created = await manager.create_skill("Demo Skill", "A demo skill.", "Original.")
+    path = workspace / "skills" / created.id / "SKILL.md"
+    original = path.read_text(encoding="utf-8")
+    original_row = await db.get_skill_row(created.id)
+
+    with pytest.raises(ValueError, match="frontmatter"):
+        await manager.update_skill(created.id, "---\nname: demo-skill\nnot: [yaml\n---\nBad")
+    with pytest.raises(ValueError, match="must match skill directory"):
+        await manager.update_skill(
+            created.id,
+            "---\nname: other-skill\ndescription: Wrong name.\nmetadata:\n"
+            "  nerve:\n    version: 1.0.0\n---\n",
+        )
+    with pytest.raises(FileExistsError):
+        await manager.create_skill("demo skill", "Replacement")
+
+    assert path.read_text(encoding="utf-8") == original
+    assert await db.get_skill_row(created.id) == original_row
+
+
+@pytest.mark.asyncio
+async def test_discovery_rejects_resource_symlink_outside_package(tmp_path, db):
+    workspace = tmp_path / "ws"
+    _write_skill(workspace, "safe", _raw_skill("safe", "Instructions."))
+    refs = workspace / "skills" / "safe" / "references"
+    refs.mkdir()
+    (refs / "outside").symlink_to(tmp_path)
+    manager = SkillManager(workspace, db)
+
+    assert await manager.discover() == []
+    assert "unsafe_resource_path" in {issue.code for issue in manager.diagnostics("safe")}
+    assert await manager.get_enabled_summaries() == []
+
+
+@pytest.mark.asyncio
+async def test_openai_agent_metadata_is_ignored_unless_dual_use_is_declared(tmp_path, db):
+    workspace = tmp_path / "ws"
+    skill_dir = workspace / "skills" / "portable"
+    _write_skill(
+        workspace, "portable",
+        "---\nname: portable\ndescription: Portable package.\nmetadata:\n"
+        "  nerve:\n    version: 1.0.0\n---\n",
+    )
+    agents = skill_dir / "agents"
+    agents.mkdir()
+    (agents / "openai.yaml").write_text("not: [valid\n", encoding="utf-8")
+    manager = SkillManager(workspace, db)
+
+    assert [skill.id for skill in await manager.discover()] == ["portable"]
+
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: portable\ndescription: Portable package.\nmetadata:\n"
+        "  nerve:\n    version: 1.0.0\n    codex: true\n---\n",
+        encoding="utf-8",
+    )
+    assert await manager.discover() == []
+    assert "invalid_codex_agent" in {issue.code for issue in manager.diagnostics("portable")}
+
+
+@pytest.mark.asyncio
+async def test_http_skill_writes_return_structured_validation_errors(tmp_path, db, monkeypatch):
+    from fastapi import HTTPException
+    from nerve.gateway.routes import skills as routes
+
+    manager = SkillManager(tmp_path / "ws", db)
+    monkeypatch.setattr(
+        routes, "get_deps", lambda: SimpleNamespace(
+            engine=SimpleNamespace(_skill_manager=manager),
+        ),
+    )
+    created = await routes.create_skill(
+        routes.SkillCreateRequest(name="HTTP Skill", description="From HTTP."), user={},
+    )
+    assert created == {"id": "http-skill", "name": "http-skill", "created": True}
+
+    with pytest.raises(HTTPException) as duplicate:
+        await routes.create_skill(
+            routes.SkillCreateRequest(name="http skill", description="Duplicate."), user={},
+        )
+    assert duplicate.value.status_code == 409
+
+    with pytest.raises(HTTPException) as invalid:
+        await routes.update_skill(
+            "http-skill",
+            routes.SkillUpdateRequest(content="---\nname: http-skill\ndescription: [bad\n---\n"),
+            user={},
+        )
+    assert invalid.value.status_code == 422
+    assert invalid.value.detail[0]["code"] == "invalid_yaml"

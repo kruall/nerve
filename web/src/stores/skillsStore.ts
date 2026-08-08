@@ -32,6 +32,13 @@ export interface SkillDependencyIssue {
   path: string[];
 }
 
+export interface SkillValidationIssue {
+  code: string;
+  message: string;
+  path: string[];
+  severity: 'error' | 'warning';
+}
+
 export interface SkillDependencyResolution {
   ok: boolean;
   root: string;
@@ -52,6 +59,8 @@ export interface SkillDetail extends Skill {
   dependencies: SkillDependency[];
   dependency_source: 'canonical' | 'legacy' | 'none';
   dependency_errors: SkillDependencyIssue[];
+  schema_source: 'canonical' | 'legacy';
+  diagnostics: SkillValidationIssue[];
   dependency_resolution: SkillDependencyResolution;
   stats: {
     total_invocations: number;
