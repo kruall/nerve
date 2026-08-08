@@ -1828,9 +1828,16 @@ def codex_doctor(
     if langfuse_canary:
         from nerve.agent.backends.codex.langfuse_canary import run_langfuse_canary
 
-        report["langfuse_canary"] = asyncio.run(
-            run_langfuse_canary(config, timeout=canary_timeout),
-        )
+        try:
+            report["langfuse_canary"] = asyncio.run(
+                run_langfuse_canary(config, timeout=canary_timeout),
+            )
+        except Exception as error:
+            report["langfuse_canary"] = {
+                "ok": False,
+                "phase": "exception",
+                "errors": [str(error)],
+            }
     if json_output:
         click.echo(json.dumps(report, indent=2, sort_keys=True))
     else:

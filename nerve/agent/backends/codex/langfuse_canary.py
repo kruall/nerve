@@ -122,10 +122,11 @@ async def run_langfuse_canary(config: Any, *, timeout: float = 60.0) -> dict[str
             fields="core,basic,usage",
             limit=100,
             type="GENERATION",
-            session_id=native_id,
             from_start_time=started,
         )
-        generations = list(response.data)
+        generations = [
+            item for item in response.data if item.session_id == native_id
+        ]
         if generations:
             break
         await asyncio.sleep(1.0)
