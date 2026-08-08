@@ -39,12 +39,17 @@ dependencies = [
     "pyjwt>=2.10.0",
     "bcrypt>=4.2.0",
     "httpx>=0.28.0",
+    # Use the operating-system trust store (not certifi alone). This is
+    # required on managed hosts whose HTTPS inspection CA is installed in the
+    # macOS/Windows system store, including OpenAI embeddings calls.
+    "truststore>=0.10.0",
     "websockets>=14.0",
     "click>=8.1.0",
     "telethon>=1.38.0",
     # [bedrock] pulls boto3/botocore, required by AnthropicBedrock for AWS SigV4
     # request signing (session title generation and other direct-SDK fast-model calls).
-    "anthropic[bedrock]>=0.45.0",  # used by memu_bridge for event date resolution
+    # Anthropic/Bedrock provider adapters and legacy maintenance fallback.
+    "anthropic[bedrock]>=0.45.0",
     "memu-py==1.4.0",  # pinned — nerve monkey-patches memU internals (see memu_bridge._patch_sqlite_bugs)
     "watchfiles>=1.0.0",
     "html2text>=2024.2.26",

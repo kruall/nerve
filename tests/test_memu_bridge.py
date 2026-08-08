@@ -5,12 +5,14 @@ import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
 
 from nerve.config import MemoryConfig, NerveConfig
+from nerve.memory.codex_llm import CodexMemoryLLMClient
 from nerve.memory.memu_bridge import (
     MemoryBackendUnavailable,
     MemUBridge,
@@ -336,6 +338,36 @@ def _mock_anthropic(response_text: str) -> tuple[MagicMock, MagicMock]:
 class TestResolveDatesViaLlm:
     """Test _resolve_dates_via_llm response parsing."""
 
+    def test_codex_structured_schema_uses_object_root(self, tmp_path):
+        class _StructuredClient:
+            def __init__(self):
+                self.calls = []
+
+            async def chat_structured(self, prompt, **kwargs):
+                self.calls.append((prompt, kwargs))
+                return (
+                    '{"items": [{"happened_at": "2026-02-05"}]}',
+                    {"provider": "codex"},
+                )
+
+        config = _make_config(tmp_path)
+        config.memory.provider = "codex"
+        bridge = MemUBridge(config)
+        client = _StructuredClient()
+        bridge._service = SimpleNamespace(
+            _get_llm_base_client=lambda profile: client,
+        )
+
+        result = bridge._resolve_dates_via_llm(
+            [("id-1", "User went hiking on February 5, 2026")],
+            "2026-02-10",
+        )
+
+        assert result == {"id-1": "2026-02-05"}
+        schema = client.calls[0][1]["output_schema"]
+        assert schema["type"] == "object"
+        assert schema["properties"]["items"]["type"] == "array"
+
     def test_parses_valid_json_response(self, tmp_path):
         config = _make_config(tmp_path)
         bridge = MemUBridge(config)
@@ -400,27 +432,48 @@ class TestConfigMemoryModels:
 
     def test_defaults(self):
         config = MemoryConfig()
+        assert config.provider == "inherit"
         assert config.recall_model == "claude-sonnet-4-6"
         assert config.memorize_model == "claude-sonnet-4-6"
         assert config.fast_model == "claude-haiku-4-5-20251001"
         assert config.embed_model == ""
+        assert config.codex_workers == 2
+        assert config.codex_effort == "low"
 
     def test_from_dict(self):
         config = MemoryConfig.from_dict({
+            "provider": "codex",
             "recall_model": "claude-opus-4-8",
             "memorize_model": "claude-sonnet-4-6",
             "fast_model": "claude-haiku-4-5-20251001",
             "embed_model": "text-embedding-3-large",
+            "codex_workers": 3,
+            "codex_effort": "medium",
         })
+        assert config.provider == "codex"
         assert config.recall_model == "claude-opus-4-8"
         assert config.memorize_model == "claude-sonnet-4-6"
         assert config.fast_model == "claude-haiku-4-5-20251001"
         assert config.embed_model == "text-embedding-3-large"
+        assert config.codex_workers == 3
+        assert config.codex_effort == "medium"
 
     def test_from_dict_uses_defaults(self):
         config = MemoryConfig.from_dict({})
         assert config.recall_model == "claude-sonnet-4-6"
         assert config.memorize_model == "claude-sonnet-4-6"
+
+    def test_from_dict_normalizes_model_names(self):
+        config = MemoryConfig.from_dict({
+            "recall_model": "  gpt-recall  ",
+            "memorize_model": "  ",
+            "fast_model": " gpt-fast ",
+            "embed_model": " text-embedding-3-small ",
+        })
+        assert config.recall_model == "gpt-recall"
+        assert config.memorize_model == ""
+        assert config.fast_model == "gpt-fast"
+        assert config.embed_model == "text-embedding-3-small"
 
     def test_semantic_dedup_threshold_default(self):
         config = MemoryConfig()
@@ -445,6 +498,188 @@ class TestConfigMemoryModels:
     def test_semantic_dedup_threshold_from_dict_default(self):
         config = MemoryConfig.from_dict({})
         assert config.semantic_dedup_threshold == 0.85
+
+    def test_codex_workers_are_clamped(self):
+        assert MemoryConfig.from_dict({"codex_workers": 0}).codex_workers == 1
+        assert MemoryConfig.from_dict({"codex_workers": 99}).codex_workers == 4
+
+
+class TestCodexMemoryInjection:
+    def test_injects_chat_profiles_but_keeps_openai_embedding(self, tmp_path):
+        config = _make_config(tmp_path)
+        config.memory.provider = "codex"
+        bridge = MemUBridge(config)
+        runtime = MagicMock()
+        bridge._make_codex_runtime = MagicMock(return_value=runtime)
+        bridge._service = SimpleNamespace(
+            llm_profiles=SimpleNamespace(profiles={
+                "default": SimpleNamespace(chat_model="gpt-5.6-terra"),
+                "fast": SimpleNamespace(chat_model="gpt-5.6-luna"),
+                "embedding": SimpleNamespace(embed_model="text-embedding-3-small"),
+            }),
+            _llm_clients={"embedding": object()},
+        )
+        embedding_client = bridge._service._llm_clients["embedding"]
+
+        bridge._inject_codex_clients()
+
+        assert isinstance(
+            bridge._service._llm_clients["default"],
+            CodexMemoryLLMClient,
+        )
+        assert isinstance(
+            bridge._service._llm_clients["fast"],
+            CodexMemoryLLMClient,
+        )
+        assert bridge._service._llm_clients["embedding"] is embedding_client
+        assert bridge._codex_runtime is runtime
+
+    def test_owned_structured_call_uses_injected_fast_profile(self, tmp_path):
+        class _StructuredClient:
+            def __init__(self):
+                self.calls = []
+
+            async def chat_structured(self, prompt, **kwargs):
+                self.calls.append((prompt, kwargs))
+                return '{"indices": [1, 3]}', {"provider": "codex"}
+
+        config = _make_config(tmp_path)
+        config.memory.provider = "codex"
+        bridge = MemUBridge(config)
+        client = _StructuredClient()
+        requested_profiles = []
+        bridge._service = SimpleNamespace(
+            _get_llm_base_client=lambda profile: (
+                requested_profiles.append(profile) or client
+            ),
+        )
+
+        result = bridge._call_knowledge_filter_sync(
+            "gpt-5.6-luna", "classify",
+        )
+
+        assert result == [1, 3]
+        assert requested_profiles == ["fast"]
+        assert client.calls[0][0] == "classify"
+        schema = client.calls[0][1]["output_schema"]
+        assert schema["type"] == "object"
+        assert schema["properties"]["indices"]["type"] == "array"
+
+    @pytest.mark.parametrize("fast_model", ["", "   "])
+    def test_owned_structured_call_falls_back_to_default_profile(
+        self,
+        tmp_path,
+        fast_model,
+    ):
+        class _StructuredClient:
+            async def chat_structured(self, prompt, **kwargs):
+                return '{"indices": []}', {"provider": "codex"}
+
+        config = _make_config(tmp_path)
+        config.memory.provider = "codex"
+        config.memory.fast_model = fast_model
+        bridge = MemUBridge(config)
+        requested_profiles = []
+        bridge._service = SimpleNamespace(
+            _get_llm_base_client=lambda profile: (
+                requested_profiles.append(profile) or _StructuredClient()
+            ),
+        )
+
+        assert bridge._call_knowledge_filter_sync(
+            config.memory.recall_model,
+            "classify",
+        ) == []
+        assert requested_profiles == ["default"]
+
+    def test_date_resolution_falls_back_to_default_profile(self, tmp_path):
+        class _StructuredClient:
+            async def chat_structured(self, prompt, **kwargs):
+                return (
+                    '{"items": [{"happened_at": "2026-07-24"}]}',
+                    {"provider": "codex"},
+                )
+
+        config = _make_config(tmp_path)
+        config.memory.provider = "codex"
+        config.memory.fast_model = ""
+        bridge = MemUBridge(config)
+        requested_profiles = []
+        bridge._service = SimpleNamespace(
+            _get_llm_base_client=lambda profile: (
+                requested_profiles.append(profile) or _StructuredClient()
+            ),
+        )
+
+        result = bridge._resolve_dates_via_llm(
+            [("item-1", "deployed today")],
+            "2026-07-24",
+        )
+
+        assert result == {"item-1": "2026-07-24"}
+        assert requested_profiles == ["default"]
+
+    def test_uninitialized_date_fallback_uses_normalized_recall_model(
+        self,
+        tmp_path,
+    ):
+        config = _make_config(tmp_path)
+        config.memory.fast_model = "   "
+        config.memory.recall_model = "  gpt-recall  "
+        bridge = MemUBridge(config)
+        client = MagicMock()
+        client.messages.create.return_value = SimpleNamespace(
+            content=[SimpleNamespace(
+                text='{"items": [{"happened_at": "2026-07-24"}]}',
+            )],
+        )
+        bridge._get_anthropic_client = MagicMock(return_value=client)
+
+        result = bridge._resolve_dates_via_llm(
+            [("item-1", "deployed today")],
+            "2026-07-24",
+        )
+
+        assert result == {"item-1": "2026-07-24"}
+        assert client.messages.create.call_args.kwargs["model"] == "gpt-recall"
+
+    def test_codex_runtime_receives_supported_version_range(self, tmp_path):
+        config = _make_config(tmp_path)
+        config.memory.provider = "codex"
+        bridge = MemUBridge(config)
+
+        with patch(
+            "nerve.memory.memu_bridge.CodexMemoryPool",
+        ) as pool_cls:
+            bridge._make_codex_runtime()
+
+        kwargs = pool_cls.call_args.kwargs
+        assert kwargs["min_version"] == config.codex.min_version
+        assert kwargs["max_version"] == config.codex.max_version
+
+    @pytest.mark.asyncio
+    async def test_health_exposes_provider_and_embedding_mode(self, tmp_path):
+        config = _make_config(tmp_path)
+        config.memory.provider = "codex"
+        config.memory.recall_model = "gpt-5.6-terra"
+        config.memory.memorize_model = "gpt-5.6-terra"
+        config.memory.fast_model = "gpt-5.6-luna"
+        config.memory.embed_model = "text-embedding-3-small"
+        config.openai_api_key = "embedding-key"
+        bridge = MemUBridge(config)
+        bridge.get_db_stats = AsyncMock(return_value={"total_items": 0})
+
+        health = await bridge.get_health()
+
+        assert health["configuration"] == {
+            "provider": "codex",
+            "recall_model": "gpt-5.6-terra",
+            "memorize_model": "gpt-5.6-terra",
+            "fast_model": "gpt-5.6-luna",
+            "embedding_enabled": True,
+            "embed_model": "text-embedding-3-small",
+            "codex_workers": 2,
+        }
 
 
 class TestKnowledgeCustomPrompts:

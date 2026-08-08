@@ -1,10 +1,12 @@
 # Observability — Langfuse
 
-Nerve has an optional Langfuse integration for tracing the agent loop and
-the memU memory pipeline. When configured, every Claude Agent SDK turn,
-tool call, and direct Anthropic SDK call (memU embeddings/condensation)
-becomes a span in your Langfuse project, tagged with `session_id`,
-`source` (`web` / `cron` / `telegram` / `hook`), `model`, and `channel`.
+Nerve has an optional Langfuse integration for tracing the Claude agent loop
+and Anthropic/Bedrock calls in the memU memory pipeline. When configured,
+those SDK calls become spans in your Langfuse project, tagged with
+`session_id`, `source` (`web` / `cron` / `telegram` / `hook`), `model`, and
+`channel`. Codex app-server and OpenAI embedding calls remain visible in
+Nerve's own structured logs and diagnostics, but are not currently exported as
+Langfuse generation spans.
 
 When the keys aren't set, the integration is a complete no-op — Nerve
 runs identically with zero observability overhead.
@@ -14,7 +16,7 @@ runs identically with zero observability overhead.
 | Surface                       | Source                                               | Tags                                              |
 |-------------------------------|------------------------------------------------------|---------------------------------------------------|
 | Agent turns + tool calls      | `claude_agent_sdk` via LangSmith integration         | `source:*`, `model:*`, `channel:*` (when present) |
-| memU chat / summarize / embed | `anthropic` SDK via `AnthropicInstrumentor`          | `component:memu`, `purpose:summarize`             |
+| memU Anthropic/Bedrock chat   | `anthropic` SDK via `AnthropicInstrumentor`          | `component:memu`, `purpose:summarize`             |
 
 Trace-level attributes (`session_id`, `metadata.parent_session_id`,
 `metadata.fork_from`) are propagated to every span emitted inside a turn
