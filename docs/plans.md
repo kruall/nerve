@@ -139,14 +139,12 @@ The user can monitor, stop, or interact with the implementation session from the
 
 ### Skill Proposals
 
-Plans from the `skill-extractor` and `skill-reviser` cron jobs follow a different approval path. When approved:
-
-1. Plan content is parsed as a full SKILL.md file (YAML frontmatter + body)
-2. If the skill already exists → updated; otherwise → created
-3. Plan status → `completed`; task status → `done`
-4. No implementation session is spawned — the plan *is* the deliverable
-
-This is handled automatically by the plan approval handler based on the task's `source` field (`skill-extractor` or `skill-reviser`).
+Plans from the `skill-extractor` and `skill-reviser` jobs still use the normal
+approval path: approval creates an implementation session. The skill-aware
+prompt instructs that session to reload current revision tokens, validate the
+complete canonical package, and use `skill_create`, `skill_update`, or the
+reviewed config-PR path as appropriate. This preserves conflict checks and
+lockdown behavior instead of treating plan text as an installation payload.
 
 ## Database
 

@@ -187,21 +187,21 @@ async def approve_plan(
         )
         if plan_type == "skill-create":
             prompt += (
-                "The plan contains a skill specification. "
-                "Use the `skill_create` tool to create the skill. "
-                "Extract the name, description, and content from the plan. "
-                "If the plan contains a full SKILL.md with frontmatter, parse out the name and description "
-                "from the frontmatter and use the body as the content.\n"
+                "Load `nerve-skill-development` before applying the proposal. The plan contains a skill "
+                "specification: validate and forward-test its complete canonical package. Use `skill_create` "
+                "only for a simple Nerve-only package with default metadata; use `propose_config_change` for "
+                "dependencies, resources, agents/openai.yaml, or lockdown. Do not discard canonical metadata "
+                "or resources merely to fit the create tool.\n"
             )
         else:
             prompt += (
-                "The plan contains a skill revision. "
+                "Load `nerve-skill-development` before applying the proposal. The plan contains a skill revision. "
                 "Reload the target skill with `skill_get` immediately before applying it. "
                 "Use the `skill_update` tool to update the existing skill. "
                 "Pass the skill ID (directory name) as the name parameter and the full SKILL.md content "
                 "(frontmatter + body), and pass the installed skill revision shown by skill_get as "
-                "expected_skill_revision. If it is stale, do not retry without re-reviewing the "
-                "replacement.\n"
+                "expected_skill_revision. Preserve dependencies, resources, and sidecars unless their reviewed "
+                "proposal changes them. If it is stale, do not retry without re-reviewing the replacement.\n"
             )
         prompt += (
             "\nAfter the skill is created/updated, mark the task as done using "

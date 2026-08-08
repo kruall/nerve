@@ -451,16 +451,16 @@ These ship in `<workspace>/config/cron/system.yaml` and are managed by `nerve in
 - **Personal** — `memory-maintenance` (always on) + `inbox-processor` + `task-planner` enabled by default. `skill-extractor` and `skill-reviser` are presented as optional during `nerve init`.
 - **Worker** — `memory-maintenance` (always on) + `task-planner` + `skill-extractor` + `skill-reviser` enabled by default. `inbox-processor` is not included (workers don't have sync sources).
 
-Both skill jobs use `source="skill-extractor"` or `source="skill-reviser"` on created tasks. When their plans are approved, the plan approval handler creates/updates the skill directly from the plan content (which is a full SKILL.md file) instead of spawning an implementation session.
+Both skill jobs use `source="skill-extractor"` or `source="skill-reviser"` on created tasks. Their plans are approved through the normal lifecycle: approval starts an implementation session, which reloads and validates the package before using the applicable mutation or reviewed config-PR path.
 
 `skill_amend` stores verified reusable lessons in
 `skills/<id>/references/AMENDMENTS.md`. `skill_get` loads those notes after the
 stable instructions and reports a content revision. A reviser proposal records
-that revision; approval refuses to clear the file if a newer amendment arrived
+that revision; installation refuses to clear the file if a newer amendment arrived
 after review. Successful consolidation rewrites the complete `SKILL.md`, bumps
-its patch version, and removes the incorporated amendments. In a Git-backed
-workspace the SKILL.md replacement and amendment removal appear together in the
-same reviewed change; locked instances continue to require their normal PR flow.
+its version, and removes the incorporated amendments. In a verified config
+repository Git provenance is available; it is not automatic history. Locked
+instances continue to require their normal reviewed config-PR flow.
 
 ## Persistent Timers
 

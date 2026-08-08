@@ -260,15 +260,15 @@ async def plan_approve_handler(ctx: ToolContext, args: dict) -> ToolResult:
         )
         if plan_type == "skill-create":
             prompt += (
-                "The plan contains a skill specification. "
-                "Use the `skill_create` tool to create the skill. "
-                "Extract the name, description, and content from the plan. "
-                "If the plan contains a full SKILL.md with frontmatter, parse out the name and description "
-                "from the frontmatter and use the body as the content.\n"
+                "Load `nerve-skill-development` before applying the proposal. The plan contains a skill "
+                "specification: validate and forward-test its complete canonical package. Use `skill_create` "
+                "only for a simple Nerve-only package with default metadata; use `propose_config_change` for "
+                "dependencies, resources, agents/openai.yaml, or lockdown. Do not discard canonical metadata "
+                "or resources merely to fit the create tool.\n"
             )
         else:
             prompt += (
-                "The plan contains a skill revision. "
+                "Load `nerve-skill-development` before applying the proposal. The plan contains a skill revision. "
                 "Reload the target skill with `skill_get` immediately before applying it. "
                 "Use the `skill_update` tool to update the existing skill. "
                 "Pass the skill ID (directory name) as the name parameter and the full SKILL.md content "
@@ -277,7 +277,8 @@ async def plan_approve_handler(ctx: ToolContext, args: dict) -> ToolResult:
                 "still match the revision shown by skill_get; pass clear_amendments=true and that "
                 "revision as amendments_revision. If it changed, do not update or clear anything: "
                 "leave a task note saying that the proposal is stale and needs revision. If the plan "
-                "states that there were no amendments, update without clearing amendments.\n"
+                "states that there were no amendments, update without clearing amendments. Preserve dependencies, "
+                "resources, and sidecars unless their reviewed proposal changes them.\n"
             )
         prompt += (
             "\nAfter the skill is created/updated, mark the task as done using "

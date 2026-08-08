@@ -346,15 +346,16 @@ SKILL_CREATE_SPEC = ToolSpec(
     name="skill_create",
     description=(
         "Create a new skill. Use this to codify a reusable workflow, procedure, or domain knowledge "
-        "into a skill that persists across sessions.\n\n"
+        "into a skill that persists across sessions. For non-trivial authoring, first load the "
+        "nerve-skill-development runbook.\n\n"
         "When to create a skill:\n"
         "- You notice a multi-step workflow being repeated across sessions\n"
         "- The user asks you to 'remember how to do X' for a procedural task\n"
         "- You've built up domain-specific knowledge that future sessions would need\n"
         "- A complex task would benefit from step-by-step instructions\n\n"
-        "The skill is written as a SKILL.md file with YAML frontmatter (name, description) "
-        "and a markdown body containing instructions. Write the description in third person "
-        "with specific trigger phrases."
+        "This tool creates only a simple Nerve-only canonical package with default metadata. "
+        "Use a reviewed config PR for dependencies, bundled resources, dual-use agents/openai.yaml, "
+        "or a locked workspace. Validate and forward-test the resulting package before relying on it."
     ),
     input_schema=SKILL_CREATE_SCHEMA,
     handler=skill_create_handler,
@@ -367,7 +368,8 @@ SKILL_AMEND_SPEC = ToolSpec(
         "Use after applying a skill when repository evidence shows that its instructions "
         "are incomplete or inaccurate. Record observations and concrete evidence, not "
         "speculation, secrets, transient failures, or one-off task state. The weekly "
-        "skill-reviser consolidates pending amendments into a reviewed SKILL.md revision."
+        "skill-reviser consolidates pending amendments into a reviewed SKILL.md revision. For a "
+        "non-trivial policy or package change, load nerve-skill-development and prepare a full revision instead."
     ),
     input_schema=SKILL_AMEND_SCHEMA,
     handler=skill_amend_handler,
@@ -378,8 +380,11 @@ SKILL_UPDATE_SPEC = ToolSpec(
     description=(
         "Update an existing skill's SKILL.md content. Use this to refine, fix, or extend a skill "
         "based on new knowledge or after discovering the current instructions are incomplete.\n\n"
-        "The content parameter should be the FULL SKILL.md file including the YAML frontmatter "
-        "(--- delimited block with name and description) and the markdown body."
+        "First load nerve-skill-development for a non-trivial revision, reload the skill with skill_get, "
+        "and preserve its canonical metadata, dependencies, resources, and sidecars unless explicitly reviewed. "
+        "The content parameter must be the FULL canonical SKILL.md file; expected_skill_revision must be the "
+        "current token from skill_get. Changed content requires a monotonic SemVer bump. When consolidating "
+        "amendments, pass their current amendments_revision; stale tokens require re-review."
     ),
     input_schema=SKILL_UPDATE_SCHEMA,
     handler=skill_update_handler,

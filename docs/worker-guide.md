@@ -129,7 +129,7 @@ Workers create their own skills during onboarding and refine them over time.
 - `skill-extractor` (every 12h) — watches for repeated workflows in conversations and completed tasks, proposes new skills via task+plan
 - `skill-reviser` (weekly) — reviews existing skills for accuracy, completeness, and quality, proposes revisions
 
-When a skill-related plan is approved, the plan approval handler creates/updates the skill directly from the plan content (no implementation session needed — the plan IS the skill).
+When a skill-related plan is approved, the normal plan approval handler starts an implementation session. That session reloads current tokens, validates the full package, and applies the supported mutation path or reviewed config PR; the approved plan is not installed directly.
 
 ## Running Multiple Workers
 
