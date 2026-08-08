@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from nerve.gateway.auth import require_auth
 from nerve.gateway.routes._deps import get_deps
-from nerve.skills.manager import SkillValidationError
+from nerve.skills.manager import SkillUpdateConflict, SkillValidationError
 
 router = APIRouter()
 
@@ -21,6 +21,9 @@ class SkillCreateRequest(BaseModel):
 
 class SkillUpdateRequest(BaseModel):
     content: str
+    expected_skill_revision: str
+    clear_amendments: bool = False
+    amendments_revision: str = ""
 
 
 class SkillToggleRequest(BaseModel):
@@ -115,6 +118,7 @@ async def get_skill_detail(skill_id: str, user: dict = Depends(require_auth)):
         "references": refs,
         "pending_amendments": amendments,
         "amendments_revision": amendments_revision,
+        "skill_revision": skill.skill_revision,
         "stats": stats[0] if stats else {"total_invocations": 0, "success_count": 0, "avg_duration_ms": None, "last_used": None},
         "recent_usage": usage,
         "created_at": db_row.get("created_at") if db_row else None,
@@ -145,7 +149,16 @@ async def update_skill(skill_id: str, req: SkillUpdateRequest, user: dict = Depe
     """Update a skill's SKILL.md content."""
     mgr = _require_skill_manager()
     try:
-        skill = await mgr.update_skill(skill_id, req.content)
+        skill = await mgr.update_skill(
+            skill_id, req.content,
+            expected_skill_revision=req.expected_skill_revision,
+            clear_amendments=req.clear_amendments,
+            amendments_revision=req.amendments_revision,
+        )
+    except SkillUpdateConflict as exc:
+        raise HTTPException(
+            status_code=409, detail={"code": exc.code, "message": str(exc)},
+        ) from exc
     except SkillValidationError as exc:
         raise HTTPException(
             status_code=422, detail=[issue.to_dict() for issue in exc.issues],
@@ -154,7 +167,12 @@ async def update_skill(skill_id: str, req: SkillUpdateRequest, user: dict = Depe
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if not skill:
         raise HTTPException(status_code=404, detail="Skill not found")
-    return {"id": skill.id, "name": skill.name, "updated": True}
+    return {
+        "id": skill.id, "name": skill.name,
+        "updated": skill.update_outcome == "updated",
+        "outcome": skill.update_outcome,
+        "skill_revision": skill.skill_revision,
+    }
 
 
 @router.delete("/api/skills/{skill_id}")

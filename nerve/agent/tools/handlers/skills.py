@@ -18,7 +18,7 @@ from nerve.agent.tools.schemas import (
     SKILL_RUN_SCRIPT_SCHEMA,
     SKILL_UPDATE_SCHEMA,
 )
-from nerve.skills.manager import AMENDMENTS_REFERENCE
+from nerve.skills.manager import AMENDMENTS_REFERENCE, SkillUpdateConflict
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +83,7 @@ async def skill_get_handler(ctx: ToolContext, args: dict) -> ToolResult:
 
         bundle = resolution.bundle
         parts = [f"# Skill: {skill.name} (v{skill.version})\n"]
+        parts.append(f"Installed skill revision: `{skill.skill_revision}`\n")
 
         for bundled in bundle:
             if bundled.id != skill_id:
@@ -282,6 +283,7 @@ async def skill_update_handler(ctx: ToolContext, args: dict) -> ToolResult:
         meta = await ctx.skill_manager.update_skill(
             skill_id,
             content,
+            expected_skill_revision=args["expected_skill_revision"],
             clear_amendments=args.get("clear_amendments", False),
             amendments_revision=args.get("amendments_revision", ""),
         )
@@ -291,12 +293,23 @@ async def skill_update_handler(ctx: ToolContext, args: dict) -> ToolResult:
         await ctx.skill_manager.record_usage(
             skill_id=skill_id, invoked_by="model", success=True,
         )
+        if meta.update_outcome == "no_op":
+            return ToolResult.text(
+                f"Skill unchanged (no-op): **{meta.name}** (`{meta.id}`) v{meta.version}. "
+                f"Revision: `{meta.skill_revision}`"
+            )
         return ToolResult.text(
-            f"Skill updated: **{meta.name}** (`{meta.id}`) v{meta.version}"
+            f"Skill updated: **{meta.name}** (`{meta.id}`) v{meta.version}. "
+            f"Revision: `{meta.skill_revision}`"
+        )
+    except SkillUpdateConflict as e:
+        logger.info("skill_update rejected (%s): %s", e.code, e)
+        return ToolResult.text(
+            f"Skill update rejected [{e.code}]: {e}", is_error=True,
         )
     except Exception as e:
         logger.error("skill_update failed: %s", e)
-        return ToolResult.text(f"Error updating skill: {e}")
+        return ToolResult.text(f"Error updating skill: {e}", is_error=True)
 
 
 SKILL_LIST_SPEC = ToolSpec(

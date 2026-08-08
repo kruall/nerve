@@ -678,8 +678,11 @@ export const api = {
   getSkill: (id: string) => request<any>(`/skills/${encodeURIComponent(id)}`),
   createSkill: (data: { name: string; description: string; content?: string; version?: string }) =>
     request<any>('/skills', { method: 'POST', body: JSON.stringify(data) }),
-  updateSkill: (id: string, content: string) =>
-    request<any>(`/skills/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ content }) }),
+  updateSkill: (id: string, content: string, expectedSkillRevision: string) =>
+    request<any>(`/skills/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ content, expected_skill_revision: expectedSkillRevision }),
+    }),
   deleteSkill: (id: string) =>
     request<any>(`/skills/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   toggleSkill: (id: string, enabled: boolean) =>

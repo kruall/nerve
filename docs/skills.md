@@ -124,6 +124,22 @@ they are migrated. Migrate fields into `metadata.nerve` and make `name` match
 the directory on the next update. Discovery never rewrites user or third-party
 skills; use its diagnostics as the migration report.
 
+Every loaded skill exposes `skill_revision`, the full SHA-256 digest of the
+exact installed `SKILL.md` bytes. Resources do not participate in this token.
+Every replacement must pass that token as `expected_skill_revision`; stale
+tokens are rejected before filesystem or registry changes. Consolidation also
+passes the independent `amendments_revision`, so new append-only notes cannot
+be cleared by an older review.
+
+Versions use strict SemVer (`MAJOR.MINOR.PATCH`, with optional prerelease/build
+metadata). A content-changing replacement must compare greater than the
+installed version. An exact-content replacement is a no-op: it preserves the
+file, amendments, registry timestamps, and version. Updates use a durable local
+journal; interrupted transitions are rolled back before discovery or the next
+update. For emergency repair, edit `SKILL.md` manually under explicit operator
+authorization and run skill sync. That repair invalidates every previously
+issued revision token; normal API and MCP writes never bypass CAS.
+
 Invalid IDs, duplicate edges, required/suggested conflicts, self-dependencies,
 conditional required edges, unsupported fields, and malformed group types are
 reported in `skill_get`, the skill HTTP detail response, and the web skill page.

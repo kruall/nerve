@@ -50,6 +50,8 @@ export interface SkillDependencyResolution {
 }
 
 export interface SkillDetail extends Skill {
+  skill_revision: string;
+  amendments_revision: string;
   content: string;
   raw: string;
   has_references: boolean;
@@ -86,12 +88,13 @@ interface SkillsState {
   loading: boolean;
   detailLoading: boolean;
   actionLoading: boolean;
+  actionError: string | null;
   showCreateDialog: boolean;
 
   loadSkills: () => Promise<void>;
   loadSkill: (id: string) => Promise<void>;
   createSkill: (data: { name: string; description: string; content?: string }) => Promise<string | null>;
-  updateSkill: (id: string, content: string) => Promise<void>;
+  updateSkill: (id: string, content: string, expectedSkillRevision: string) => Promise<boolean>;
   deleteSkill: (id: string) => Promise<void>;
   toggleSkill: (id: string, enabled: boolean) => Promise<void>;
   syncSkills: () => Promise<void>;
@@ -105,6 +108,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
   loading: true,
   detailLoading: false,
   actionLoading: false,
+  actionError: null,
   showCreateDialog: false,
 
   loadSkills: async () => {
@@ -142,15 +146,18 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     }
   },
 
-  updateSkill: async (id: string, content: string) => {
-    set({ actionLoading: true });
+  updateSkill: async (id: string, content: string, expectedSkillRevision: string) => {
+    set({ actionLoading: true, actionError: null });
     try {
-      await api.updateSkill(id, content);
+      await api.updateSkill(id, content, expectedSkillRevision);
       // Refresh detail
       await get().loadSkill(id);
       await get().loadSkills();
+      return true;
     } catch (e) {
       console.error('Failed to update skill:', e);
+      set({ actionError: e instanceof Error ? e.message : 'Skill update failed' });
+      return false;
     } finally {
       set({ actionLoading: false });
     }
@@ -197,5 +204,5 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
   },
 
   setShowCreateDialog: (show: boolean) => set({ showCreateDialog: show }),
-  clearSelectedSkill: () => set({ selectedSkill: null }),
+  clearSelectedSkill: () => set({ selectedSkill: null, actionError: null }),
 }));

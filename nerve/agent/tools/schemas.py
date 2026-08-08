@@ -744,6 +744,13 @@ SKILL_UPDATE_SCHEMA = {
             "type": "string",
             "description": "Full SKILL.md content (frontmatter + body)",
         },
+        "expected_skill_revision": {
+            "type": "string",
+            "description": (
+                "Exact installed SKILL.md revision shown by skill_get. Required for every "
+                "replacement; stale revisions are rejected before any write."
+            ),
+        },
         "clear_amendments": {
             "type": "boolean",
             "description": (
@@ -761,7 +768,7 @@ SKILL_UPDATE_SCHEMA = {
             "default": "",
         },
     },
-    "required": ["name", "content"],
+    "required": ["name", "content", "expected_skill_revision"],
 }
 
 # ----- Notification tools -----

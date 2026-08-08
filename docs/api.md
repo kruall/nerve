@@ -428,11 +428,16 @@ Response: { "id": "code-review", "name": "code-review", "created": true }
 Update a skill's SKILL.md content (full raw file including frontmatter).
 
 The complete replacement is validated before the current file or registry is
-changed. Invalid YAML and schema errors return `422` with structured diagnostics.
+changed. `expected_skill_revision` is required and comes from the detail
+response. A stale skill or amendments token returns `409` and changes nothing.
+Invalid YAML, invalid/non-increasing SemVer, and schema errors return `422`.
+An exact replacement returns `outcome: "no_op"` without changing files or DB
+metadata. `clear_amendments` additionally requires the exact reviewed
+`amendments_revision`.
 
 ```json
-Request:  { "content": "---\nname: code-review\ndescription: ...\n---\n\n# Instructions\n..." }
-Response: { "id": "code-review", "name": "code-review", "updated": true }
+Request:  { "content": "---\nname: code-review\ndescription: ...\nmetadata:\n  nerve:\n    version: 1.0.1\n---\n\n# Instructions\n...", "expected_skill_revision": "<sha256>" }
+Response: { "id": "code-review", "name": "code-review", "updated": true, "outcome": "updated", "skill_revision": "<sha256>" }
 ```
 
 #### `DELETE /api/skills/{id}`

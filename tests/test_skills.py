@@ -1,5 +1,7 @@
 """Skill amendments and dependency composition."""
 
+import asyncio
+
 from pathlib import Path
 from types import SimpleNamespace
 from types import SimpleNamespace
@@ -8,14 +10,23 @@ import pytest
 
 from nerve.agent.tools.handlers.skills import skill_get_handler
 from nerve.agent.tools.registry import ToolContext
+from nerve.agent.tools.schemas import SKILL_UPDATE_SCHEMA, TASK_WRITE_SCHEMA
 from nerve.gateway.routes.skills import get_skill_detail
-from nerve.skills.manager import AMENDMENTS_REFERENCE, SkillManager
+from nerve.skills.manager import (
+    AMENDMENTS_REFERENCE, SkillManager, SkillUpdateConflict, skill_revision,
+)
 
 
 def _write_skill(workspace: Path, skill_id: str, raw: str) -> None:
     skill_dir = workspace / "skills" / skill_id
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(raw, encoding="utf-8")
+
+
+def test_skill_update_schema_requires_revision_on_the_correct_tool():
+    assert "expected_skill_revision" in SKILL_UPDATE_SCHEMA["properties"]
+    assert "expected_skill_revision" in SKILL_UPDATE_SCHEMA["required"]
+    assert "expected_skill_revision" not in TASK_WRITE_SCHEMA["properties"]
 
 
 def _raw_skill(name: str, body: str, *, version: str = "1.0.0", extra: str = "") -> str:
@@ -33,6 +44,19 @@ def _raw_skill(name: str, body: str, *, version: str = "1.0.0", extra: str = "")
         "---\n\n"
         f"{body}\n"
     )
+
+
+@pytest.mark.asyncio
+async def test_skill_revision_hashes_exact_installed_bytes(tmp_path, db):
+    workspace = tmp_path / "ws"
+    raw = _raw_skill("demo", "Instructions.").replace("\n", "\r\n")
+    _write_skill(workspace, "demo", raw)
+    manager = SkillManager(workspace, db)
+    await manager.discover()
+    loaded = await manager.get_skill("demo")
+    assert loaded is not None
+    assert loaded.raw == raw
+    assert loaded.skill_revision == skill_revision(raw.encode("utf-8"))
 
 
 @pytest.mark.asyncio
@@ -206,18 +230,27 @@ async def test_required_dependency_must_be_enabled_and_model_invocable(tmp_path,
     assert [issue.code for issue in disabled.errors] == ["required_dependency_disabled"]
 
     await reloaded.toggle_skill("dependency", True)
+    dependency = await reloaded.get_skill("dependency")
+    assert dependency is not None
     await reloaded.update_skill(
         "dependency",
         _raw_skill(
-            "dependency", "Dependency", extra="disable-model-invocation: true\n"
+            "dependency", "Dependency", version="1.0.1",
+            extra="disable-model-invocation: true\n"
         ),
+        expected_skill_revision=dependency.skill_revision,
     )
     not_invocable = await reloaded.resolve_required_dependencies("root")
     assert [issue.code for issue in not_invocable.errors] == [
         "required_dependency_not_model_invocable"
     ]
 
-    await reloaded.update_skill("dependency", _raw_skill("dependency", "Dependency"))
+    dependency = await reloaded.get_skill("dependency")
+    assert dependency is not None
+    await reloaded.update_skill(
+        "dependency", _raw_skill("dependency", "Dependency", version="1.0.2"),
+        expected_skill_revision=dependency.skill_revision,
+    )
     assert (await reloaded.resolve_required_dependencies("root")).ok
 
 
@@ -382,9 +415,12 @@ async def test_append_amendment_is_loaded_but_not_listed_as_reference(
         {"name": "demo"},
     )
     text = result.content[0]["text"]
+    installed = await manager.get_skill("demo")
+    assert installed is not None
 
     assert amendment_id in text
     assert revision in text
+    assert installed.skill_revision in text
     assert "Prefer the repository wrapper" in text
     assert "scripts/dev:42" in text
     assert "`DETAILS.md`" in text
@@ -407,11 +443,15 @@ async def test_consolidation_refuses_stale_amendments_revision(tmp_path, db, mon
     await manager.append_amendment(
         "demo", title="Second", observation="Observed second.", change="Apply second."
     )
+    row_before_stale = await db.get_skill_row("demo")
 
     replacement = _raw_skill("demo", "Consolidated instructions.", version="1.0.1")
+    installed = await manager.get_skill("demo")
+    assert installed is not None
     with pytest.raises(ValueError, match="pending amendments changed"):
         await manager.update_skill(
             "demo", replacement,
+            expected_skill_revision=installed.skill_revision,
             clear_amendments=True,
             amendments_revision=stale_revision,
         )
@@ -420,10 +460,12 @@ async def test_consolidation_refuses_stale_amendments_revision(tmp_path, db, mon
     amendments_path = workspace / "skills" / "demo" / "references" / AMENDMENTS_REFERENCE
     assert skill_path.read_text(encoding="utf-8") == original
     assert amendments_path.exists()
+    assert await db.get_skill_row("demo") == row_before_stale
 
     current_revision = await manager.amendments_revision("demo")
     updated = await manager.update_skill(
         "demo", replacement,
+        expected_skill_revision=installed.skill_revision,
         clear_amendments=True,
         amendments_revision=current_revision,
     )
@@ -431,6 +473,142 @@ async def test_consolidation_refuses_stale_amendments_revision(tmp_path, db, mon
     assert updated.version == "1.0.1"
     assert skill_path.read_text(encoding="utf-8") == replacement
     assert not amendments_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_skill_replacements_allow_only_one_writer(tmp_path, db, monkeypatch):
+    monkeypatch.setattr("nerve.config._config", None)
+    workspace = tmp_path / "ws"
+    original = _raw_skill("demo", "Original.")
+    _write_skill(workspace, "demo", original)
+    manager = SkillManager(workspace, db)
+    await manager.discover()
+    installed = await manager.get_skill("demo")
+    assert installed is not None
+
+    async def replace(body: str):
+        return await manager.update_skill(
+            "demo", _raw_skill("demo", body, version="1.0.1"),
+            expected_skill_revision=installed.skill_revision,
+        )
+
+    results = await asyncio.gather(replace("Writer A."), replace("Writer B."), return_exceptions=True)
+    assert sum(not isinstance(result, BaseException) for result in results) == 1
+    conflicts = [result for result in results if isinstance(result, SkillUpdateConflict)]
+    assert len(conflicts) == 1
+    assert conflicts[0].code == "stale_skill_revision"
+    raw = (workspace / "skills" / "demo" / "SKILL.md").read_text(encoding="utf-8")
+    assert raw in {_raw_skill("demo", "Writer A.", version="1.0.1"), _raw_skill("demo", "Writer B.", version="1.0.1")}
+
+
+@pytest.mark.asyncio
+async def test_stale_skill_revision_changes_no_files_or_metadata(tmp_path, db, monkeypatch):
+    monkeypatch.setattr("nerve.config._config", None)
+    workspace = tmp_path / "ws"
+    original = _raw_skill("demo", "Original.")
+    _write_skill(workspace, "demo", original)
+    manager = SkillManager(workspace, db)
+    await manager.discover()
+    original_row = await db.get_skill_row("demo")
+
+    with pytest.raises(SkillUpdateConflict) as stale:
+        await manager.update_skill(
+            "demo", _raw_skill("demo", "Replacement.", version="1.0.1"),
+            expected_skill_revision="0" * 64,
+        )
+    assert stale.value.code == "stale_skill_revision"
+    assert (workspace / "skills" / "demo" / "SKILL.md").read_text(encoding="utf-8") == original
+    assert await db.get_skill_row("demo") == original_row
+
+
+@pytest.mark.asyncio
+async def test_update_noop_and_version_lifecycle(tmp_path, db, monkeypatch):
+    monkeypatch.setattr("nerve.config._config", None)
+    workspace = tmp_path / "ws"
+    original = _raw_skill("demo", "Original.")
+    _write_skill(workspace, "demo", original)
+    manager = SkillManager(workspace, db)
+    await manager.discover()
+    before = await db.get_skill_row("demo")
+
+    no_op = await manager.update_skill(
+        "demo", original, expected_skill_revision=skill_revision(original),
+    )
+    assert no_op is not None and no_op.update_outcome == "no_op"
+    assert await db.get_skill_row("demo") == before
+
+    for version in ("1.0.0", "0.9.9"):
+        with pytest.raises(ValueError, match="increase monotonically"):
+            await manager.update_skill(
+                "demo", _raw_skill("demo", "Changed.", version=version),
+                expected_skill_revision=skill_revision(original),
+            )
+    with pytest.raises(ValueError, match="invalid semantic version"):
+        await manager.update_skill(
+            "demo", _raw_skill("demo", "Changed.", version="v2"),
+            expected_skill_revision=skill_revision(original),
+        )
+
+
+@pytest.mark.asyncio
+async def test_db_failure_rolls_back_skill_and_amendments(tmp_path, db, monkeypatch):
+    monkeypatch.setattr("nerve.config._config", None)
+    workspace = tmp_path / "ws"
+    original = _raw_skill("demo", "Original.")
+    _write_skill(workspace, "demo", original)
+    manager = SkillManager(workspace, db)
+    await manager.discover()
+    await manager.append_amendment(
+        "demo", title="Reviewed", observation="Observed.", change="Change.",
+    )
+    amendments_revision = await manager.amendments_revision("demo")
+    amendments_path = workspace / "skills" / "demo" / "references" / AMENDMENTS_REFERENCE
+    amendments_before = amendments_path.read_text(encoding="utf-8")
+    installed = await manager.get_skill("demo")
+    assert installed is not None
+    original_row = await db.get_skill_row("demo")
+
+    async def fail_upsert(**kwargs):
+        raise RuntimeError("injected DB failure")
+    monkeypatch.setattr(db, "upsert_skill", fail_upsert)
+    with pytest.raises(RuntimeError, match="injected DB failure"):
+        await manager.update_skill(
+            "demo", _raw_skill("demo", "Replacement.", version="1.0.1"),
+            expected_skill_revision=installed.skill_revision,
+            clear_amendments=True, amendments_revision=amendments_revision,
+        )
+    assert (workspace / "skills" / "demo" / "SKILL.md").read_text(encoding="utf-8") == original
+    assert amendments_path.read_text(encoding="utf-8") == amendments_before
+    assert await db.get_skill_row("demo") == original_row
+
+
+@pytest.mark.asyncio
+async def test_discovery_recovers_interrupted_update_journal(tmp_path, db):
+    workspace = tmp_path / "ws"
+    original = _raw_skill("demo", "Original.")
+    replacement = _raw_skill("demo", "Replacement.", version="1.0.1")
+    _write_skill(workspace, "demo", original)
+    skill_dir = workspace / "skills" / "demo"
+    amendments = skill_dir / "references" / AMENDMENTS_REFERENCE
+    amendments.parent.mkdir()
+    amendments_before = "# Pending amendments\n\nReviewed note.\n"
+    amendments.write_text(amendments_before, encoding="utf-8")
+
+    # State after filesystem installation but before DB commit/cleanup.
+    (skill_dir / ".SKILL.md.rollback").write_text(original, encoding="utf-8")
+    (skill_dir / ".AMENDMENTS.md.rollback").write_text(amendments_before, encoding="utf-8")
+    (skill_dir / ".skill-update.json").write_text(
+        '{"had_amendments": true}', encoding="utf-8",
+    )
+    (skill_dir / "SKILL.md").write_text(replacement, encoding="utf-8")
+    amendments.unlink()
+
+    manager = SkillManager(workspace, db)
+    discovered = await manager.discover()
+    assert [skill.version for skill in discovered] == ["1.0.0"]
+    assert (skill_dir / "SKILL.md").read_text(encoding="utf-8") == original
+    assert amendments.read_text(encoding="utf-8") == amendments_before
+    assert not (skill_dir / ".skill-update.json").exists()
 
 
 @pytest.mark.asyncio
@@ -489,12 +667,16 @@ async def test_invalid_update_and_duplicate_create_are_atomic(tmp_path, db):
     original_row = await db.get_skill_row(created.id)
 
     with pytest.raises(ValueError, match="frontmatter"):
-        await manager.update_skill(created.id, "---\nname: demo-skill\nnot: [yaml\n---\nBad")
+        await manager.update_skill(
+            created.id, "---\nname: demo-skill\nnot: [yaml\n---\nBad",
+            expected_skill_revision=created.skill_revision,
+        )
     with pytest.raises(ValueError, match="must match skill directory"):
         await manager.update_skill(
             created.id,
             "---\nname: other-skill\ndescription: Wrong name.\nmetadata:\n"
             "  nerve:\n    version: 1.0.0\n---\n",
+            expected_skill_revision=created.skill_revision,
         )
     with pytest.raises(FileExistsError):
         await manager.create_skill("demo skill", "Replacement")
@@ -567,7 +749,10 @@ async def test_http_skill_writes_return_structured_validation_errors(tmp_path, d
     with pytest.raises(HTTPException) as invalid:
         await routes.update_skill(
             "http-skill",
-            routes.SkillUpdateRequest(content="---\nname: http-skill\ndescription: [bad\n---\n"),
+            routes.SkillUpdateRequest(
+                content="---\nname: http-skill\ndescription: [bad\n---\n",
+                expected_skill_revision=(await manager.get_skill("http-skill")).skill_revision,
+            ),
             user={},
         )
     assert invalid.value.status_code == 422

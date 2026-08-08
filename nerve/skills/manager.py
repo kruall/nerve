@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -42,6 +43,14 @@ MAX_DEPENDENCIES = 20
 MAX_DESCRIPTION_LENGTH = 1024
 _CANONICAL_SKILL_NAME_RE = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*\Z")
 _RESOURCE_DIRS = ("references", "scripts", "assets", "agents")
+_SEMVER_RE = re.compile(
+    r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    r"(?:-((?:0|[1-9]\d*|[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[A-Za-z-][0-9A-Za-z-]*))*))?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\Z"
+)
+_UPDATE_JOURNAL = ".skill-update.json"
+_UPDATE_OLD_SKILL = ".SKILL.md.rollback"
+_UPDATE_OLD_AMENDMENTS = ".AMENDMENTS.md.rollback"
 
 
 @dataclass(frozen=True)
@@ -99,6 +108,33 @@ class SkillValidationError(ValueError):
         super().__init__("; ".join(issue.message for issue in issues))
 
 
+class SkillUpdateConflict(ValueError):
+    """A replacement was prepared from stale installed state."""
+
+    def __init__(self, code: str, message: str):
+        self.code = code
+        super().__init__(message)
+
+
+def skill_revision(raw: str | bytes) -> str:
+    """Stable revision of the exact installed SKILL.md bytes."""
+    payload = raw if isinstance(raw, bytes) else raw.encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _semver_key(value: str) -> tuple[int, int, int, tuple[tuple[int, object], ...]]:
+    match = _SEMVER_RE.fullmatch(value)
+    if not match:
+        raise ValueError(f"invalid semantic version {value!r}; expected SemVer MAJOR.MINOR.PATCH")
+    prerelease = match.group(4)
+    # A release sorts after all of its prereleases.
+    pre_key: tuple[tuple[int, object], ...] = ((2, ""),) if prerelease is None else tuple(
+        (0, int(part)) if part.isdigit() else (1, part)
+        for part in prerelease.split(".")
+    )
+    return int(match.group(1)), int(match.group(2)), int(match.group(3)), pre_key
+
+
 @dataclass(frozen=True)
 class SuggestedSkillDependency:
     """One advisory edge collected from a successfully resolved bundle."""
@@ -137,6 +173,8 @@ class SkillMeta:
     diagnostics: list[SkillValidationIssue] = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
+    skill_revision: str = ""
+    update_outcome: str = "loaded"
 
 
 @dataclass
@@ -624,6 +662,13 @@ def validate_skill_package(
         issues.append(SkillValidationIssue(
             "invalid_nerve_version", "metadata.nerve.version must be non-empty text", ("metadata", "nerve", "version"),
         ))
+    else:
+        try:
+            _semver_key(version.strip())
+        except ValueError as exc:
+            issues.append(SkillValidationIssue(
+                "invalid_nerve_version", str(exc), ("metadata", "nerve", "version"),
+            ))
     if context is not None and not isinstance(context, str):
         issues.append(SkillValidationIssue(
             "invalid_nerve_context", "metadata.nerve.context must be text", ("metadata", "nerve", "context"),
@@ -729,7 +774,7 @@ class SkillManager:
 
     def _meta_from_package(
         self, package: NormalizedSkillPackage, *, enabled: bool,
-        skill_dir: Path,
+        skill_dir: Path, raw: str = "",
     ) -> SkillMeta:
         """Build index metadata from the shared normalized package model."""
         known_keys = {
@@ -752,7 +797,32 @@ class SkillManager:
             has_assets=(skill_dir / "assets").is_dir(),
             metadata=extra_meta, schema_source=package.schema_source,
             diagnostics=package.diagnostics,
+            skill_revision=skill_revision(raw) if raw else "",
         )
+
+    @staticmethod
+    def _recover_update(skill_dir: Path) -> bool:
+        """Rollback an interrupted filesystem transition before indexing it."""
+        journal = skill_dir / _UPDATE_JOURNAL
+        if not journal.exists():
+            return False
+        skill_md = skill_dir / "SKILL.md"
+        old_skill = skill_dir / _UPDATE_OLD_SKILL
+        old_amendments = skill_dir / _UPDATE_OLD_AMENDMENTS
+        amendments = skill_dir / "references" / AMENDMENTS_REFERENCE
+        if old_skill.exists():
+            os.replace(old_skill, skill_md)
+        try:
+            data = json.loads(journal.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {"had_amendments": old_amendments.exists()}
+        if data.get("had_amendments") and old_amendments.exists():
+            amendments.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(old_amendments, amendments)
+        old_amendments.unlink(missing_ok=True)
+        journal.unlink(missing_ok=True)
+        logger.warning("Recovered interrupted skill update for %s", skill_dir.name)
+        return True
 
     async def discover(self) -> list[SkillMeta]:
         """Scan skills_dir for SKILL.md files, parse frontmatter, sync to DB.
@@ -761,6 +831,9 @@ class SkillManager:
         that no longer exist on the filesystem.
         """
         await asyncio.to_thread(self.skills_dir.mkdir, parents=True, exist_ok=True)
+        for skill_dir in await asyncio.to_thread(lambda: list(self.skills_dir.iterdir())):
+            if skill_dir.is_dir():
+                await asyncio.to_thread(self._recover_update, skill_dir)
         discovered: list[SkillMeta] = []
         found_ids: set[str] = set()
         self._cache.clear()
@@ -776,7 +849,7 @@ class SkillManager:
                 if not smd.exists():
                     continue
                 try:
-                    out.append((sdir, smd.read_text(encoding="utf-8")))
+                    out.append((sdir, smd.read_bytes().decode("utf-8")))
                 except OSError as e:
                     logger.error("Failed to read skill %s: %s", sdir.name, e)
             return out
@@ -790,7 +863,7 @@ class SkillManager:
                 existing = await self.db.get_skill_row(skill_id)
                 enabled = existing["enabled"] if existing else True
                 package = validate_skill_package(raw, skill_id, skill_dir=skill_dir)
-                meta = self._meta_from_package(package, enabled=enabled, skill_dir=skill_dir)
+                meta = self._meta_from_package(package, enabled=enabled, skill_dir=skill_dir, raw=raw)
                 discovered.append(meta)
                 self._cache[skill_id] = meta
                 self._diagnostics[skill_id] = meta.diagnostics
@@ -841,7 +914,7 @@ class SkillManager:
         if not skill_md.exists():
             return None
 
-        raw = await asyncio.to_thread(skill_md.read_text, encoding="utf-8")
+        raw = (await asyncio.to_thread(skill_md.read_bytes)).decode("utf-8")
 
         # Get metadata from cache or DB
         cached = self._cache.get(skill_id)
@@ -863,6 +936,7 @@ class SkillManager:
                 diagnostics=list(cached.diagnostics),
                 created_at=cached.created_at,
                 updated_at=cached.updated_at,
+                skill_revision=skill_revision(raw),
                 content=_parse_skill_md_strict(raw)[1],
                 raw=raw,
             )
@@ -875,7 +949,7 @@ class SkillManager:
             return None
         db_row = await self.db.get_skill_row(skill_id)
         meta = self._meta_from_package(
-            package, enabled=db_row["enabled"] if db_row else True, skill_dir=skill_dir,
+            package, enabled=db_row["enabled"] if db_row else True, skill_dir=skill_dir, raw=raw,
         )
         self._cache[skill_id] = meta
         self._diagnostics[skill_id] = meta.diagnostics
@@ -913,7 +987,7 @@ class SkillManager:
                 raise
 
         await asyncio.to_thread(_write_skill)
-        meta = self._meta_from_package(package, enabled=True, skill_dir=skill_dir)
+        meta = self._meta_from_package(package, enabled=True, skill_dir=skill_dir, raw=raw)
         await self.db.upsert_skill(
             skill_id=meta.id, name=meta.name, description=meta.description,
             version=meta.version, user_invocable=meta.user_invocable,
@@ -929,6 +1003,7 @@ class SkillManager:
         skill_id: str,
         content: str,
         *,
+        expected_skill_revision: str,
         clear_amendments: bool = False,
         amendments_revision: str = "",
     ) -> SkillMeta | None:
@@ -939,12 +1014,22 @@ class SkillManager:
         if not skill_md.exists():
             return None
 
+        if not expected_skill_revision:
+            raise ValueError("expected_skill_revision is required when replacing a skill")
         # Validate in memory before either SKILL.md or the DB can change.
         package = validate_skill_package(content, skill_id, skill_dir=skill_dir,
                                          allow_legacy=True)
 
         lock = self._amendment_locks.setdefault(skill_id, asyncio.Lock())
         async with lock:
+            await asyncio.to_thread(self._recover_update, skill_dir)
+            current_content = (await asyncio.to_thread(skill_md.read_bytes)).decode("utf-8")
+            current_skill_revision = skill_revision(current_content)
+            if current_skill_revision != expected_skill_revision:
+                raise SkillUpdateConflict(
+                    "stale_skill_revision",
+                    "SKILL.md changed after the replacement was prepared; reload and retry",
+                )
             if clear_amendments:
                 current_revision = await self.amendments_revision(skill_id)
                 if not amendments_revision:
@@ -952,39 +1037,113 @@ class SkillManager:
                         "amendments_revision is required when clear_amendments is true"
                     )
                 if current_revision != amendments_revision:
-                    raise ValueError(
+                    raise SkillUpdateConflict(
+                        "stale_amendments_revision",
                         "pending amendments changed after the consolidated revision was "
                         "prepared; reload the skill and consolidate the new revision"
                     )
 
+            if content == current_content:
+                current = await self.get_skill(skill_id)
+                if current is None:
+                    return None
+                current.update_outcome = "no_op"
+                return current
+
+            current_package = validate_skill_package(
+                current_content, skill_id, skill_dir=skill_dir, allow_legacy=True,
+            )
+            candidate_key = _semver_key(package.version)
+            current_key = _semver_key(current_package.version)
+            if candidate_key <= current_key:
+                raise ValueError(
+                    f"replacement version must increase monotonically: "
+                    f"{package.version!r} is not greater than {current_package.version!r}"
+                )
+
+            amendments = skill_dir / "references" / AMENDMENTS_REFERENCE
             def _replace() -> None:
                 temp = skill_dir / f".SKILL.md.{uuid.uuid4().hex}.tmp"
+                journal_temp = skill_dir / f".{_UPDATE_JOURNAL}.{uuid.uuid4().hex}.tmp"
+                old_skill = skill_dir / _UPDATE_OLD_SKILL
+                old_amendments = skill_dir / _UPDATE_OLD_AMENDMENTS
+                journal = skill_dir / _UPDATE_JOURNAL
+                def durable_write(path: Path, value: bytes) -> None:
+                    with path.open("wb") as handle:
+                        handle.write(value)
+                        handle.flush()
+                        os.fsync(handle.fileno())
                 try:
-                    temp.write_text(content, encoding="utf-8")
+                    durable_write(temp, content.encode("utf-8"))
+                    durable_write(old_skill, current_content.encode("utf-8"))
+                    had_amendments = clear_amendments and amendments.exists()
+                    if had_amendments:
+                        durable_write(old_amendments, amendments.read_bytes())
+                    durable_write(
+                        journal_temp,
+                        json.dumps({"had_amendments": had_amendments}).encode("utf-8"),
+                    )
+                    os.replace(journal_temp, journal)
                     os.replace(temp, skill_md)
+                    if clear_amendments:
+                        amendments.unlink(missing_ok=True)
+                    directory_fd = os.open(skill_dir, os.O_RDONLY)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
                 finally:
                     temp.unlink(missing_ok=True)
+                    journal_temp.unlink(missing_ok=True)
 
-            await asyncio.to_thread(_replace)
-
-            if clear_amendments:
-                amendments = skill_dir / "references" / AMENDMENTS_REFERENCE
-                if amendments.exists():
-                    await asyncio.to_thread(amendments.unlink)
-
-        existing = await self.db.get_skill_row(skill_id)
-        meta = self._meta_from_package(
-            package, enabled=existing["enabled"] if existing else True, skill_dir=skill_dir,
-        )
-        await self.db.upsert_skill(
-            skill_id=meta.id, name=meta.name, description=meta.description,
-            version=meta.version, enabled=meta.enabled,
-            user_invocable=meta.user_invocable, model_invocable=meta.model_invocable,
-            allowed_tools=meta.allowed_tools, metadata=meta.metadata,
-        )
-        self._cache[skill_id] = meta
-        self._diagnostics[skill_id] = meta.diagnostics
-        return meta
+            try:
+                await asyncio.to_thread(_replace)
+            except BaseException:
+                await asyncio.to_thread(self._recover_update, skill_dir)
+                raise
+            existing = await self.db.get_skill_row(skill_id)
+            meta = self._meta_from_package(
+                package, enabled=existing["enabled"] if existing else True,
+                skill_dir=skill_dir, raw=content,
+            )
+            try:
+                await self.db.upsert_skill(
+                    skill_id=meta.id, name=meta.name, description=meta.description,
+                    version=meta.version, enabled=meta.enabled,
+                    user_invocable=meta.user_invocable, model_invocable=meta.model_invocable,
+                    allowed_tools=meta.allowed_tools, metadata=meta.metadata,
+                )
+            except BaseException:
+                await asyncio.to_thread(self._recover_update, skill_dir)
+                # A database adapter may report failure after committing. Best-effort
+                # reindexing restores the old filesystem truth in that case; startup
+                # discovery is the durable fallback if the database is unavailable.
+                try:
+                    old_package = validate_skill_package(
+                        current_content, skill_id, skill_dir=skill_dir,
+                        allow_legacy=True,
+                    )
+                    old_meta = self._meta_from_package(
+                        old_package, enabled=existing["enabled"] if existing else True,
+                        skill_dir=skill_dir, raw=current_content,
+                    )
+                    await self.db.upsert_skill(
+                        skill_id=old_meta.id, name=old_meta.name,
+                        description=old_meta.description, version=old_meta.version,
+                        enabled=old_meta.enabled,
+                        user_invocable=old_meta.user_invocable,
+                        model_invocable=old_meta.model_invocable,
+                        allowed_tools=old_meta.allowed_tools, metadata=old_meta.metadata,
+                    )
+                except Exception:
+                    logger.exception("Failed to reindex rolled-back skill %s", skill_id)
+                raise
+            for path in (_UPDATE_OLD_SKILL, _UPDATE_OLD_AMENDMENTS, _UPDATE_JOURNAL):
+                await asyncio.to_thread((skill_dir / path).unlink, missing_ok=True)
+            meta.update_outcome = "updated"
+            self._cache[skill_id] = meta
+            self._diagnostics[skill_id] = meta.diagnostics
+            return meta
 
     async def delete_skill(self, skill_id: str) -> bool:
         """Remove skill directory and DB record."""

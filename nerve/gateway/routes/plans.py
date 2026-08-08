@@ -196,9 +196,12 @@ async def approve_plan(
         else:
             prompt += (
                 "The plan contains a skill revision. "
+                "Reload the target skill with `skill_get` immediately before applying it. "
                 "Use the `skill_update` tool to update the existing skill. "
                 "Pass the skill ID (directory name) as the name parameter and the full SKILL.md content "
-                "(frontmatter + body).\n"
+                "(frontmatter + body), and pass the installed skill revision shown by skill_get as "
+                "expected_skill_revision. If it is stale, do not retry without re-reviewing the "
+                "replacement.\n"
             )
         prompt += (
             "\nAfter the skill is created/updated, mark the task as done using "

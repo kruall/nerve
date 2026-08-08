@@ -20,7 +20,7 @@ function UsageBar({ total, success }: { total: number; success: number }) {
 export function SkillDetailPage() {
   const { skillId } = useParams<{ skillId: string }>();
   const navigate = useNavigate();
-  const { selectedSkill, detailLoading, actionLoading, loadSkill, updateSkill, deleteSkill, toggleSkill, clearSelectedSkill } = useSkillsStore();
+  const { selectedSkill, detailLoading, actionLoading, actionError, loadSkill, updateSkill, deleteSkill, toggleSkill, clearSelectedSkill } = useSkillsStore();
   const [editContent, setEditContent] = useState('');
   const [hasChanges, setHasChanges] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -39,8 +39,8 @@ export function SkillDetailPage() {
 
   const handleSave = async () => {
     if (!selectedSkill || !hasChanges) return;
-    await updateSkill(selectedSkill.id, editContent);
-    setHasChanges(false);
+    const saved = await updateSkill(selectedSkill.id, editContent, selectedSkill.skill_revision);
+    if (saved) setHasChanges(false);
   };
 
   const handleDelete = async () => {
@@ -124,6 +124,7 @@ export function SkillDetailPage() {
             <FileText size={12} className="text-text-dim" />
             <span className="text-xs text-text-muted">SKILL.md</span>
             {hasChanges && <span className="text-[10px] text-hue-amber">unsaved</span>}
+            {actionError && <span className="text-[10px] text-hue-red">{actionError}</span>}
           </div>
           <textarea
             value={editContent}

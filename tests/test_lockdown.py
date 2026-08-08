@@ -197,7 +197,7 @@ class TestLockdownSkillWrites:
         with pytest.raises(LockdownError):
             await mgr.create_skill("Test", "desc")
         with pytest.raises(LockdownError):
-            await mgr.update_skill("x", "content")
+            await mgr.update_skill("x", "content", expected_skill_revision="revision")
         with pytest.raises(LockdownError):
             await mgr.delete_skill("x")
         with pytest.raises(LockdownError):
@@ -1691,8 +1691,12 @@ class TestSkillIdIsOnePathComponent:
             "---\nname: My Skill\ndescription: d\n---\nbody\n", encoding="utf-8",
         )
         await mgr.discover()
+        loaded = await mgr.get_skill("My_Skill.v2")
+        assert loaded is not None
         assert await mgr.update_skill(
-            "My_Skill.v2", "---\nname: My Skill\ndescription: e\n---\nbody\n",
+            "My_Skill.v2",
+            "---\nname: My Skill\ndescription: e\nversion: 1.0.1\n---\nbody\n",
+            expected_skill_revision=loaded.skill_revision,
         ) is not None
 
 
