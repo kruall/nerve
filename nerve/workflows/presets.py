@@ -158,6 +158,14 @@ class WorkflowPresetCatalog:
         if runner == "agent":
             if not isinstance(spec["model"], str) or not spec["model"]: raise WorkflowPresetError(f"stages[{index}].agent.model must be a non-empty string")
             if not isinstance(spec["sandbox"], str) or not spec["sandbox"]: raise WorkflowPresetError(f"stages[{index}].agent.sandbox must be a non-empty string")
+            if spec["sandbox"] not in {"read-only", "workspace-write"}:
+                raise WorkflowPresetError(f"stages[{index}].agent.sandbox must be read-only or workspace-write")
+            skills = spec.get("skills", [])
+            if not isinstance(skills, list) or not all(isinstance(x, str) and x for x in skills) or len(set(skills)) != len(skills):
+                raise WorkflowPresetError(f"stages[{index}].agent.skills must be a unique non-empty string list")
+            effort = spec.get("reasoning_effort", "")
+            if effort and (not isinstance(effort, str) or not effort.strip()):
+                raise WorkflowPresetError(f"stages[{index}].agent.reasoning_effort must be a string")
             mcp = _obj(spec["mcp"], f"stages[{index}].agent.mcp")
             _fields(mcp, f"stages[{index}].agent.mcp", {"allow"}, {"allow"})
             if not isinstance(mcp["allow"], list) or not all(isinstance(x, str) and "." in x for x in mcp["allow"]):
@@ -183,6 +191,8 @@ class WorkflowPresetCatalog:
             except OperationValidationError as e: raise WorkflowPresetError(str(e)) from e
         inputs, outputs = data.get("inputs", {}), data.get("outputs", {})
         _obj(inputs, f"stages[{index}].inputs"); _obj(outputs, f"stages[{index}].outputs")
+        if runner == "agent" and not outputs:
+            raise WorkflowPresetError(f"stages[{index}].outputs is required for agent stages")
         return WorkflowStage(ident, tuple(deps), runner, MappingProxyType(dict(inputs)), MappingProxyType(dict(outputs)), _positive(data.get("timeout_seconds", 3600), f"stages[{index}].timeout_seconds"), MappingProxyType(dict(spec)))
 
     def _parse(self, path: Path) -> WorkflowPreset:

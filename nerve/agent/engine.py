@@ -1247,12 +1247,13 @@ class AgentEngine:
             # hit the prompt cache (see nerve/agent/cache_policy.py), and a
             # session keeping its original priors is more consistent anyway
             # — live recall stays available via the memory_recall tool.
+            isolated_stage = bool(session_meta.get("isolated_agent_stage"))
             recalled_memories: list[str] = []
             meta_updates: dict[str, Any] = {}
             frozen_recall = session_meta.get("recalled_memories")
             if isinstance(frozen_recall, list):
                 recalled_memories = [str(m) for m in frozen_recall]
-            elif self._memory_bridge and self._memory_bridge.available:
+            elif not isolated_stage and self._memory_bridge and self._memory_bridge.available:
                 try:
                     raw = await self._memory_bridge.recall(
                         f"context for {source} session",
@@ -1309,15 +1310,25 @@ class AgentEngine:
             # frozen recall, skills; the tool list respects the backend's
             # exclusions so the prompt never advertises a tool this
             # session's MCP server doesn't serve).
-            system_prompt = build_system_prompt(
-                workspace=self.config.workspace,
-                session_id=session_id,
-                source=source,
-                timezone_name=self.config.timezone,
-                recalled_memories=recalled_memories or None,
-                skill_summaries=self._collect_skill_summaries(),
-                excluded_tools=backend.excluded_tools(),
-            )
+            if isolated_stage:
+                # The workflow controller supplied the complete StageContext
+                # in the first turn. Ambient identity, memories, skill index,
+                # and conversation history are intentionally absent.
+                system_prompt = (
+                    "You are an isolated workflow agent. Treat the first user "
+                    "message as the complete StageContext; do not use or seek "
+                    "ambient context or expand capabilities."
+                )
+            else:
+                system_prompt = build_system_prompt(
+                    workspace=self.config.workspace,
+                    session_id=session_id,
+                    source=source,
+                    timezone_name=self.config.timezone,
+                    recalled_memories=recalled_memories or None,
+                    skill_summaries=self._collect_skill_summaries(),
+                    excluded_tools=backend.excluded_tools(),
+                )
 
             # Observer sessions of a review loop get a context block so the
             # session's assistant knows its loop from turn one — the

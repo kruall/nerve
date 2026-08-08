@@ -26,6 +26,10 @@ from nerve.workflows.presets import (  # noqa: E402
     ResolvedWorkflowPlan, WorkflowCatalogSnapshot, WorkflowPresetCatalog,
     WorkflowPresetError, WorkflowPresetValidationError,
 )
+from nerve.workflows.stages import (  # noqa: E402
+    AgentStageResolutionError, AgentStageResolver, AgentStageSpec, Capability,
+    ResolvedSkill, StageContext,
+)
 
 
 def init_workflow_run_service(

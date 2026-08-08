@@ -67,11 +67,14 @@ logger = logging.getLogger(__name__)
 
 ENGINE_CLAUDE = "claude-workflow"
 ENGINE_CODEX = "codex-ultracode"
+ENGINE_CODEX_STAGE = "codex-stage"
 # run engine kind -> session backend
-ENGINE_BACKENDS = {ENGINE_CLAUDE: "claude", ENGINE_CODEX: "codex"}
+ENGINE_BACKENDS = {
+    ENGINE_CLAUDE: "claude", ENGINE_CODEX: "codex", ENGINE_CODEX_STAGE: "codex",
+}
 
 # Spec keys accepted by start_run; everything else is dropped.
-_SPEC_KEYS = {"prompt", "model", "effort", "cwd", "sandbox"}
+_SPEC_KEYS = {"prompt", "model", "effort", "cwd", "sandbox", "stage_context"}
 
 # Valid per-run sandbox overrides (codex sessions only; claude ignores it).
 _SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
@@ -301,6 +304,31 @@ class WorkflowRunService:
         await self._maybe_dispatch()
         return await self.db.get_workflow_run(run_id) or run
 
+    async def start_agent_stage(self, stage: Any, *, title: str = "") -> dict:
+        """Launch an already-resolved :class:`AgentStageSpec`.
+
+        This deliberately accepts the immutable compiler result rather than
+        user dictionaries.  All missing dependency errors therefore happen
+        before this method creates a run row or a model session.
+        """
+        from nerve.workflows.stages import AgentStageSpec
+        if not isinstance(stage, AgentStageSpec):
+            raise WorkflowRunError("agent stage must be a resolved AgentStageSpec")
+        rendered = stage.context.render()
+        return await self.start_run(
+            ENGINE_CODEX_STAGE,
+            {
+                "prompt": rendered,
+                "model": stage.model,
+                "effort": stage.reasoning_effort,
+                "sandbox": stage.sandbox,
+                "stage_context": stage.context.journal(),
+            },
+            stage.budget_usd,
+            title=title or f"Agent stage: {stage.stage_id}",
+            created_by="workflow-controller",
+        )
+
     async def kill_run(self, run_id: str, reason: str = "", killed_by: str = "") -> dict:
         """Terminate a run. Scoped strictly to the run's own session.
 
@@ -443,10 +471,21 @@ class WorkflowRunService:
                 "- Orchestrate with Ultracode multi-agent runs when the task "
                 "benefits from parallel workers."
             )
-        else:
+        elif run["engine"] == ENGINE_CLAUDE:
             orchestrate = (
                 "- Orchestrate with the Workflow tool when the task benefits "
                 "from parallel agents (you are pre-authorized to use it)."
+            )
+        else:
+            orchestrate = "- Do not orchestrate or start nested workflows."
+        stage_rules = ""
+        if run["engine"] == ENGINE_CODEX_STAGE:
+            stage_rules = (
+                "- This is an isolated single-agent stage. Do not start workflows, "
+                "subagents, or capability-discovery tools.\n"
+                "- Use only the capabilities declared in STAGE_CONTEXT.\n"
+                "- Your final response must be the structured artifact required by "
+                "STAGE_CONTEXT.output_schema.\n"
             )
         return (
             f"[Workflow run {run['id']}] {run.get('title') or ''}\n"
@@ -457,6 +496,7 @@ class WorkflowRunService:
             "never wait for user input.\n"
             "- End your final message with a concise result summary; it is "
             "recorded as this run's result.\n\n"
+            f"{stage_rules}"
             "TASK:\n"
             f"{spec['prompt']}"
         )
@@ -483,6 +523,13 @@ class WorkflowRunService:
             # Per-leg sandbox override, read at codex client build
             # (SessionSpec.extra["sandbox"] beats the global codex.sandbox).
             metadata = {"codex_sandbox": str(spec["sandbox"])}
+        if run["engine"] == ENGINE_CODEX_STAGE:
+            metadata = dict(metadata or {})
+            metadata.update({
+                "isolated_agent_stage": True,
+                "stage_context_hash": (spec.get("stage_context") or {}).get("context_hash", ""),
+                "agent_stage_capabilities": (spec.get("stage_context") or {}).get("capabilities", []),
+            })
         try:
             # Nest the leg under the session it was started from and name it
             # "[<parent title>] <slug>"; engine skips the fork path for
@@ -611,6 +658,22 @@ class WorkflowRunService:
                             break
                 except Exception:  # noqa: BLE001 — fall back to turn text
                     logger.exception("post-background result read failed for %s", run_id)
+            if run["engine"] == ENGINE_CODEX_STAGE:
+                from nerve.workflows.stages import StageArtifactError, validate_artifact
+                schema = ((spec.get("stage_context") or {}).get("output_schema") or {})
+                try:
+                    validate_artifact(result_text, schema)
+                except StageArtifactError as e:
+                    flipped = await self.db.transition_workflow_run(
+                        run_id, "failed", expect=("running",),
+                        error=f"invalid_output: {e}"[:_ERROR_MAX],
+                    )
+                    if flipped:
+                        self._write_result(run, result_text)
+                        await self._finalize_terminal(
+                            run_id, "failed", {"kind": "invalid_output", "error": str(e)},
+                        )
+                    return
             flipped = await self.db.transition_workflow_run(
                 run_id, "done", expect=("running",),
                 result=result_text[-_RESULT_MAX:],

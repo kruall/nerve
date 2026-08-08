@@ -16,9 +16,12 @@ terminal_policy: fail_fast
 stages:
   - id: research
     runner: agent
+    outputs: {type: object}
     agent:
       model: codex-mini
+      reasoning_effort: high
       sandbox: workspace-write
+      skills: [repository-research]
       mcp: {allow: [nerve.memory_recall]}
   - id: test
     depends_on: [research]
@@ -30,3 +33,10 @@ Use `workflow_preset_list`, `workflow_preset_describe`,
 `workflow_preset_validate`, and `workflow_preset_start`; REST equivalents are
 under `/api/workflow-presets`. The initial catalog does not schedule stages or
 run agents: `start` delegates the already-pinned plan to an installed controller.
+
+An agent stage is resolved before its session starts. The controller expands
+required skill dependencies, pins their exact revisions, resolves the explicit
+default-deny `server.tool` allowlist and captures its input schemas, then
+journals a bounded `StageContext` hash. Only `read-only` and `workspace-write`
+sandboxes are legal for stages. A stage response must be JSON satisfying its
+declared output contract; malformed output is recorded as `invalid_output`.

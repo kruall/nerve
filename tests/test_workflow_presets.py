@@ -10,7 +10,7 @@ def _execution(ws):
     c=ExecutionCatalog(ws); c.reload(); return c
 
 def _preset(**changes):
-    value={"schema_version":1,"name":"verify.change","version":1,"title":"Verify","description":"x","inputs":{"task":{"type":"string"}},"budget_usd":2,"timeout_seconds":60,"terminal_policy":"fail_fast","stages":[{"id":"research","runner":"agent","timeout_seconds":10,"agent":{"model":"codex-mini","sandbox":"workspace-write","mcp":{"allow":["nerve.memory_recall"]},"skills":[]}},{"id":"check","depends_on":["research"],"runner":"execution","execution":{"kind":"echo","arguments":{}}}]}
+    value={"schema_version":1,"name":"verify.change","version":1,"title":"Verify","description":"x","inputs":{"task":{"type":"string"}},"budget_usd":2,"timeout_seconds":60,"terminal_policy":"fail_fast","stages":[{"id":"research","runner":"agent","timeout_seconds":10,"outputs":{"type":"object"},"agent":{"model":"codex-mini","sandbox":"workspace-write","mcp":{"allow":["nerve.memory_recall"]},"skills":[]}},{"id":"check","depends_on":["research"],"runner":"execution","execution":{"kind":"echo","arguments":{}}}]}
     value.update(changes); return value
 
 def _write(ws, value):
