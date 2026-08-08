@@ -49,6 +49,7 @@ logger = logging.getLogger(__name__)
 
 CtxResolver = Callable[[ServerRequestContext], Awaitable[ToolContext]]
 AuditWriter = Callable[[ToolContext, str, dict, ToolResult, float, bool], Awaitable[None]]
+ApprovalResolver = Callable[[ToolContext, str, dict], Awaitable[bool]]
 
 
 def build_mcp_server(
@@ -56,6 +57,7 @@ def build_mcp_server(
     *,
     ctx_resolver: CtxResolver,
     audit_writer: AuditWriter | None = None,
+    approval_resolver: ApprovalResolver | None = None,
     include_hoa: bool = False,
     name: str = "nerve",
     version: str = "1.0.0",
@@ -147,6 +149,20 @@ def build_mcp_server(
         except Exception as e:
             logger.exception("Failed to resolve ToolContext for %s", name)
             return _error(f"Context error: {e}")
+
+        if approval_resolver is not None:
+            try:
+                approved = await approval_resolver(ctx, name, arguments)
+            except Exception:
+                logger.exception("Approval resolver failed for %s", name)
+                approved = False
+            if not approved:
+                return CallToolResult(
+                    content=[TextContent(
+                        type="text", text="MCP tool call was declined by the user",
+                    )],
+                    isError=True,
+                )
 
         try:
             result = await spec.handler(ctx, arguments)

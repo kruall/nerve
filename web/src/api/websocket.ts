@@ -19,7 +19,7 @@ export type WSMessage =
   | { type: 'session_archived'; session_id: string }
   | { type: 'plan_update'; session_id: string; content: string }
   | { type: 'backend_status'; session_id: string; subtype: string; data: Record<string, unknown> }
-  | { type: 'interaction'; session_id: string; interaction_id: string; interaction_type: 'question' | 'plan_exit' | 'plan_enter' | 'command_approval' | 'file_approval' | 'permission_approval'; tool_name: string; tool_input: Record<string, unknown> }
+  | { type: 'interaction'; session_id: string; interaction_id: string; interaction_type: 'question' | 'plan_exit' | 'plan_enter' | 'command_approval' | 'file_approval' | 'mcp_approval' | 'permission_approval'; tool_name: string; tool_input: Record<string, unknown> }
   | { type: 'interaction_resolved'; session_id: string; interaction_id: string }
   | { type: 'subagent_start'; session_id: string; tool_use_id: string; subagent_type: string; description: string; model?: string }
   | { type: 'subagent_complete'; session_id: string; tool_use_id: string; duration_ms: number; is_error?: boolean }

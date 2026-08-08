@@ -40,6 +40,7 @@ INTERACTIVE_TOOLS = frozenset({
 APPROVAL_KINDS = frozenset({
     "command_approval",
     "file_approval",
+    "mcp_approval",
     "permission_approval",
 })
 

@@ -12,7 +12,7 @@ import { useChatStore } from '../../stores/chatStore';
  * (auto-declines after the server-side timeout).
  */
 
-const APPROVAL_TYPES = new Set(['command_approval', 'file_approval', 'permission_approval']);
+const APPROVAL_TYPES = new Set(['command_approval', 'file_approval', 'mcp_approval', 'permission_approval']);
 
 interface ChangeEntry {
   path?: string;
@@ -38,6 +38,8 @@ export function ApprovalCard() {
   const item = (input.item as Record<string, unknown>) || {};
   const kind = pendingInteraction.interactionType;
   const reason = (input.reason as string) || '';
+  const mcpTool = (input.tool as string) || '';
+  const mcpArguments = (input.arguments as Record<string, unknown>) || null;
 
   const command = Array.isArray(item.command)
     ? (item.command as unknown[]).join(' ')
@@ -50,10 +52,12 @@ export function ApprovalCard() {
   const title =
     kind === 'command_approval' ? 'Agent wants to run a command'
     : kind === 'file_approval' ? 'Agent wants to change files'
+    : kind === 'mcp_approval' ? `Agent wants to call MCP tool ${mcpTool}`
     : 'Agent requests elevated permissions';
 
   const Icon = kind === 'command_approval' ? Terminal
     : kind === 'file_approval' ? FileDiff
+    : kind === 'mcp_approval' ? ShieldQuestion
     : ShieldQuestion;
 
   return (
@@ -68,6 +72,11 @@ export function ApprovalCard() {
         {command && (
           <pre className="text-[12px] font-mono bg-surface-deep rounded px-2 py-1.5 overflow-x-auto whitespace-pre-wrap break-all">
             {command}
+          </pre>
+        )}
+        {mcpArguments && (
+          <pre className="text-[12px] font-mono bg-surface-deep rounded px-2 py-1.5 overflow-x-auto whitespace-pre-wrap break-all">
+            {JSON.stringify(mcpArguments, null, 2)}
           </pre>
         )}
         {cwd && (

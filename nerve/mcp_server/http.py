@@ -33,6 +33,7 @@ from mcp.server.context import ServerRequestContext
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.types import Receive, Scope, Send
 
+from nerve.agent.interactive import get_handler
 from nerve.agent.tools import ToolContext, ToolRegistry
 from nerve.gateway.auth import MCP_WORKER_CLAIM
 from nerve.mcp_server.audit import build_audit_writer
@@ -197,6 +198,8 @@ def build_ctx_resolver(engine: "AgentEngine", resolver: SatelliteSessionResolver
                 "runtime": client_name or "external",
                 "mcp_session_id": mcp_session_id,
             }
+        else:
+            runtime_metadata["session_bound"] = "true"
 
         return ToolContext(
             session_id=session_id,
@@ -214,6 +217,46 @@ def build_ctx_resolver(engine: "AgentEngine", resolver: SatelliteSessionResolver
         )
 
     return _resolve
+
+
+def build_approval_resolver(engine: "AgentEngine"):
+    """Enforce Codex MCP prompt policy inside Nerve.
+
+    Codex's headless app-server cannot surface its own MCP prompt.  Only
+    session-bound calls are eligible: ordinary external MCP clients retain
+    their own authorization model.
+    """
+
+    async def _approve(ctx: ToolContext, name: str, arguments: dict) -> bool:
+        if ctx.runtime_metadata.get("session_bound") != "true":
+            return True
+        extra = engine.config.codex.extra_config or {}
+        default = extra.get(
+            "mcp_servers.nerve.default_tools_approval_mode", "auto",
+        )
+        mode = extra.get(
+            f"mcp_servers.nerve.tools.{name}.approval_mode", default,
+        )
+        if mode != "prompt":
+            return True
+        handler = get_handler(ctx.session_id)
+        if handler is None:
+            logger.warning(
+                "Session %s: declining MCP tool %s without interactive handler",
+                ctx.session_id, name,
+            )
+            return False
+        if not handler.interactive_capable:
+            # Preserve the backend's established policy for cron, hooks and
+            # workflow legs: these sources are trusted but cannot display a
+            # prompt, so Codex pre-approves Nerve's session-scoped bridge.
+            return True
+        outcome = await handler.request_approval(
+            "mcp_approval", {"server": "nerve", "tool": name, "arguments": arguments},
+        )
+        return outcome.approved
+
+    return _approve
 
 
 def build_manager(
@@ -234,6 +277,7 @@ def build_manager(
     server = build_mcp_server(
         registry,
         ctx_resolver=ctx_resolver,
+        approval_resolver=build_approval_resolver(engine),
         audit_writer=audit_writer,
         include_hoa=config.mcp_endpoint.include_hoa,
     )

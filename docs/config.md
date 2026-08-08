@@ -981,6 +981,15 @@ the owning session, expires after eight hours, and exists only in the spawned
 process environment. `mcp_endpoint.enabled` must stay on; the public gateway
 mount and the loopback listener share the same authenticated MCP manager.
 
+Codex app-server does not expose its native MCP `prompt` decision as a server
+request. For the session-bound `nerve` MCP bridge, Nerve therefore lets the
+call reach its server and enforces `mcp_servers.nerve.*.approval_mode =
+"prompt"` there before dispatch. Interactive web sessions show an approval
+card with the tool name and arguments; rejection, timeout, or a missing
+interactive handler fails closed without running the tool. Explicit per-tool
+`approve` entries still bypass the prompt. External MCP servers retain Codex's
+native policy and are not covered by this bridge.
+
 External/user-launched Codex uses `bearer_token_env_var = "NERVE_MCP_TOKEN"`
 instead of storing a credential in TOML. Refresh it with:
 

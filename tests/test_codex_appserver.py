@@ -217,6 +217,22 @@ def test_nerve_mcp_preapproved_for_noninteractive_sources(tmp_path):
         overrides = backend.build_config_overrides(_spec(cfg, source=source))
         assert approve in overrides, f"missing pre-approval for source={source}"
 
+
+def test_nerve_mcp_prompt_is_enforced_server_side(tmp_path):
+    cfg = _config(tmp_path)
+    cfg.codex.extra_config = {
+        "mcp_servers.nerve.default_tools_approval_mode": "prompt",
+        "mcp_servers.nerve.tools.task_done.approval_mode": "prompt",
+        "mcp_servers.external.default_tools_approval_mode": "prompt",
+    }
+    overrides = CodexBackend(_deps(cfg)).build_config_overrides(_spec(cfg))
+
+    assert overrides[-2:] == [
+        'mcp_servers.nerve.default_tools_approval_mode="approve"',
+        'mcp_servers.nerve.tools.task_done.approval_mode="approve"',
+    ]
+    assert 'mcp_servers.external.default_tools_approval_mode="prompt"' in overrides
+
 @pytest.mark.asyncio
 async def test_langfuse_plugin_is_injected_only_after_verified_install(
     tmp_path, monkeypatch,

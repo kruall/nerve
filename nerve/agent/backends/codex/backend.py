@@ -493,6 +493,19 @@ class CodexBackend:
                 overrides.append(f"{key}={'true' if value else 'false'}")
             else:
                 overrides.append(f"{key}={value}")
+        # Codex app-server 0.145 has no server request for MCP tool
+        # approvals.  A ``prompt`` mode is therefore rejected headlessly
+        # before Nerve can ask the user.  For Nerve's own session-bound MCP
+        # bridge, let the request reach the server; build_mcp_server enforces
+        # the original prompt policy through the session's interactive hub.
+        nerve_prefix = "mcp_servers.nerve."
+        for key, value in (self.codex.extra_config or {}).items():
+            if (
+                key.startswith(nerve_prefix)
+                and key.endswith("approval_mode")
+                and value == "prompt"
+            ):
+                overrides.append(f'{key}="approve"')
         if self._langfuse_plugin_ready:
             overrides.extend(langfuse_config_overrides())
         return overrides

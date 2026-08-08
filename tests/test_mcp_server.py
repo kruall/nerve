@@ -151,6 +151,37 @@ class TestCallToolDispatch:
         assert call_result.is_error is False
         assert call_result.content[0].text == "hello-alpha"
 
+    async def test_approval_resolver_can_decline_before_dispatch(self):
+        called = False
+
+        async def tool_handler(ctx: ToolContext, args: dict) -> ToolResult:
+            nonlocal called
+            called = True
+            return ToolResult.text("executed")
+
+        registry = ToolRegistry()
+        registry.register(ToolSpec(
+            name="dangerous",
+            description="dangerous",
+            input_schema={"type": "object"},
+            handler=tool_handler,
+        ))
+        approval = AsyncMock(return_value=False)
+        server = build_mcp_server(
+            registry,
+            ctx_resolver=_ctx_resolver("session-1"),
+            approval_resolver=approval,
+        )
+
+        result = await server.request_handlers[CallToolRequest](
+            _build_call_request("dangerous", {"value": 1}),
+        )
+
+        assert result.root.isError is True
+        assert "declined" in result.root.content[0].text
+        assert called is False
+        approval.assert_awaited_once()
+
     async def test_returns_error_for_unknown_tool(self):
         registry = ToolRegistry()
         registry.register(_make_spec("alpha"))
