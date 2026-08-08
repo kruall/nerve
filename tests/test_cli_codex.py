@@ -85,3 +85,28 @@ class TestDoctorCommand:
         report = json.loads(result.output)
         assert report["preflight"]["version"] == "0.9.9"
         assert report["recoverable_runs"] == []
+
+    def test_langfuse_canary_failure_exits_non_zero(
+        self, tmp_path, preflight, monkeypatch,
+    ):
+        async def fake_canary(config, *, timeout):
+            assert timeout == 12.0
+            return {
+                "ok": False,
+                "phase": "langfuse_ingestion",
+                "generation_count": 0,
+                "errors": ["missing generation"],
+            }
+
+        monkeypatch.setattr(
+            "nerve.agent.backends.codex.langfuse_canary.run_langfuse_canary",
+            fake_canary,
+        )
+        result = CliRunner().invoke(main, [
+            "-c", str(_config(tmp_path)), "codex", "doctor",
+            "--langfuse-canary", "--canary-timeout", "12",
+        ])
+
+        assert result.exit_code == 1
+        assert "[ERR] Langfuse canary" in result.output
+        assert "missing generation" in result.output

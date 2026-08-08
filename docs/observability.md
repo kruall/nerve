@@ -115,6 +115,20 @@ Restart Nerve. On startup you should see one of:
 
 Visit the diagnostics page (`/diagnostics`) to confirm the live status.
 
+After changing or reloading Codex/plugin configuration, run the paid end-to-end
+canary:
+
+```bash
+nerve codex doctor --langfuse-canary
+```
+
+It starts a fresh app-server, verifies that runtime materialization still
+matches the managed marketplace, sends one minimal model turn, waits for its
+Langfuse generation, and checks exclusive bucket sums, canonical pricing keys,
+and non-zero cache/reasoning costs. The command exits non-zero on any failure.
+Use `--canary-timeout SECONDS` when ingestion is delayed. The canary creates a
+small trace and incurs the corresponding model and Langfuse usage.
+
 ## Configuration reference
 
 | Field             | Default                          | Notes                                                           |

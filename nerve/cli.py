@@ -1789,8 +1789,21 @@ def codex_token(ctx: click.Context, hours: int) -> None:
 
 @codex.command("doctor")
 @click.option("--json-output", is_flag=True, help="Emit machine-readable JSON.")
+@click.option(
+    "--langfuse-canary", is_flag=True,
+    help="Run a paid end-to-end Codex/Langfuse reload canary.",
+)
+@click.option(
+    "--canary-timeout", type=click.FloatRange(min=10.0, max=300.0),
+    default=60.0, show_default=True, help="Seconds to wait for canary ingestion.",
+)
 @click.pass_context
-def codex_doctor(ctx: click.Context, json_output: bool) -> None:
+def codex_doctor(
+    ctx: click.Context,
+    json_output: bool,
+    langfuse_canary: bool,
+    canary_timeout: float,
+) -> None:
     """Check CLI version, auth, model protocol, and Ultracode state."""
     import json
     from types import SimpleNamespace
@@ -1812,6 +1825,12 @@ def codex_doctor(ctx: click.Context, json_output: bool) -> None:
         "recoverable_runs": recoverable_runs(config),
         "external_token_env": bool(os.environ.get("NERVE_MCP_TOKEN")),
     }
+    if langfuse_canary:
+        from nerve.agent.backends.codex.langfuse_canary import run_langfuse_canary
+
+        report["langfuse_canary"] = asyncio.run(
+            run_langfuse_canary(config, timeout=canary_timeout),
+        )
     if json_output:
         click.echo(json.dumps(report, indent=2, sort_keys=True))
     else:
@@ -1842,7 +1861,20 @@ def codex_doctor(ctx: click.Context, json_output: bool) -> None:
                 f"[WARN] {len(report['recoverable_runs'])} recoverable "
                 "Ultracode run(s)"
             )
-    if not status.get("available") or status.get("auth_mismatch"):
+        if langfuse_canary:
+            canary = report["langfuse_canary"]
+            marker = "OK" if canary.get("ok") else "ERR"
+            click.echo(
+                f"[{marker}] Langfuse canary: {canary.get('phase')} "
+                f"({canary.get('generation_count', 0)} generations)"
+            )
+            for error in canary.get("errors") or []:
+                click.echo(f"      {error}")
+    if (
+        not status.get("available")
+        or status.get("auth_mismatch")
+        or (langfuse_canary and not report["langfuse_canary"].get("ok"))
+    ):
         ctx.exit(1)
 
 
