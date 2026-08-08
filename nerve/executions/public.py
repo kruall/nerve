@@ -160,6 +160,12 @@ def public_execution(raw: Mapping[str, Any]) -> dict[str, Any]:
         ):
             value = _scalar(continuation.get(key))
             if value is not None:
+                if key == "state":
+                    value = {
+                        "none": "not_requested",
+                        "claimed": "running",
+                        "completed": "succeeded",
+                    }.get(str(value), value)
                 public_continuation[key] = value
         error = _text(continuation.get("error"))
         if error is not None:

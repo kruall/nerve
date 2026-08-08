@@ -6,6 +6,7 @@ Single entry point for the entire Nerve gateway.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -102,10 +103,24 @@ async def _send_session_status(
     client can rebuild ``streamingBlocks``, panels, todos, and interaction
     state without waiting for new events.
     """
+    activity: dict = {}
+    if _engine is not None and _engine.execution_service is not None:
+        try:
+            activity = (
+                await _engine.execution_service.session_activity(
+                    session_ids=[session_id],
+                )
+            ).get(session_id, {})
+        except Exception as e:
+            logger.warning("Could not load execution activity for %s: %s", session_id, e)
+    active_execution_count = int(activity.get("active_execution_count", 0))
     status_msg: dict = {
         "type": "session_status",
         "session_id": session_id,
         "is_running": is_running,
+        "active_execution_count": active_execution_count,
+        "execution_statuses": activity.get("execution_statuses", []),
+        "is_busy": bool(is_running or active_execution_count),
         "status": session_record.get("status") if session_record else "unknown",
     }
     if is_running:
@@ -331,6 +346,18 @@ async def lifespan(app: FastAPI):
                 )
             except Exception as e:
                 logger.error("Failed to start Codex MCP loopback listener: %s", e)
+
+    # Recovery may have produced durable continuation outbox rows. Dispatch
+    # them only after notification wiring and the Codex MCP loopback are ready,
+    # so a resumed native thread sees the same tool surface as an ordinary turn.
+    if _engine.execution_service is not None:
+        start_continuations = getattr(
+            _engine.execution_service, "start_continuations", None,
+        )
+        if callable(start_continuations):
+            pending_start = start_continuations()
+            if inspect.isawaitable(pending_start):
+                await pending_start
 
     # Start Telegram bot if enabled
     telegram_channel = None

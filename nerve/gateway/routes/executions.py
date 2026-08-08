@@ -204,6 +204,11 @@ async def start_execution_kind(
             detail="execution lifecycle service is not installed",
         )
     try:
+        sessions = getattr(engine, "sessions", None)
+        if sessions is not None:
+            await sessions.get_or_create(
+                "system", title="System executions", source="web",
+            )
         execution = await engine.execution_service.start(
             session_id="system", plan=plan,
         )

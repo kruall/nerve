@@ -18,7 +18,7 @@ import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Any, Mapping, Protocol, runtime_checkable
+from typing import Any, Mapping
 
 import yaml
 
@@ -408,13 +408,6 @@ class CatalogSnapshot:
 
     def summaries(self) -> list[dict[str, Any]]:
         return [self.profiles[kind].summary() for kind in sorted(self.profiles)]
-
-
-@runtime_checkable
-class ExecutionService(Protocol):
-    """Lifecycle boundary implemented by the separate execution-service task."""
-
-    async def start(self, *, session_id: str, plan: CompiledExecutionPlan) -> Mapping[str, Any]: ...
 
 
 def _parse_argument(name: str, raw: Any, where: str) -> ArgumentSpec:

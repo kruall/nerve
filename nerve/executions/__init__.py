@@ -5,8 +5,15 @@ from nerve.executions.catalog import (
     CompiledExecutionPlan,
     ExecutionCatalog,
     ExecutionProfileError,
-    ExecutionService,
     OperationValidationError,
+)
+from nerve.executions.service import ExecutionService
+from nerve.executions.backend import (
+    BackendRecovery,
+    BackendResult,
+    ExecutionBackend,
+    LocalExecutionBackend,
+    ResourceLeaseManager,
 )
 from nerve.executions.public import ExecutionUiService, ResourceUiService
 
@@ -16,6 +23,11 @@ __all__ = [
     "ExecutionCatalog",
     "ExecutionProfileError",
     "ExecutionService",
+    "ExecutionBackend",
+    "BackendRecovery",
+    "BackendResult",
+    "LocalExecutionBackend",
+    "ResourceLeaseManager",
     "ExecutionUiService",
     "OperationValidationError",
     "ResourceUiService",

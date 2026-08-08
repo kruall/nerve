@@ -84,6 +84,9 @@ class SessionManager:
         # Callback for memorizing session before close/archive/delete.
         # Set by AgentEngine after init to wire up memU bridge.
         self._on_memorize: Any | None = None
+        # Optional lifecycle hook installed by AgentEngine. Detached work must
+        # be cancelled before an archive clears the native resume identity.
+        self._on_archive: Any | None = None
 
     # ------------------------------------------------------------------ #
     #  Lifecycle: Create / Get                                             #
@@ -668,6 +671,12 @@ class SessionManager:
 
     async def archive_session(self, session_id: str) -> None:
         """Archive a session: memorize, disconnect client, update status."""
+        if self._on_archive:
+            try:
+                await self._on_archive(session_id)
+            except Exception as e:
+                logger.warning("Execution cancellation before archive failed for %s: %s", session_id, e)
+
         # Memorize in the background: memU indexing can take ~90s; awaiting it
         # here would hang the archive (and, in a cascade, the whole request on the root).
         if self._on_memorize:

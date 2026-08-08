@@ -122,8 +122,10 @@ The MCP surface is progressive:
   resource/result policies.
 - `execution_kind_validate(kind, arguments, resources)` returns a redacted
   compiled plan without starting it.
-- `execution_kind_start(...)` compiles and hands the immutable plan to the
-  separately installed execution lifecycle service.
+- `execution_kind_start(...)` compiles, persists, and queues the immutable plan
+  in the session-owned execution lifecycle service.
+- `execution_status`, `execution_tail`, `execution_cancel`, and
+  `execution_list` expose only work owned by the calling ToolContext session.
 
 Equivalent REST endpoints are:
 
@@ -132,8 +134,42 @@ Equivalent REST endpoints are:
 - `POST /api/execution-kinds/{kind}/validate`
 - `POST /api/execution-kinds/{kind}/start`
 
-The start surfaces return `503`/an MCP error until the lifecycle service is
-installed; catalog discovery and compilation remain available independently.
+The built-in local backend executes literal argv with no shell. Resource
+transport requires a configured inventory/backend implementation; lease
+acquisition and release remain service-owned and are never model-managed.
+
+## Durable lifecycle and recovery
+
+Executions use the persistent states `queued`, `starting`, `running`,
+`cancelling`, `succeeded`, `failed`, `cancelled`, and `lost`. The row pins the
+owner Nerve session, profile version/hash and snapshot, normalized unredacted
+plan, resource requests, selected leases, backend handle, result, cancellation
+marker, and continuation outbox state. Secret plan values stay in the local
+database and are never returned by the public projection.
+
+Completion and cancellation are compare-and-set transitions. An accepted Stop
+atomically moves active work to `cancelling`, suppresses pending or claimed
+continuations, and cancels an in-process claimed continuation task. A backend
+completion can create a `pending` continuation only from `starting`/`running`
+with no cancellation marker. The outbox claimant then delivers at most one
+`engine.run(..., internal=True, source="execution")` on the same Nerve session;
+the stored native thread ID provides backend resume. Only execution ID,
+terminal metadata, duration, and a 32 KiB bounded tail enter that prompt.
+
+On daemon startup, queued rows are dispatched again. Each backend classifies
+starting/running handles as reattachable, finished, missing, or orphaned.
+Reattachable work is drained again; finished evidence is settled; missing or
+orphaned work becomes `lost`, with selected resource leases quarantined when
+remote quiescence is unknown. The local backend deliberately reports old
+handles orphaned because pipe ownership cannot survive restart and it never
+signals a persisted PID that may have been reused. Unclaimed continuations are
+recovered after the Codex MCP loopback is ready. A claim interrupted by restart
+is marked failed rather than dispatched twice.
+
+Graceful shutdown terminates volatile local children but leaves non-terminal
+rows for the same restart reconciliation. Session Stop, archive, and delete
+cancel active rows and suppress pending continuations before clearing session
+state.
 
 ## Web lifecycle and resource view
 

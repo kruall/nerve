@@ -62,6 +62,46 @@ EXECUTION_KIND_START_SCHEMA = {
     "additionalProperties": False,
 }
 
+EXECUTION_STATUS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "execution_id": {"type": "string"},
+    },
+    "required": ["execution_id"],
+    "additionalProperties": False,
+}
+
+EXECUTION_TAIL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "execution_id": {"type": "string"},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 200},
+        "before": {"type": "integer", "minimum": 1},
+    },
+    "required": ["execution_id"],
+    "additionalProperties": False,
+}
+
+EXECUTION_CANCEL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "execution_id": {"type": "string"},
+        "reason": {"type": "string", "maxLength": 500},
+    },
+    "required": ["execution_id"],
+    "additionalProperties": False,
+}
+
+EXECUTION_LIST_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "include_terminal": {"type": "boolean", "default": True},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+    },
+    "required": [],
+    "additionalProperties": False,
+}
+
 
 # ----- Task tools -----
 

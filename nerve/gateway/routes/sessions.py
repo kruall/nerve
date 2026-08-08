@@ -377,6 +377,8 @@ async def get_session(session_id: str, user: dict = Depends(require_auth)):
     session = await deps.db.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    session["is_running"] = deps.engine.is_session_running(session_id)
+    await _attach_execution_activity([session])
     return session
 
 
@@ -524,6 +526,10 @@ async def delete_session(session_id: str, user: dict = Depends(require_auth)):
     db = deps.db
 
     if engine:
+        if engine.execution_service is not None:
+            await engine.execution_service.cancel_session(
+                session_id, reason="session deleted",
+            )
         # Disconnect client
         client = engine.sessions.remove_client(session_id)
         if client:

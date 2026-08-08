@@ -1,0 +1,423 @@
+"""Persistence and compare-and-set transitions for detached executions."""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+from nerve.utils.time import utc_now_iso
+
+
+ACTIVE_EXECUTION_STATUSES = ("queued", "starting", "running", "cancelling")
+TERMINAL_EXECUTION_STATUSES = ("succeeded", "failed", "cancelled", "lost")
+CONTINUABLE_EXECUTION_STATUSES = ("succeeded", "failed", "lost")
+
+_JSON_COLUMNS = (
+    "profile_snapshot", "plan", "resource_requests", "selected_leases",
+    "backend_handle", "result",
+)
+
+
+def _decode_execution(row: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(row)
+    for column in _JSON_COLUMNS:
+        raw = result.get(column)
+        if raw is None:
+            continue
+        try:
+            result[column] = json.loads(raw)
+        except (TypeError, ValueError):
+            result[column] = None if column in {"backend_handle", "result"} else {}
+    result["continuation"] = {
+        "state": result.get("continuation_state"),
+        "session_id": result.get("session_id"),
+        "attempted_at": result.get("continuation_claimed_at"),
+        "completed_at": result.get("continuation_completed_at"),
+        "error": result.get("continuation_error"),
+    }
+    return result
+
+
+class ExecutionStore:
+    """Database mixin for the durable execution state machine."""
+
+    async def create_execution(
+        self,
+        execution_id: str,
+        *,
+        session_id: str,
+        kind: str,
+        profile_version: str,
+        profile_hash: str,
+        profile_snapshot: Mapping[str, Any],
+        plan: Mapping[str, Any],
+        resource_requests: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        now = utc_now_iso()
+        try:
+            await self._write(
+                """INSERT INTO executions
+                   (id, session_id, kind, profile_version, profile_hash,
+                    profile_snapshot, plan, resource_requests, selected_leases,
+                    status, created_at, queued_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]', 'queued', ?, ?, ?)""",
+                (
+                    execution_id, session_id, kind, profile_version, profile_hash,
+                    json.dumps(dict(profile_snapshot)), json.dumps(dict(plan)),
+                    json.dumps(list(resource_requests)), now, now, now,
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("session already owns an active execution") from exc
+        row = await self.get_execution(execution_id)
+        assert row is not None
+        return row
+
+    async def get_execution(self, execution_id: str) -> dict[str, Any] | None:
+        async with self.db.execute(
+            "SELECT * FROM executions WHERE id = ?", (execution_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return _decode_execution(row) if row else None
+
+    async def list_session_executions(
+        self,
+        session_id: str,
+        *,
+        include_terminal: bool = True,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        where = "session_id = ?"
+        params: list[Any] = [session_id]
+        if not include_terminal:
+            placeholders = ",".join("?" for _ in ACTIVE_EXECUTION_STATUSES)
+            where += f" AND status IN ({placeholders})"
+            params.extend(ACTIVE_EXECUTION_STATUSES)
+        params.append(max(1, min(int(limit), 100)))
+        async with self.db.execute(
+            f"""SELECT * FROM executions WHERE {where}
+                ORDER BY created_at DESC, id DESC LIMIT ?""",
+            tuple(params),
+        ) as cursor:
+            return [_decode_execution(row) async for row in cursor]
+
+    async def list_active_executions(self) -> list[dict[str, Any]]:
+        placeholders = ",".join("?" for _ in ACTIVE_EXECUTION_STATUSES)
+        async with self.db.execute(
+            f"""SELECT * FROM executions WHERE status IN ({placeholders})
+                ORDER BY created_at ASC, id ASC""",
+            ACTIVE_EXECUTION_STATUSES,
+        ) as cursor:
+            return [_decode_execution(row) async for row in cursor]
+
+    async def session_execution_activity(
+        self, session_ids: Sequence[str],
+    ) -> dict[str, dict[str, Any]]:
+        ids = [str(value) for value in session_ids if value]
+        if not ids:
+            return {}
+        id_marks = ",".join("?" for _ in ids)
+        state_marks = ",".join("?" for _ in ACTIVE_EXECUTION_STATUSES)
+        result = {
+            session_id: {"active_execution_count": 0, "execution_statuses": []}
+            for session_id in ids
+        }
+        async with self.db.execute(
+            f"""SELECT session_id, status, COUNT(*) AS count
+                FROM executions
+                WHERE session_id IN ({id_marks}) AND status IN ({state_marks})
+                GROUP BY session_id, status""",
+            (*ids, *ACTIVE_EXECUTION_STATUSES),
+        ) as cursor:
+            async for row in cursor:
+                activity = result[str(row["session_id"])]
+                count = int(row["count"])
+                activity["active_execution_count"] += count
+                activity["execution_statuses"].extend([str(row["status"])] * count)
+        return result
+
+    async def transition_execution(
+        self,
+        execution_id: str,
+        *,
+        to_status: str,
+        expect: Sequence[str],
+        fields: Mapping[str, Any] | None = None,
+    ) -> bool:
+        if to_status not in (*ACTIVE_EXECUTION_STATUSES, *TERMINAL_EXECUTION_STATUSES):
+            raise ValueError("unknown execution status")
+        expected = tuple(expect)
+        if not expected:
+            return False
+        now = utc_now_iso()
+        values = dict(fields or {})
+        allowed = {"backend_name", "backend_handle", "selected_leases", "result"}
+        values = {key: value for key, value in values.items() if key in allowed}
+        for key in ("backend_handle", "selected_leases", "result"):
+            if key in values:
+                values[key] = json.dumps(values[key])
+        if to_status == "running":
+            values.setdefault("started_at", now)
+        if to_status in TERMINAL_EXECUTION_STATUSES:
+            values.setdefault("finished_at", now)
+        assignments = ["status = ?", "revision = revision + 1", "updated_at = ?"]
+        params: list[Any] = [to_status, now]
+        for key, value in values.items():
+            if key in {"started_at", "finished_at"} or key in allowed:
+                assignments.append(f"{key} = ?")
+                params.append(value)
+        placeholders = ",".join("?" for _ in expected)
+        params.extend([execution_id, *expected])
+        result = await self._write(
+            f"""UPDATE executions SET {', '.join(assignments)}
+                WHERE id = ? AND status IN ({placeholders})""",
+            tuple(params),
+        )
+        return (result.rowcount or 0) == 1
+
+    async def finish_execution(
+        self,
+        execution_id: str,
+        *,
+        status: str,
+        result: Mapping[str, Any],
+        expect: Sequence[str] = ("starting", "running"),
+    ) -> bool:
+        """Atomically settle work and create its continuation outbox item.
+
+        A prior cancellation changes the status to ``cancelling`` and stamps
+        ``cancel_requested_at`` in the same database transaction, so this CAS
+        cannot subsequently publish a completion continuation.
+        """
+        if status not in CONTINUABLE_EXECUTION_STATUSES:
+            raise ValueError("terminal status is not continuable")
+        now = utc_now_iso()
+        expected = tuple(expect)
+        placeholders = ",".join("?" for _ in expected)
+        update = await self._write(
+            f"""UPDATE executions
+                SET status = ?, result = ?, finished_at = ?, updated_at = ?,
+                    revision = revision + 1, continuation_state = 'pending',
+                    continuation_error = NULL
+                WHERE id = ? AND status IN ({placeholders})
+                  AND cancel_requested_at IS NULL""",
+            (
+                status, json.dumps(dict(result)), now, now, execution_id,
+                *expected,
+            ),
+        )
+        return (update.rowcount or 0) == 1
+
+    async def request_execution_cancel(
+        self, execution_id: str, *, reason: str | None,
+    ) -> bool:
+        """Accept cancellation and suppress a pending/claimed continuation."""
+        now = utc_now_iso()
+        active_marks = ",".join("?" for _ in ACTIVE_EXECUTION_STATUSES)
+        result = await self._write(
+            f"""UPDATE executions
+                SET status = CASE
+                        WHEN status IN ({active_marks}) THEN 'cancelling'
+                        ELSE status
+                    END,
+                    cancel_reason = ?, cancel_requested_at = ?, updated_at = ?,
+                    revision = revision + 1, continuation_state = 'suppressed',
+                    continuation_error = NULL
+                WHERE id = ?
+                  AND (status IN ({active_marks}) OR continuation_state IN ('pending', 'claimed'))""",
+            (
+                *ACTIVE_EXECUTION_STATUSES, (reason or "user requested cancellation")[:500],
+                now, now, execution_id, *ACTIVE_EXECUTION_STATUSES,
+            ),
+        )
+        return (result.rowcount or 0) == 1
+
+    async def finalize_execution_cancelled(
+        self, execution_id: str, *, result: Mapping[str, Any] | None = None,
+    ) -> bool:
+        now = utc_now_iso()
+        update = await self._write(
+            """UPDATE executions
+               SET status = 'cancelled', result = ?, finished_at = ?, updated_at = ?,
+                   revision = revision + 1, continuation_state = 'suppressed'
+               WHERE id = ? AND status = 'cancelling'""",
+            (json.dumps(dict(result or {"outcome": "cancelled"})), now, now, execution_id),
+        )
+        return (update.rowcount or 0) == 1
+
+    async def suppress_session_executions(
+        self, session_id: str, *, reason: str,
+    ) -> list[str]:
+        """Atomically cancel active rows and suppress pending continuations."""
+        now = utc_now_iso()
+        async with self._atomic():
+            async with self.db.execute(
+                """SELECT id FROM executions
+                   WHERE session_id = ? AND (
+                       status IN ('queued', 'starting', 'running', 'cancelling')
+                       OR continuation_state IN ('pending', 'claimed')
+                   )""",
+                (session_id,),
+            ) as cursor:
+                ids = [str(row[0]) async for row in cursor]
+            await self.db.execute(
+                """UPDATE executions
+                   SET status = CASE
+                           WHEN status IN ('queued', 'starting', 'running', 'cancelling')
+                           THEN 'cancelling' ELSE status END,
+                       cancel_reason = ?, cancel_requested_at = COALESCE(cancel_requested_at, ?),
+                       continuation_state = 'suppressed', updated_at = ?,
+                       revision = revision + 1
+                   WHERE session_id = ? AND (
+                       status IN ('queued', 'starting', 'running', 'cancelling')
+                       OR continuation_state IN ('pending', 'claimed')
+                   )""",
+                (reason[:500], now, now, session_id),
+            )
+        return ids
+
+    async def claim_execution_continuation(
+        self, execution_id: str,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Claim once, suppressing rows whose owner is no longer resumable."""
+        now = utc_now_iso()
+        async with self._atomic():
+            async with self.db.execute(
+                """SELECT e.*, s.status AS owner_status, s.source AS owner_source
+                   FROM executions e LEFT JOIN sessions s ON s.id = e.session_id
+                   WHERE e.id = ?""",
+                (execution_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+            if row is None or row["continuation_state"] != "pending":
+                return False, _decode_execution(row) if row else None
+            if row["owner_status"] in (None, "stopped", "archived") or row["owner_source"] == "external":
+                await self.db.execute(
+                    """UPDATE executions SET continuation_state = 'suppressed',
+                       updated_at = ?, revision = revision + 1
+                       WHERE id = ? AND continuation_state = 'pending'""",
+                    (now, execution_id),
+                )
+                return False, _decode_execution(row)
+            cursor = await self.db.execute(
+                """UPDATE executions SET continuation_state = 'claimed',
+                   continuation_claimed_at = ?, updated_at = ?, revision = revision + 1
+                   WHERE id = ? AND continuation_state = 'pending'
+                     AND cancel_requested_at IS NULL""",
+                (now, now, execution_id),
+            )
+            claimed = (cursor.rowcount or 0) == 1
+            await cursor.close()
+        return claimed, await self.get_execution(execution_id)
+
+    async def list_pending_execution_continuations(self) -> list[dict[str, Any]]:
+        async with self.db.execute(
+            """SELECT * FROM executions WHERE continuation_state = 'pending'
+               ORDER BY finished_at ASC, id ASC""",
+        ) as cursor:
+            return [_decode_execution(row) async for row in cursor]
+
+    async def fail_claimed_execution_continuations_on_restart(self) -> int:
+        """Quarantine uncertain pre-restart claims instead of dispatching twice.
+
+        A claimed row may already have reached the model before the daemon
+        crashed. Retrying it could create a duplicate turn, so startup records
+        the uncertainty as a terminal outbox failure and only replays rows that
+        were never claimed.
+        """
+        now = utc_now_iso()
+        update = await self._write(
+            """UPDATE executions
+               SET continuation_state = 'failed',
+                   continuation_completed_at = ?,
+                   continuation_error = 'daemon restarted after continuation claim',
+                   updated_at = ?, revision = revision + 1
+               WHERE continuation_state = 'claimed'""",
+            (now, now),
+        )
+        return int(update.rowcount or 0)
+
+    async def settle_execution_continuation(
+        self, execution_id: str, *, success: bool, error: str | None = None,
+    ) -> bool:
+        now = utc_now_iso()
+        update = await self._write(
+            """UPDATE executions
+               SET continuation_state = ?, continuation_completed_at = ?,
+                   continuation_error = ?, updated_at = ?, revision = revision + 1
+               WHERE id = ? AND continuation_state = 'claimed'""",
+            (
+                "completed" if success else "failed", now,
+                None if success else (error or "continuation failed")[:1000],
+                now, execution_id,
+            ),
+        )
+        return (update.rowcount or 0) == 1
+
+    async def append_execution_log(
+        self,
+        execution_id: str,
+        *,
+        stream: str,
+        text: str,
+        max_lines: int = 5000,
+        max_chars: int = 2 * 1024 * 1024,
+    ) -> None:
+        if stream not in {"stdout", "stderr", "system"}:
+            stream = "system"
+        value = text[:65_536]
+        async with self._atomic():
+            await self.db.execute(
+                """INSERT INTO execution_logs(execution_id, stream, timestamp, text)
+                   VALUES (?, ?, ?, ?)""",
+                (execution_id, stream, utc_now_iso(), value),
+            )
+            async with self.db.execute(
+                """SELECT sequence, length(text) AS chars FROM execution_logs
+                   WHERE execution_id = ? ORDER BY sequence DESC""",
+                (execution_id,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+            used = 0
+            keep = 0
+            for row in rows:
+                chars = int(row["chars"] or 0)
+                if keep >= max_lines or (keep and used + chars > max_chars):
+                    break
+                used += chars
+                keep += 1
+            if keep < len(rows):
+                cutoff = int(rows[keep - 1]["sequence"]) if keep else int(rows[0]["sequence"]) + 1
+                await self.db.execute(
+                    "DELETE FROM execution_logs WHERE execution_id = ? AND sequence < ?",
+                    (execution_id, cutoff),
+                )
+
+    async def tail_execution_logs(
+        self, execution_id: str, *, limit: int, before: int | None = None,
+    ) -> dict[str, Any]:
+        bounded = max(1, min(int(limit), 500))
+        where = "execution_id = ?"
+        params: list[Any] = [execution_id]
+        if before is not None:
+            where += " AND sequence < ?"
+            params.append(int(before))
+        params.append(bounded + 1)
+        async with self.db.execute(
+            f"""SELECT sequence, stream, timestamp, text FROM execution_logs
+                WHERE {where} ORDER BY sequence DESC LIMIT ?""",
+            tuple(params),
+        ) as cursor:
+            rows = [dict(row) async for row in cursor]
+        has_more = len(rows) > bounded
+        rows = rows[:bounded]
+        rows.reverse()
+        return {
+            "entries": rows,
+            "has_more": has_more,
+            "next_before": rows[0]["sequence"] if has_more and rows else None,
+            "oldest_sequence": rows[0]["sequence"] if rows else None,
+            "newest_sequence": rows[-1]["sequence"] if rows else None,
+        }

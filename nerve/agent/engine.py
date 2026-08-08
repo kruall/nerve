@@ -271,6 +271,7 @@ class AgentEngine:
         # Supplied by the separate lifecycle implementation. The catalog task
         # exposes start behind this boundary without owning processes itself.
         self.execution_service: ExecutionService | None = None
+        self._execution_stop_listener: Any | None = None
 
         # Tool registry — built once at construction. Per-session MCP
         # servers are built in ``_build_mcp_servers`` by binding a fresh
@@ -352,7 +353,21 @@ class AgentEngine:
 
     def set_execution_service(self, service: ExecutionService | None) -> None:
         """Install the lifecycle owner used by ``execution_kind_start``."""
+        if self._execution_stop_listener in self._stop_listeners:
+            self._stop_listeners.remove(self._execution_stop_listener)
         self.execution_service = service
+        self._execution_stop_listener = None
+        self.sessions._on_archive = None
+        if service is not None:
+            self._execution_stop_listener = service.cancel_session
+            self.add_stop_listener(self._execution_stop_listener)
+
+            async def cancel_for_archive(session_id: str) -> bool:
+                return await service.cancel_session(
+                    session_id, reason="session archived",
+                )
+
+            self.sessions._on_archive = cancel_for_archive
 
     def get_active_channel(self, session_id: str) -> str | None:
         """Return the channel name currently driving ``session_id`` (or None)."""
@@ -516,6 +531,18 @@ class AgentEngine:
         # Wire up memorize callback so SessionManager can trigger memU indexing
         self.sessions._on_memorize = self._memorize_session
 
+        # Detached execution is a first-class engine subsystem, not an MCP
+        # process. Its startup reconciliation runs after the DB and engine are
+        # ready, and before the gateway begins accepting tool calls.
+        execution_service = ExecutionService(
+            db=self.db,
+            engine=self,
+            workspace=self.config.workspace,
+            catalog=self.execution_catalog,
+        )
+        self.set_execution_service(execution_service)
+        await execution_service.initialize(dispatch_continuations=False)
+
         # Recover orphaned sessions from previous crash
         try:
             await self.sessions.recover_orphaned_sessions()
@@ -672,6 +699,9 @@ class AgentEngine:
         No memorization here — the periodic sweep handles that.
         Sessions are marked idle so they can be resumed on next startup.
         """
+        if self.execution_service is not None:
+            await self.execution_service.shutdown()
+
         for sid in list(self._idle_watchers):
             self._stop_idle_watcher(sid)
 
@@ -1463,16 +1493,17 @@ class AgentEngine:
 
     async def stop_session(self, session_id: str) -> bool:
         """Stop a running session."""
+        handled = False
         for cb in self._stop_listeners:
             try:
-                await cb(session_id)
+                handled = bool(await cb(session_id)) or handled
             except Exception:  # noqa: BLE001 — listeners never block a stop
                 logger.exception("stop listener failed for %s", session_id)
         # Cancel any pending interactive tool prompts so the handler unblocks
         handler = get_handler(session_id)
         if handler:
             handler.cancel_all()
-        return await self.sessions.stop_session(session_id)
+        return bool(await self.sessions.stop_session(session_id) or handled)
 
     def is_session_running(self, session_id: str) -> bool:
         return self.sessions.is_running(session_id)

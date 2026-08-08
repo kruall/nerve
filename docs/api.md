@@ -22,13 +22,14 @@ starting it. The returned immutable plan redacts secret arguments.
 
 #### `POST /api/execution-kinds/{kind}/start`
 
-Compile and submit the plan to the installed execution lifecycle service. Returns
-503 when that separate service is unavailable. See [executions.md](executions.md).
+Compile and submit the plan to the built-in execution lifecycle service. The
+REST surface binds direct starts to the persisted `system` session. See
+[executions.md](executions.md).
 
 ### Detached executions and resources
 
-These endpoints are available when the detached lifecycle/resource service is
-installed. REST is the reconnect source of truth; `execution_update` and
+The detached lifecycle endpoints are built in; resource administration still
+requires a configured inventory service. REST is the reconnect source of truth; `execution_update` and
 `resource_update` WebSocket messages are live hints that clients reconcile
 back to these endpoints.
 

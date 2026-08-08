@@ -17,6 +17,7 @@ import aiosqlite
 
 from nerve.db.audit import AuditStore
 from nerve.db.cron import CronStore
+from nerve.db.executions import ExecutionStore
 from nerve.db.files import FileStore
 from nerve.db.maintenance import MaintenanceStore
 from nerve.db.mcp import McpStore
@@ -105,6 +106,7 @@ class Database(
     WakeupStore,
     WorkflowRunStore,
     ReviewLoopStore,
+    ExecutionStore,
     MaintenanceStore,
 ):
     """Async SQLite database wrapper.
