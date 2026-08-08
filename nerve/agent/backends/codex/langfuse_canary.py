@@ -13,7 +13,7 @@ from nerve.agent.backends import BackendDeps, SessionSpec
 from nerve.agent.backends.base import TurnInput
 
 from .backend import CodexBackend
-from .langfuse_plugin import installation_status
+from .langfuse_plugin import ensure_installed, installation_status
 
 
 def _validate_usage(observations: list[Any]) -> list[str]:
@@ -47,7 +47,7 @@ def _validate_usage(observations: list[Any]) -> list[str]:
 
 async def run_langfuse_canary(config: Any, *, timeout: float = 60.0) -> dict[str, Any]:
     """Start a real Codex turn and verify its immutable Langfuse observation."""
-    before = installation_status(config)
+    before = await ensure_installed(config)
     if not before.get("ready"):
         return {"ok": False, "phase": "preflight", "errors": [
             "managed Langfuse plugin is not ready before app-server startup",
