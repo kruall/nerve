@@ -9,6 +9,7 @@ import {
   parseCCTaskGetResult,
   parseCCTaskCreateResult,
 } from './ccTasks';
+import { upsertToolCallBlock } from './blockHelpers';
 
 /**
  * Apply a single stream event to a blocks array (pure function for replay).
@@ -39,14 +40,13 @@ export function applyStreamEvent(blocks: MessageBlock[], event: WSMessage): Mess
       break;
     }
     case 'tool_use': {
-      result.push({
+      return upsertToolCallBlock(result, {
         type: 'tool_call',
         toolUseId: event.tool_use_id || '',
         tool: event.tool,
         input: event.input,
         status: 'running',
       });
-      break;
     }
     case 'tool_result': {
       for (let i = 0; i < result.length; i++) {

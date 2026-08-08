@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { ChevronRight, ChevronDown, CheckSquare, ListTodo, Plus, CheckCircle, Pencil, FileText, Loader2 } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import type { ToolCallBlockData } from '../../../types/chat';
+import { parseTaskCreateResult } from './taskCreateResult';
 
 const STATUS_COLORS: Record<string, string> = {
   pending: 'bg-yellow-500/15 text-hue-yellow',
@@ -84,22 +86,26 @@ export function TaskToolBlock({ block }: { block: ToolCallBlockData }) {
 
   const resultText = block.result ? extractText(block.result) : '';
   const taskList = isList ? parseTaskList(resultText) : [];
+  const createdTask = isCreate && !block.isError ? parseTaskCreateResult(block.result) : null;
+  const displayLabel = createdTask ? 'Task created' : label;
+  const displayStatus = createdTask?.status || status;
 
   return (
     <div className="my-1.5 border border-border rounded-lg bg-surface overflow-hidden">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-2 w-full px-3 py-2 text-left cursor-pointer hover:bg-surface-raised transition-colors"
-      >
+      <div className="flex items-center gap-2 w-full px-3 py-2 hover:bg-surface-raised transition-colors">
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="flex items-center gap-2 min-w-0 flex-1 text-left cursor-pointer"
+        >
         {isRunning
           ? <Loader2 size={14} className="text-accent animate-spin shrink-0" />
           : <Icon size={14} className={`shrink-0 ${block.isError ? 'text-hue-red' : isDone ? 'text-hue-green' : isCreate ? 'text-hue-blue' : 'text-text-muted'}`} />
         }
-        <span className="text-[13px] font-medium text-text-secondary shrink-0 whitespace-nowrap">{label}</span>
+        <span className="text-[13px] font-medium text-text-secondary shrink-0 whitespace-nowrap">{displayLabel}</span>
         {title && <span className="text-[12px] text-text-muted truncate">{title}</span>}
-        {status && (
-          <span className={`text-[10px] px-1.5 py-0.5 rounded ${STATUS_COLORS[status] || 'bg-border-subtle text-text-muted'}`}>
-            {status}
+        {displayStatus && (
+          <span className={`text-[10px] px-1.5 py-0.5 rounded ${STATUS_COLORS[displayStatus] || 'bg-border-subtle text-text-muted'}`}>
+            {displayStatus}
           </span>
         )}
         {isList && taskList.length > 0 && (
@@ -108,22 +114,27 @@ export function TaskToolBlock({ block }: { block: ToolCallBlockData }) {
         <div className="ml-auto shrink-0">
           {expanded ? <ChevronDown size={14} className="text-text-faint" /> : <ChevronRight size={14} className="text-text-faint" />}
         </div>
-      </button>
+        </button>
+        {createdTask && (
+          <Link
+            to={`/tasks/${encodeURIComponent(createdTask.id)}`}
+            className="text-[11px] text-hue-blue hover:underline shrink-0"
+          >
+            Open task
+          </Link>
+        )}
+      </div>
 
       {expanded && (
         <div className="border-t border-border">
-          {/* Create: show what was created */}
-          {isCreate && title && (
+          {/* Create: show the input details without repeating the task title. */}
+          {isCreate && Boolean(block.input.content || block.input.deadline) && (
             <div className="px-3 py-2">
-              <div className="text-[12px] text-text-secondary flex items-center gap-2">
-                <Plus size={11} className="text-hue-blue" />
-                <span className="font-medium">{title}</span>
-              </div>
               {block.input.content ? (
-                <p className="text-[12px] text-text-muted mt-1 pl-5">{String(block.input.content).slice(0, 200)}</p>
+                <p className="text-[12px] text-text-muted">{String(block.input.content).slice(0, 200)}</p>
               ) : null}
               {block.input.deadline ? (
-                <p className="text-[10px] text-text-dim mt-1 pl-5">Deadline: {String(block.input.deadline)}</p>
+                <p className="text-[10px] text-text-dim mt-1">Deadline: {String(block.input.deadline)}</p>
               ) : null}
             </div>
           )}
@@ -155,10 +166,10 @@ export function TaskToolBlock({ block }: { block: ToolCallBlockData }) {
             </pre>
           ) : null}
 
-          {/* Success message */}
-          {(isCreate || isDone) && resultText && !block.isError && !taskList.length && (
+          {/* Done calls retain their compact confirmation; create is confirmed in the header. */}
+          {isDone && resultText && !block.isError && !taskList.length && (
             <div className="px-3 py-1.5 text-[11px] text-hue-green/70 border-t border-border-subtle">
-              {isDone ? 'Task completed' : 'Task created'}
+              Task completed
             </div>
           )}
 

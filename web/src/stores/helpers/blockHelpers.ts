@@ -9,6 +9,29 @@ export const AUTOCLOSE_DELAY = 5000;
 /** Track pending auto-close timers so we can cancel on manual close. */
 const _autoCloseTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
+/** Add a tool call once. Replayed tool_use events must not create another card. */
+export function upsertToolCallBlock(blocks: MessageBlock[], toolCall: Extract<MessageBlock, { type: 'tool_call' }>): MessageBlock[] {
+  if (!toolCall.toolUseId) return [...blocks, toolCall];
+  const index = blocks.findIndex(
+    block => block.type === 'tool_call' && block.toolUseId === toolCall.toolUseId,
+  );
+  if (index === -1) return [...blocks, toolCall];
+
+  const existing = blocks[index] as Extract<MessageBlock, { type: 'tool_call' }>;
+  // A delayed duplicate tool_use must not erase a result already received;
+  // hydration may conversely supply the result on the later duplicate.
+  const replacement = {
+    ...existing,
+    tool: toolCall.tool,
+    input: toolCall.input,
+    result: toolCall.result ?? existing.result,
+    isError: toolCall.isError ?? existing.isError,
+    status: existing.status === 'complete' || toolCall.status === 'complete' ? 'complete' as const : 'running' as const,
+    workflow: toolCall.workflow ?? existing.workflow,
+  };
+  return blocks.map((block, currentIndex) => currentIndex === index ? replacement : block);
+}
+
 /**
  * Schedule auto-close for a completed non-plan tab.
  * Requires a `getState` thunk to lazily access the store (avoids circular imports).

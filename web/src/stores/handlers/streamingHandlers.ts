@@ -1,6 +1,6 @@
 import type { WSMessage } from '../../api/websocket';
 import { extractResultText } from '../../utils/extractResultText';
-import { appendBlockToPanel, updateToolResultInPanel, scheduleAutoClose } from '../helpers/blockHelpers';
+import { appendBlockToPanel, updateToolResultInPanel, scheduleAutoClose, upsertToolCallBlock } from '../helpers/blockHelpers';
 import type { TodoItem, CCTask } from '../chatStore';
 import {
   applyCCTaskCreateInput,
@@ -233,8 +233,7 @@ export function handleToolUse(
   }
 
   // Normal: add to main chat
-  const blocks = [...state.streamingBlocks];
-  blocks.push({
+  const blocks = upsertToolCallBlock(state.streamingBlocks, {
     type: 'tool_call',
     toolUseId: msg.tool_use_id || '',
     tool: msg.tool,
