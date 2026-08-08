@@ -17,6 +17,7 @@ from nerve.executions.backend import (
 )
 from nerve.executions.public import ExecutionUiService, ResourceUiService
 from nerve.resources import LeaseService, ResourceInventory
+from nerve.executions.ssh import SshConnectionCatalog, SshExecutionBackend, SshTransportError
 
 __all__ = [
     "CatalogSnapshot",
@@ -34,4 +35,7 @@ __all__ = [
     "ResourceUiService",
     "LeaseService",
     "ResourceInventory",
+    "SshConnectionCatalog",
+    "SshExecutionBackend",
+    "SshTransportError",
 ]

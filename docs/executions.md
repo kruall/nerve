@@ -213,6 +213,18 @@ loss changes no host to available: an administrator must confirm remote
 quiescence through the guarded recovery endpoint before quarantined leases are
 retired and scheduling resumes.
 
+### Remote supervisor
+
+For a resource command Nerve resolves only the selected host's named
+`connection_ref` through `resources.ssh_connections`. Each connection has a
+dedicated `known_hosts` file, strict host-key verification, optional CIDRs and
+one or more allowed remote roots. SSH always invokes the fixed
+`nerve remote-supervisor rpc` argv; the structured request is JSON on stdin,
+never remote shell text. The worker stores a fenced job record and holds a
+host-level `flock` while the process group exists. A cancellation reply is
+accepted only when the worker reports that process group quiescent. Transport
+ambiguity therefore quarantines the lease rather than releasing the host.
+
 Run `nerve config validate --workspace <workspace> --portable-only --strict-keys`
 before review. Copy the non-destructive examples from
 `examples/execution-kinds/` into the workspace catalog directory to try the

@@ -224,6 +224,14 @@ def main(ctx: click.Context, config_dir: str | None, verbose: bool) -> None:
     ctx.obj["verbose"] = verbose
 
 
+@main.command("remote-supervisor", hidden=True)
+@click.argument("operation", type=click.Choice(["rpc"]))
+def remote_supervisor(operation: str) -> None:
+    """Worker-side fixed SSH RPC endpoint (normally used as a forced command)."""
+    from nerve.executions.remote_supervisor import rpc
+    rpc()
+
+
 @main.command()
 @click.option("--if-needed", is_flag=True, help="Only run if fresh install detected")
 @click.option("--non-interactive", is_flag=True, help="Use env vars, no prompts (for Docker)")

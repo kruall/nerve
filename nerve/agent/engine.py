@@ -538,12 +538,20 @@ class AgentEngine:
         await inventory.initialize()
         resource_service = LeaseService(db=self.db, inventory=inventory)
         self.resource_service = resource_service
+        # Remote execution is opt-in: deployments without reviewed named SSH
+        # connections retain the shell-free local backend.
+        backend = None
+        ssh_connections = getattr(self.config, "resources", {}).get("ssh_connections", {})
+        if ssh_connections:
+            from nerve.executions.ssh import SshConnectionCatalog, SshExecutionBackend
+            backend = SshExecutionBackend(inventory=inventory, connections=SshConnectionCatalog(getattr(self.config, "resources", {})))
         execution_service = ExecutionService(
             db=self.db,
             engine=self,
             workspace=self.config.workspace,
             catalog=self.execution_catalog,
             resource_manager=resource_service,
+            backend=backend,
         )
         self.set_execution_service(execution_service)
         await execution_service.initialize(dispatch_continuations=False)

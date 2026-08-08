@@ -268,6 +268,15 @@ memory:
 #   lease_ttl_seconds: 90       # expiry enters revoking; it never frees a host
 #   queue_poll_seconds: 0.25    # local waiter cadence; FIFO state is durable
 #   connections: [lab-ssh]
+#   # Deployment-local SSH coordinates. This section is intentionally absent
+#   # from model-visible execution profiles; pin every worker host key.
+#   # ssh_connections:
+#   #   lab-ssh:
+#   #     host: builder.example.net
+#   #     user: nerve-worker
+#   #     known_hosts: /etc/nerve/ssh_known_hosts
+#   #     remote_roots: [/srv/nerve]
+#   #     allowed_cidrs: [192.0.2.0/24]
 #   hosts:
 #     - id: builder-a
 #       connection_ref: lab-ssh

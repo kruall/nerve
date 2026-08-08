@@ -265,7 +265,10 @@ class ExecutionService:
                 await self.db.finalize_execution_cancelled(execution_id)
                 await self._broadcast(execution_id)
                 return
-            plan = row["plan"]
+            # A remote backend receives the immutable plan plus the exact
+            # persisted lease evidence.  It must not independently select a
+            # host after the scheduler has fenced one.
+            plan = {**row["plan"], "selected_leases": list(leases)}
 
             async def emit(stream: str, text: str) -> None:
                 await self.db.append_execution_log(execution_id, stream=stream, text=text)
