@@ -72,6 +72,7 @@ async def get_skill_detail(skill_id: str, user: dict = Depends(require_auth)):
     refs = await mgr.list_references(skill_id)
     amendments = await mgr.read_amendments(skill_id)
     amendments_revision = await mgr.amendments_revision(skill_id)
+    dependency_resolution = await mgr.resolve_required_dependencies(skill_id)
 
     return {
         "id": skill.id,
@@ -86,6 +87,11 @@ async def get_skill_detail(skill_id: str, user: dict = Depends(require_auth)):
             {"skill": dependency.skill, "mode": dependency.mode, "when": dependency.when}
             for dependency in skill.dependencies
         ],
+        "dependency_source": skill.dependency_source,
+        "dependency_errors": [
+            issue.to_dict() for issue in skill.dependency_errors
+        ],
+        "dependency_resolution": dependency_resolution.to_dict(),
         "has_references": skill.has_references,
         "has_scripts": skill.has_scripts,
         "has_assets": skill.has_assets,

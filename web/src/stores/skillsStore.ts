@@ -18,6 +18,30 @@ export interface Skill {
   updated_at: string;
 }
 
+export interface SkillDependency {
+  skill: string;
+  mode: 'required' | 'suggested';
+  when: string;
+}
+
+export interface SkillDependencyIssue {
+  code: string;
+  message: string;
+  skill: string;
+  dependency: string | null;
+  path: string[];
+}
+
+export interface SkillDependencyResolution {
+  ok: boolean;
+  root: string;
+  order: string[];
+  required: Array<{ id: string; name: string; version: string }>;
+  suggested: Array<{ skill: string; when: string; declared_by: string }>;
+  errors: SkillDependencyIssue[];
+  limits: { max_depth: number; max_dependencies: number };
+}
+
 export interface SkillDetail extends Skill {
   content: string;
   raw: string;
@@ -25,6 +49,10 @@ export interface SkillDetail extends Skill {
   has_scripts: boolean;
   has_assets: boolean;
   references: string[];
+  dependencies: SkillDependency[];
+  dependency_source: 'canonical' | 'legacy' | 'none';
+  dependency_errors: SkillDependencyIssue[];
+  dependency_resolution: SkillDependencyResolution;
   stats: {
     total_invocations: number;
     success_count: number;

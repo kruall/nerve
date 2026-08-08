@@ -36,6 +36,7 @@ def _make_spec(
     raises: Exception | None = None,
     input_schema: dict | None = None,
     seen: list[dict] | None = None,
+    structured: dict | None = None,
 ) -> ToolSpec:
     """Build a deterministic ToolSpec for protocol tests.
 
@@ -48,7 +49,9 @@ def _make_spec(
             seen.append(args)
         if raises is not None:
             raise raises
-        return ToolResult.text(response_text, is_error=is_error)
+        result = ToolResult.text(response_text, is_error=is_error)
+        result.structured = structured
+        return result
 
     return ToolSpec(
         name=name,
@@ -167,6 +170,19 @@ class TestCallToolDispatch:
         call_result: CallToolResult = result
         assert call_result.is_error is True
         assert call_result.content[0].text == "boom"
+
+    async def test_propagates_structured_tool_content(self):
+        registry = ToolRegistry()
+        registry.register(_make_spec(
+            "alpha",
+            structured={"dependency_resolution": {"ok": False}},
+        ))
+        server = build_mcp_server(registry, ctx_resolver=_ctx_resolver())
+
+        call_result = await _invoke_call_tool(server, "alpha")
+        assert call_result.structured_content == {
+            "dependency_resolution": {"ok": False}
+        }
 
     async def test_handler_exception_returns_tool_error(self):
         registry = ToolRegistry()

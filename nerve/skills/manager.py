@@ -49,6 +49,42 @@ class SkillDependency:
     when: str = ""
 
 
+@dataclass(frozen=True)
+class SkillDependencyIssue:
+    """Actionable validation or graph-resolution failure."""
+
+    code: str
+    message: str
+    skill: str
+    dependency: str = ""
+    path: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "message": self.message,
+            "skill": self.skill,
+            "dependency": self.dependency or None,
+            "path": list(self.path),
+        }
+
+
+@dataclass(frozen=True)
+class SuggestedSkillDependency:
+    """One advisory edge collected from a successfully resolved bundle."""
+
+    skill: str
+    when: str
+    declared_by: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "skill": self.skill,
+            "when": self.when,
+            "declared_by": self.declared_by,
+        }
+
+
 @dataclass
 class SkillMeta:
     """Skill metadata extracted from SKILL.md frontmatter."""
@@ -61,6 +97,8 @@ class SkillMeta:
     model_invocable: bool = True
     allowed_tools: list[str] | None = None
     dependencies: list[SkillDependency] = field(default_factory=list)
+    dependency_source: str = "none"
+    dependency_errors: list[SkillDependencyIssue] = field(default_factory=list)
     has_references: bool = False
     has_scripts: bool = False
     has_assets: bool = False
@@ -74,6 +112,40 @@ class SkillContent(SkillMeta):
     """Full skill including SKILL.md body content."""
     content: str = ""   # Markdown body (after frontmatter)
     raw: str = ""       # Full SKILL.md file
+
+
+@dataclass
+class SkillDependencyResolution:
+    """Deterministic dependency-first bundle or explicit failures."""
+
+    root: str
+    bundle: list[SkillContent] = field(default_factory=list)
+    suggested: list[SuggestedSkillDependency] = field(default_factory=list)
+    errors: list[SkillDependencyIssue] = field(default_factory=list)
+    max_depth: int = MAX_DEPENDENCY_DEPTH
+    max_dependencies: int = MAX_DEPENDENCIES
+
+    @property
+    def ok(self) -> bool:
+        return not self.errors
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "root": self.root,
+            "order": [skill.id for skill in self.bundle],
+            "required": [
+                {"id": skill.id, "name": skill.name, "version": skill.version}
+                for skill in self.bundle
+                if skill.id != self.root
+            ],
+            "suggested": [dependency.to_dict() for dependency in self.suggested],
+            "errors": [issue.to_dict() for issue in self.errors],
+            "limits": {
+                "max_depth": self.max_depth,
+                "max_dependencies": self.max_dependencies,
+            },
+        }
 
 
 def _slugify(name: str) -> str:
@@ -142,64 +214,230 @@ def _parse_skill_md(raw: str) -> tuple[dict, str]:
     return frontmatter, body
 
 
-def _parse_dependencies(raw: Any) -> list[SkillDependency]:
-    """Normalize the small dependency syntax accepted in skill frontmatter.
+def _parse_dependencies(
+    frontmatter: dict[str, Any], skill_id: str,
+) -> tuple[list[SkillDependency], str, list[SkillDependencyIssue]]:
+    """Normalize canonical and legacy dependency declarations.
 
-    The preferred form keeps hard and advisory edges visibly separate::
-
-        dependencies:
-          requires: [python]
-          suggests:
-            - skill: django
-              when: The repository uses Django
-
-    A flat list with an explicit ``mode`` is accepted as a convenience. Invalid
-    entries are ignored so one bad advisory edge cannot hide the skill itself.
+    Canonical declarations live under ``metadata.nerve.dependencies`` and use
+    ``required`` / ``suggested`` groups. The former top-level ``dependencies``
+    field remains readable during migration. Ambiguous or malformed declarations
+    are retained as explicit validation errors instead of being silently ignored.
     """
 
-    groups: list[tuple[str, Any]] = []
+    issues: list[SkillDependencyIssue] = []
+    canonical: Any = None
+    has_canonical = False
+    metadata = frontmatter.get("metadata")
+    if metadata is not None:
+        if not isinstance(metadata, dict):
+            issues.append(SkillDependencyIssue(
+                code="invalid_dependency_namespace",
+                message="metadata must be a mapping to declare Nerve dependencies",
+                skill=skill_id,
+                path=("metadata",),
+            ))
+        elif "nerve" in metadata:
+            nerve_metadata = metadata["nerve"]
+            if not isinstance(nerve_metadata, dict):
+                issues.append(SkillDependencyIssue(
+                    code="invalid_dependency_namespace",
+                    message="metadata.nerve must be a mapping",
+                    skill=skill_id,
+                    path=("metadata", "nerve"),
+                ))
+            else:
+                if "dependencies" in nerve_metadata:
+                    has_canonical = True
+                    canonical = nerve_metadata["dependencies"]
+
+    has_legacy = "dependencies" in frontmatter
+    if has_canonical and has_legacy:
+        issues.append(SkillDependencyIssue(
+            code="conflicting_dependency_declarations",
+            message=(
+                "declare dependencies only once; migrate the top-level "
+                "dependencies field to metadata.nerve.dependencies"
+            ),
+            skill=skill_id,
+            path=("metadata", "nerve", "dependencies"),
+        ))
+
+    source = "canonical" if has_canonical else "legacy" if has_legacy else "none"
+    raw = canonical if has_canonical else frontmatter.get("dependencies")
+    if source == "none":
+        return [], source, issues
+
+    base_path = (
+        ("metadata", "nerve", "dependencies")
+        if source == "canonical" else ("dependencies",)
+    )
+    groups: list[tuple[str, Any, str]] = []
     if isinstance(raw, dict):
-        groups.extend(("required", raw.get(key)) for key in ("requires", "required"))
-        groups.extend(("suggested", raw.get(key)) for key in ("suggests", "suggested"))
-    elif isinstance(raw, list):
-        groups.append(("required", raw))
-    elif raw:
-        groups.append(("required", [raw]))
+        allowed_groups = (
+            {"required", "suggested"}
+            if source == "canonical"
+            else {"requires", "required", "suggests", "suggested"}
+        )
+        for key in sorted(set(raw) - allowed_groups, key=str):
+            issues.append(SkillDependencyIssue(
+                code="unsupported_dependency_field",
+                message=f"unsupported dependency field: {key}",
+                skill=skill_id,
+                path=(*base_path, str(key)),
+            ))
+        required_keys = ("required",) if source == "canonical" else ("requires", "required")
+        suggested_keys = ("suggested",) if source == "canonical" else ("suggests", "suggested")
+        groups.extend(("required", raw[key], key) for key in required_keys if key in raw)
+        groups.extend(("suggested", raw[key], key) for key in suggested_keys if key in raw)
+    elif source == "legacy" and isinstance(raw, (list, str)):
+        groups.append((
+            "required",
+            raw if isinstance(raw, list) else [raw],
+            "required",
+        ))
+    else:
+        issues.append(SkillDependencyIssue(
+            code="invalid_dependencies_type",
+            message=(
+                "dependencies must be a mapping with required/suggested lists"
+                if source == "canonical"
+                else "legacy dependencies must be a list or mapping"
+            ),
+            skill=skill_id,
+            path=base_path,
+        ))
+        return [], source, issues
 
     dependencies: list[SkillDependency] = []
-    seen: set[tuple[str, str]] = set()
-    for default_mode, items in groups:
-        if items is None:
-            continue
+    seen: dict[str, str] = {}
+    for default_mode, items, group_name in groups:
+        group_path = (*base_path, group_name)
         if not isinstance(items, list):
-            items = [items]
-        for item in items:
-            when = ""
-            mode = default_mode
-            if isinstance(item, str):
-                skill_id = item.strip()
-            elif isinstance(item, dict):
-                skill_id = str(item.get("skill") or item.get("name") or "").strip()
-                mode = str(item.get("mode") or default_mode).strip().lower()
-                when = str(item.get("when") or "").strip()
+            if source == "legacy" and isinstance(items, (str, dict)):
+                items = [items]
             else:
+                issues.append(SkillDependencyIssue(
+                    code="invalid_dependency_group",
+                    message=f"{group_name} dependencies must be a list",
+                    skill=skill_id,
+                    path=group_path,
+                ))
                 continue
-            if mode in {"require", "requires"}:
-                mode = "required"
-            if mode in {"suggest", "suggests", "recommend", "recommended"}:
-                mode = "suggested"
+        for index, item in enumerate(items):
+            item_path = (*group_path, str(index))
+            mode = default_mode
+            when = ""
+            if isinstance(item, str):
+                dependency_id = item.strip()
+            elif isinstance(item, dict):
+                allowed_fields = {"skill", "when"}
+                if source == "legacy":
+                    allowed_fields |= {"name", "mode"}
+                for key in sorted(set(item) - allowed_fields, key=str):
+                    issues.append(SkillDependencyIssue(
+                        code="unsupported_dependency_field",
+                        message=(
+                            f"unsupported dependency field: {key}; "
+                            "version constraints are deferred for this MVP"
+                            if key in {"version", "version_constraint"}
+                            else f"unsupported dependency field: {key}"
+                        ),
+                        skill=skill_id,
+                        path=(*item_path, str(key)),
+                    ))
+                dependency_id = str(item.get("skill") or item.get("name") or "").strip()
+                when_value = item.get("when", "")
+                if when_value is not None and not isinstance(when_value, str):
+                    issues.append(SkillDependencyIssue(
+                        code="invalid_dependency_condition",
+                        message="suggested dependency condition must be human-readable text",
+                        skill=skill_id,
+                        dependency=dependency_id,
+                        path=(*item_path, "when"),
+                    ))
+                else:
+                    when = str(when_value or "").strip()
+                if source == "legacy" and "mode" in item:
+                    mode = str(item["mode"]).strip().lower()
+                    mode = {
+                        "require": "required", "requires": "required",
+                        "suggest": "suggested", "suggests": "suggested",
+                        "recommend": "suggested", "recommended": "suggested",
+                    }.get(mode, mode)
+            else:
+                issues.append(SkillDependencyIssue(
+                    code="invalid_dependency_entry",
+                    message="dependency entries must be skill IDs or mappings",
+                    skill=skill_id,
+                    path=item_path,
+                ))
+                continue
+
             if mode not in {"required", "suggested"}:
+                issues.append(SkillDependencyIssue(
+                    code="invalid_dependency_mode",
+                    message=f"dependency mode must be required or suggested, got {mode!r}",
+                    skill=skill_id,
+                    dependency=dependency_id,
+                    path=item_path,
+                ))
                 continue
             try:
-                skill_id = _skill_id(skill_id)
+                dependency_id = _skill_id(dependency_id)
             except SkillIdError:
+                issues.append(SkillDependencyIssue(
+                    code="invalid_dependency_id",
+                    message=f"invalid dependency skill ID: {dependency_id!r}",
+                    skill=skill_id,
+                    dependency=dependency_id,
+                    path=item_path,
+                ))
                 continue
-            key = (skill_id, mode)
-            if key in seen:
+            if dependency_id == skill_id:
+                issues.append(SkillDependencyIssue(
+                    code="self_dependency",
+                    message=f"skill {skill_id!r} cannot depend on itself",
+                    skill=skill_id,
+                    dependency=dependency_id,
+                    path=item_path,
+                ))
                 continue
-            seen.add(key)
-            dependencies.append(SkillDependency(skill=skill_id, mode=mode, when=when))
-    return dependencies
+            if mode == "required" and when:
+                issues.append(SkillDependencyIssue(
+                    code="conditional_required_dependency",
+                    message="required dependencies cannot have advisory conditions",
+                    skill=skill_id,
+                    dependency=dependency_id,
+                    path=(*item_path, "when"),
+                ))
+            previous_mode = seen.get(dependency_id)
+            if previous_mode:
+                code = (
+                    "duplicate_dependency" if previous_mode == mode
+                    else "conflicting_dependency_modes"
+                )
+                issues.append(SkillDependencyIssue(
+                    code=code,
+                    message=(
+                        f"dependency {dependency_id!r} is declared more than once"
+                        if previous_mode == mode
+                        else f"dependency {dependency_id!r} cannot be both required and suggested"
+                    ),
+                    skill=skill_id,
+                    dependency=dependency_id,
+                    path=item_path,
+                ))
+                continue
+            seen[dependency_id] = mode
+            dependencies.append(SkillDependency(
+                skill=dependency_id,
+                mode=mode,
+                when=when if mode == "suggested" else "",
+            ))
+
+    dependencies.sort(key=lambda dependency: (dependency.mode != "required", dependency.skill))
+    return dependencies, source, issues
 
 
 def _build_skill_md(name: str, description: str, body: str = "", version: str = "1.0.0", **extra) -> str:
@@ -265,7 +503,9 @@ class SkillManager:
                             break
 
                 version = fm.get("version", "1.0.0")
-                dependencies = _parse_dependencies(fm.get("dependencies"))
+                dependencies, dependency_source, dependency_errors = (
+                    _parse_dependencies(fm, skill_id)
+                )
                 user_invocable = fm.get("user-invocable", True)
                 model_invocable = not fm.get("disable-model-invocation", False)
                 allowed_tools_raw = fm.get("allowed-tools")
@@ -287,15 +527,22 @@ class SkillManager:
                               "argument-hint", "context", "agent"}
                 extra_meta = {k: v for k, v in fm.items() if k not in known_keys}
 
+                # Preserve runtime state across filesystem re-discovery.
+                existing = await self.db.get_skill_row(skill_id)
+                enabled = existing["enabled"] if existing else True
+
                 meta = SkillMeta(
                     id=skill_id,
                     name=name,
                     description=description,
                     version=str(version),
+                    enabled=enabled,
                     user_invocable=user_invocable,
                     model_invocable=model_invocable,
                     allowed_tools=allowed_tools,
                     dependencies=dependencies,
+                    dependency_source=dependency_source,
+                    dependency_errors=dependency_errors,
                     has_references=has_references,
                     has_scripts=has_scripts,
                     has_assets=has_assets,
@@ -303,10 +550,6 @@ class SkillManager:
                 )
                 discovered.append(meta)
                 self._cache[skill_id] = meta
-
-                # Check if DB has the skill and preserve its enabled state
-                existing = await self.db.get_skill_row(skill_id)
-                enabled = existing["enabled"] if existing else True
 
                 # Sync to DB
                 await self.db.upsert_skill(
@@ -354,6 +597,8 @@ class SkillManager:
                 model_invocable=cached.model_invocable,
                 allowed_tools=cached.allowed_tools,
                 dependencies=list(cached.dependencies),
+                dependency_source=cached.dependency_source,
+                dependency_errors=list(cached.dependency_errors),
                 has_references=cached.has_references,
                 has_scripts=cached.has_scripts,
                 has_assets=cached.has_assets,
@@ -367,10 +612,19 @@ class SkillManager:
         # Fallback: parse from file
         name = fm.get("name", skill_id)
         description = fm.get("description", "")
+        dependencies, dependency_source, dependency_errors = _parse_dependencies(
+            fm, skill_id
+        )
+        db_row = await self.db.get_skill_row(skill_id)
         return SkillContent(
             id=skill_id, name=name, description=description,
             version=fm.get("version", "1.0.0"),
-            dependencies=_parse_dependencies(fm.get("dependencies")),
+            enabled=db_row["enabled"] if db_row else True,
+            user_invocable=fm.get("user-invocable", True),
+            model_invocable=not fm.get("disable-model-invocation", False),
+            dependencies=dependencies,
+            dependency_source=dependency_source,
+            dependency_errors=dependency_errors,
             content=body, raw=raw,
             has_references=(skill_dir / "references").is_dir(),
             has_scripts=(skill_dir / "scripts").is_dir(),
@@ -452,7 +706,9 @@ class SkillManager:
         name = fm.get("name", skill_id)
         description = fm.get("description", "")
         version = fm.get("version", "1.0.0")
-        dependencies = _parse_dependencies(fm.get("dependencies"))
+        dependencies, dependency_source, dependency_errors = _parse_dependencies(
+            fm, skill_id
+        )
         allowed_tools_raw = fm.get("allowed-tools")
         allowed_tools = None
         if isinstance(allowed_tools_raw, str):
@@ -474,13 +730,17 @@ class SkillManager:
             metadata=extra_meta,
         )
 
+        existing = await self.db.get_skill_row(skill_id)
         meta = SkillMeta(
             id=skill_id, name=name, description=description,
             version=str(version),
+            enabled=existing["enabled"] if existing else True,
             user_invocable=fm.get("user-invocable", True),
             model_invocable=not fm.get("disable-model-invocation", False),
             allowed_tools=allowed_tools,
             dependencies=dependencies,
+            dependency_source=dependency_source,
+            dependency_errors=dependency_errors,
             has_references=(skill_dir / "references").is_dir(),
             has_scripts=(skill_dir / "scripts").is_dir(),
             has_assets=(skill_dir / "assets").is_dir(),
@@ -602,48 +862,146 @@ class SkillManager:
         skill_id: str,
         *,
         max_depth: int = MAX_DEPENDENCY_DEPTH,
-    ) -> tuple[list[SkillContent], list[str]]:
-        """Return required skills in dependency-first order plus warnings."""
+        max_dependencies: int = MAX_DEPENDENCIES,
+        for_model: bool = True,
+    ) -> SkillDependencyResolution:
+        """Resolve a fail-closed, dependency-first instruction bundle.
+
+        Required edges are traversed in lexical skill-ID order. Each skill is
+        emitted once after its own requirements, giving a stable topological
+        order for chains and diamonds. Suggested edges are collected only after
+        successful required resolution and are never traversed.
+        """
         root = _skill_id(skill_id)
         resolved: list[SkillContent] = []
-        warnings: list[str] = []
+        errors: list[SkillDependencyIssue] = []
         visited: set[str] = set()
         visiting: list[str] = []
+        counted_dependencies: set[str] = set()
 
-        async def _visit(current_id: str, depth: int) -> None:
-            if current_id in visited:
-                return
+        async def _visit(current_id: str, depth: int, required_by: str = "") -> None:
             if current_id in visiting:
-                cycle = " -> ".join([*visiting, current_id])
-                warnings.append(f"Dependency cycle ignored: {cycle}")
+                cycle_start = visiting.index(current_id)
+                cycle_path = (*visiting[cycle_start:], current_id)
+                errors.append(SkillDependencyIssue(
+                    code="dependency_cycle",
+                    message=f"required dependency cycle: {' -> '.join(cycle_path)}",
+                    skill=required_by or current_id,
+                    dependency=current_id,
+                    path=cycle_path,
+                ))
                 return
             if depth > max_depth:
-                warnings.append(
-                    f"Dependency depth limit ({max_depth}) reached at {current_id}"
-                )
+                path = (*visiting, current_id)
+                errors.append(SkillDependencyIssue(
+                    code="dependency_depth_limit",
+                    message=(
+                        f"required dependency depth exceeds {max_depth} at {current_id!r}"
+                    ),
+                    skill=required_by or root,
+                    dependency=current_id,
+                    path=path,
+                ))
                 return
-            if len(visited) >= MAX_DEPENDENCIES:
-                warnings.append(
-                    f"Dependency count limit ({MAX_DEPENDENCIES}) reached"
-                )
+            if current_id in visited:
                 return
+            if current_id != root:
+                if current_id not in counted_dependencies:
+                    if len(counted_dependencies) >= max_dependencies:
+                        errors.append(SkillDependencyIssue(
+                            code="dependency_count_limit",
+                            message=(
+                                "required dependency count exceeds "
+                                f"{max_dependencies} at {current_id!r}"
+                            ),
+                            skill=required_by or root,
+                            dependency=current_id,
+                            path=(*visiting, current_id),
+                        ))
+                        return
+                    counted_dependencies.add(current_id)
 
             skill = await self.get_skill(current_id)
             if skill is None:
-                warnings.append(f"Required skill not found: {current_id}")
+                errors.append(SkillDependencyIssue(
+                    code="missing_required_dependency",
+                    message=f"required skill {current_id!r} was not found",
+                    skill=required_by or root,
+                    dependency=current_id,
+                    path=(*visiting, current_id),
+                ))
                 return
+            errors.extend(skill.dependency_errors)
+            if not skill.enabled:
+                errors.append(SkillDependencyIssue(
+                    code=("root_skill_disabled" if current_id == root else "required_dependency_disabled"),
+                    message=(
+                        f"skill {current_id!r} is disabled"
+                        if current_id == root
+                        else f"required skill {current_id!r} is disabled"
+                    ),
+                    skill=required_by or current_id,
+                    dependency="" if current_id == root else current_id,
+                    path=(*visiting, current_id),
+                ))
+            if for_model and not skill.model_invocable:
+                errors.append(SkillDependencyIssue(
+                    code=(
+                        "root_skill_not_model_invocable"
+                        if current_id == root else "required_dependency_not_model_invocable"
+                    ),
+                    message=(
+                        f"skill {current_id!r} is not model-invocable"
+                        if current_id == root
+                        else f"required skill {current_id!r} is not model-invocable"
+                    ),
+                    skill=required_by or current_id,
+                    dependency="" if current_id == root else current_id,
+                    path=(*visiting, current_id),
+                ))
 
             visiting.append(current_id)
-            for dependency in skill.dependencies:
-                if dependency.mode == "required":
-                    await _visit(dependency.skill, depth + 1)
+            for dependency in sorted(
+                (item for item in skill.dependencies if item.mode == "required"),
+                key=lambda item: item.skill,
+            ):
+                await _visit(dependency.skill, depth + 1, current_id)
             visiting.pop()
             visited.add(current_id)
-            if current_id != root:
-                resolved.append(skill)
+            resolved.append(skill)
 
         await _visit(root, 0)
-        return resolved, warnings
+        if errors:
+            return SkillDependencyResolution(
+                root=root,
+                errors=errors,
+                max_depth=max_depth,
+                max_dependencies=max_dependencies,
+            )
+
+        suggestions: list[SuggestedSkillDependency] = []
+        seen_suggestions: set[str] = set()
+        for skill in resolved:
+            for dependency in sorted(
+                (item for item in skill.dependencies if item.mode == "suggested"),
+                key=lambda item: item.skill,
+            ):
+                if dependency.skill in seen_suggestions:
+                    continue
+                seen_suggestions.add(dependency.skill)
+                suggestions.append(SuggestedSkillDependency(
+                    skill=dependency.skill,
+                    when=dependency.when,
+                    declared_by=skill.id,
+                ))
+
+        return SkillDependencyResolution(
+            root=root,
+            bundle=resolved,
+            suggested=suggestions,
+            max_depth=max_depth,
+            max_dependencies=max_dependencies,
+        )
 
     async def read_reference(self, skill_id: str, rel_path: str) -> str | None:
         """Read a reference file from a skill."""

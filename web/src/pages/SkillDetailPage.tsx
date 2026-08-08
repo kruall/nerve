@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Save, Trash2, Zap, CheckCircle, XCircle, Clock, FileText } from 'lucide-react';
+import { ArrowLeft, Save, Trash2, Zap, CheckCircle, XCircle, Clock, FileText, GitBranch } from 'lucide-react';
 import { useSkillsStore } from '../stores/skillsStore';
 import { Modal } from '../components/ui/Modal';
 
@@ -212,6 +212,65 @@ export function SkillDetailPage() {
               )}
             </div>
           </div>
+
+          {/* Dependencies */}
+          {(selectedSkill.dependency_source !== 'none' || selectedSkill.dependency_resolution.errors.length > 0) && (
+            <div className="p-4 border-b border-border">
+              <div className="flex items-center gap-1.5 mb-3">
+                <GitBranch size={11} className="text-text-muted" />
+                <h3 className="text-xs font-medium text-text-muted">Dependencies</h3>
+              </div>
+
+              {selectedSkill.dependency_source === 'legacy' && (
+                <div className="mb-3 rounded border border-amber-500/30 bg-amber-500/10 p-2 text-[10px] text-hue-amber">
+                  Legacy declaration. Move it to <span className="font-mono">metadata.nerve.dependencies</span>.
+                </div>
+              )}
+
+              {selectedSkill.dependency_resolution.errors.length > 0 && (
+                <div className="mb-3 space-y-1.5 rounded border border-red-500/30 bg-red-500/10 p-2">
+                  <div className="flex items-center gap-1 text-[10px] font-medium text-hue-red">
+                    <XCircle size={10} /> Loading is blocked
+                  </div>
+                  {selectedSkill.dependency_resolution.errors.map((error, index) => (
+                    <div key={`${error.code}-${index}`} className="text-[10px] text-hue-red">
+                      <span className="font-mono">{error.code}</span>: {error.message}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {selectedSkill.dependency_resolution.required.length > 0 && (
+                <div className="mb-3">
+                  <div className="mb-1 text-[10px] text-text-dim">Required bundle order</div>
+                  <div className="space-y-1">
+                    {selectedSkill.dependency_resolution.required.map(dependency => (
+                      <div key={dependency.id} className="flex items-center justify-between text-[10px]">
+                        <span className="font-mono text-text-muted">{dependency.id}</span>
+                        <span className="text-text-dim">v{dependency.version}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {selectedSkill.dependency_resolution.suggested.length > 0 && (
+                <div>
+                  <div className="mb-1 text-[10px] text-text-dim">Suggested (never auto-loaded)</div>
+                  <div className="space-y-2">
+                    {selectedSkill.dependency_resolution.suggested.map(dependency => (
+                      <div key={dependency.skill} className="text-[10px]">
+                        <div className="font-mono text-text-muted">{dependency.skill}</div>
+                        <div className="text-text-dim">
+                          {dependency.when || 'No condition declared'} · not evaluated by Nerve
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* References */}
           {selectedSkill.references.length > 0 && (

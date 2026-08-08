@@ -123,6 +123,7 @@ Workers create their own skills during onboarding and refine them over time.
 - The agent reads skill descriptions in every session's system prompt
 - Full skill content is loaded on demand via `skill_get`
 - Skills can include reference docs (`references/`), scripts (`scripts/`), and assets (`assets/`)
+- Required and suggested skill composition is documented in [Skills](skills.md)
 
 **Automated skill lifecycle:**
 - `skill-extractor` (every 12h) — watches for repeated workflows in conversations and completed tasks, proposes new skills via task+plan

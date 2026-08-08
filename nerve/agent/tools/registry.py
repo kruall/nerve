@@ -70,9 +70,11 @@ class ToolResult:
     ``structured`` carries the same outcome as data, for in-process callers
     that need to branch on it — an HTTP route invoking a handler through
     the registry can read a task id or a duplicate list from here instead
-    of parsing it back out of the prose. The tool adapters ignore it, so an
-    agent sees identical behavior whether a handler sets it or not; text
-    remains the contract for anything crossing the tool boundary.
+    of parsing it back out of the prose.
+
+    ``structured`` is exposed as MCP ``structuredContent`` when supported.
+    Tools must still include a human-readable text block because runtime
+    adapters that do not support structured content ignore this field.
     """
 
     content: list[dict]

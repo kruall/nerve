@@ -196,7 +196,11 @@ def build_mcp_server(
                 )
                 content.append(TextContent(type="text", text=str(block)))
 
-        return CallToolResult(content=content, isError=result.is_error)
+        return CallToolResult(
+            content=content,
+            structuredContent=result.structured,
+            isError=result.is_error,
+        )
 
     # mcp 2.x registers handlers as constructor callbacks; the 1.x
     # ``@server.list_tools()`` / ``@server.call_tool()`` decorators are gone.

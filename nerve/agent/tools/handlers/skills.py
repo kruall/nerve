@@ -51,19 +51,37 @@ async def skill_get_handler(ctx: ToolContext, args: dict) -> ToolResult:
     try:
         start = time.monotonic()
         skill = await ctx.skill_manager.get_skill(skill_id)
-        duration_ms = int((time.monotonic() - start) * 1000)
 
         if not skill:
-            return ToolResult.text(f"Skill not found: {skill_id}")
+            return ToolResult.text(f"Skill not found: {skill_id}", is_error=True)
 
-        await ctx.skill_manager.record_usage(
-            skill_id=skill_id, invoked_by="model", duration_ms=duration_ms, success=True,
-        )
+        resolution = await ctx.skill_manager.resolve_required_dependencies(skill_id)
+        if not resolution.ok:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            error_summary = "; ".join(issue.message for issue in resolution.errors)
+            await ctx.skill_manager.record_usage(
+                skill_id=skill_id,
+                session_id=ctx.session_id,
+                invoked_by="model",
+                duration_ms=duration_ms,
+                success=False,
+                error=error_summary,
+            )
+            lines = [
+                f"Error loading skill `{skill_id}`: required dependency resolution failed.",
+                "",
+            ]
+            lines.extend(
+                f"- [{issue.code}] {issue.message}"
+                for issue in resolution.errors
+            )
+            return ToolResult(
+                content=[{"type": "text", "text": "\n".join(lines)}],
+                is_error=True,
+                structured={"dependency_resolution": resolution.to_dict()},
+            )
 
-        dependencies, dependency_warnings = (
-            await ctx.skill_manager.resolve_required_dependencies(skill_id)
-        )
-        bundle = [*dependencies, skill]
+        bundle = resolution.bundle
         parts = [f"# Skill: {skill.name} (v{skill.version})\n"]
 
         for bundled in bundle:
@@ -72,7 +90,7 @@ async def skill_get_handler(ctx: ToolContext, args: dict) -> ToolResult:
                     f"\n## Required dependency: {bundled.name} "
                     f"(`{bundled.id}`, v{bundled.version})\n"
                 )
-            elif dependencies:
+            elif len(bundle) > 1:
                 parts.append("\n## Main skill instructions\n")
             parts.append(bundled.content)
 
@@ -89,23 +107,22 @@ async def skill_get_handler(ctx: ToolContext, args: dict) -> ToolResult:
                 )
 
         suggestions = []
-        seen_suggestions: set[str] = set()
-        for bundled in bundle:
-            for dependency in bundled.dependencies:
-                if dependency.mode != "suggested" or dependency.skill in seen_suggestions:
-                    continue
-                seen_suggestions.add(dependency.skill)
-                condition = f" — {dependency.when}" if dependency.when else ""
-                suggestions.append(f"- `{dependency.skill}`{condition}")
+        for dependency in resolution.suggested:
+            condition = (
+                f" — condition (advisory, not evaluated by Nerve): {dependency.when}"
+                if dependency.when
+                else " — advisory; no condition declared"
+            )
+            suggestions.append(
+                f"- `{dependency.skill}`{condition} (suggested by `{dependency.declared_by}`)"
+            )
         if suggestions:
             parts.append(
                 "\n## Suggested related skills\n\n"
-                "Load these with `skill_get` only when their condition applies:\n"
+                "Nerve does not load these automatically or evaluate their conditions. "
+                "Load one with `skill_get` only when its advisory condition applies:\n"
                 + "\n".join(suggestions)
             )
-
-        for warning in dependency_warnings:
-            parts.append(f"\n**Dependency warning:** {warning}")
 
         for bundled in bundle:
             if bundled.has_references:
@@ -140,17 +157,32 @@ async def skill_get_handler(ctx: ToolContext, args: dict) -> ToolResult:
                     for script in scripts:
                         parts.append(f"  - `{script}`")
 
-        return ToolResult.text("\n".join(parts))
+        duration_ms = int((time.monotonic() - start) * 1000)
+        await ctx.skill_manager.record_usage(
+            skill_id=skill_id,
+            session_id=ctx.session_id,
+            invoked_by="model",
+            duration_ms=duration_ms,
+            success=True,
+        )
+        return ToolResult(
+            content=[{"type": "text", "text": "\n".join(parts)}],
+            structured={"dependency_resolution": resolution.to_dict()},
+        )
     except Exception as e:
         logger.error("skill_get failed: %s", e)
         if ctx.skill_manager:
             try:
                 await ctx.skill_manager.record_usage(
-                    skill_id=skill_id, invoked_by="model", success=False, error=str(e),
+                    skill_id=skill_id,
+                    session_id=ctx.session_id,
+                    invoked_by="model",
+                    success=False,
+                    error=str(e),
                 )
             except Exception:
                 pass
-        return ToolResult.text(f"Error loading skill: {e}")
+        return ToolResult.text(f"Error loading skill: {e}", is_error=True)
 
 
 async def skill_read_reference_handler(ctx: ToolContext, args: dict) -> ToolResult:

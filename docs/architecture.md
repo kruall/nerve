@@ -135,8 +135,8 @@ Filesystem-based skill system (Claude SDK compatible):
 - `references/AMENDMENTS.md` is append-only between revisions and is loaded with
   the stable instructions; content revisions prevent a consolidation from
   clearing notes that arrived after review
-- Frontmatter dependencies support required skills (loaded transitively with
-  cycle/depth limits) and suggested skills with human-readable activation hints
+- Namespaced frontmatter dependencies have deterministic, fail-closed required
+  composition and advisory suggested edges; see [Skills](skills.md)
 - Automated extraction: `skill-extractor` cron identifies repeated workflows and proposes new skills via task+plan system
 - Automated revision: `skill-reviser` cron consolidates pending amendments and
   reviews existing skills for accuracy, completeness, and quality
