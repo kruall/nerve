@@ -105,6 +105,10 @@ def _runtime_root(config: Any) -> Path:
     )
 
 
+def _marketplace_plugin_root(config: Any) -> Path:
+    return _marketplace_root(config) / "plugins" / _PLUGIN
+
+
 def _hook_entrypoint(root: Path) -> Path:
     return root / "dist" / "index.mjs"
 
@@ -273,6 +277,93 @@ def _write_install_receipt(
             "digest": _tree_digest(plugin_root),
         }, indent=2) + "\n",
     )
+
+
+def _runtime_matches_marketplace_unpatched(config: Any, root: Path) -> bool:
+    """Accept only the exact hook files Codex just copied from the pinned tree.
+
+    Codex rebuilds its git-less runtime cache while starting an app-server.  The
+    pre-start receipt therefore no longer describes the bytes on disk, but the
+    two hook files may still be safely repaired when they exactly match the
+    reviewed marketplace snapshot.
+    """
+    marketplace = _marketplace_plugin_root(config)
+    for relative in (Path("src/trace.ts"), Path("dist/index.mjs")):
+        try:
+            if (root / relative).read_bytes() != (marketplace / relative).read_bytes():
+                return False
+        except OSError:
+            return False
+    return True
+
+
+async def repair_after_appserver_start(config: Any) -> dict[str, Any]:
+    """Restore the managed patch after Codex rebuilds its runtime cache.
+
+    The official CLI materializes plugins after the Nerve preflight patch but
+    before its app-server handshake completes.  This local, content-bound
+    repair runs before Nerve starts a Codex thread, so no generation can use
+    the inclusive hook.
+    """
+    global _last_error
+    plugin = config.langfuse.codex
+    status = installation_status(config)
+    if not plugin.enabled or status["ready"]:
+        return status
+    if not re.fullmatch(r"[0-9a-f]{40}", plugin.revision):
+        record_error("verified plugin revision is not configured", config)
+        return installation_status(config)
+    if not _credentials_configured(config):
+        record_error("Langfuse credentials are not configured", config)
+        return installation_status(config)
+
+    async with _INSTALL_LOCK:
+        lock = await _acquire_file_lock(
+            managed_dir(config.codex.home_dir) / "install.lock",
+        )
+        try:
+            status = installation_status(config)
+            if status["ready"]:
+                return status
+            root = _runtime_root(config)
+            try:
+                manifest = json.loads(
+                    (root / ".codex-plugin" / "plugin.json").read_text(
+                        encoding="utf-8",
+                    ),
+                )
+            except (OSError, ValueError):
+                manifest = {}
+            if not (
+                manifest.get("name") == _PLUGIN
+                and manifest.get("version") == plugin.version
+                and _git_revision(_marketplace_root(config)) == plugin.revision
+                and _hook_entrypoint(root).is_file()
+                and _runtime_matches_marketplace_unpatched(config, root)
+            ):
+                raise RuntimeError(
+                    "Codex post-start plugin cache does not match the reviewed "
+                    "marketplace snapshot"
+                )
+            _apply_usage_patch(root)
+            _write_install_receipt(config, root, plugin.version)
+            status = installation_status(config)
+            if not status["installed"]:
+                raise RuntimeError(
+                    "post-start Langfuse plugin repair failed managed verification"
+                )
+            _last_error = None
+            logger.info(
+                "Restored managed Langfuse usage normalization %s after "
+                "Codex runtime-cache materialization at %s",
+                _USAGE_PATCH_ID, status["path"],
+            )
+            return status
+        except Exception as error:
+            record_error(error, config)
+            return installation_status(config)
+        finally:
+            _release_file_lock(lock)
 
 
 def _credentials_configured(config: Any) -> bool:

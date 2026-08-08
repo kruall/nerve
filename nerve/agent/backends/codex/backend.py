@@ -52,6 +52,7 @@ from nerve.agent.backends.codex.langfuse_plugin import (
     ensure_installed as ensure_langfuse_plugin_installed,
     installation_status as langfuse_plugin_installation_status,
     record_error as record_langfuse_plugin_error,
+    repair_after_appserver_start as repair_langfuse_plugin_after_appserver_start,
 )
 from nerve.agent.backends.codex.mcp_stdio_wrapper import EXTERNAL_MCP_ENV_PREFIX
 from nerve.agent.backends.codex.pricing import compute_cost
@@ -688,6 +689,21 @@ class CodexClient(AgentClient):
 
     async def connect(self) -> None:
         await self._transport.start()
+        if self._backend._langfuse_plugin_ready:
+            try:
+                plugin = await repair_langfuse_plugin_after_appserver_start(
+                    self._backend.config,
+                )
+                if not plugin.get("ready"):
+                    # The hook was enabled on the process command line, but
+                    # thread/start has its own trust snapshot.  Withhold that
+                    # per-thread bypass if post-start verification failed.
+                    self._backend._langfuse_plugin_ready = False
+            except Exception as error:
+                # Transcript export is optional.  Do not start a thread whose
+                # trust snapshot would permit an unverified hook.
+                record_langfuse_plugin_error(error, self._backend.config)
+                self._backend._langfuse_plugin_ready = False
         await self._ensure_auth()
         await self._validate_live_model()
 

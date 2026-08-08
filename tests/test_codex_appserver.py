@@ -245,6 +245,9 @@ async def test_langfuse_plugin_is_injected_only_after_verified_install(
     monkeypatch.setattr(
         backend_module, "ensure_langfuse_plugin_installed", ready,
     )
+    monkeypatch.setattr(
+        backend_module, "repair_langfuse_plugin_after_appserver_start", ready,
+    )
     backend = CodexBackend(_deps(cfg))
     client = await backend.create_client(_spec(cfg))
     try:

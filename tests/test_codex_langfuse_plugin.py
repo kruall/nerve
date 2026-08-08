@@ -185,6 +185,47 @@ async def test_verified_unpatched_current_receipt_is_repaired_without_network(
 
 
 @pytest.mark.asyncio
+async def test_post_start_repair_restores_cache_rebuilt_by_codex(tmp_path):
+    config = _config(tmp_path)
+    root = _materialize_installed(config)
+
+    # Codex copies the marketplace's original hook files during app-server
+    # start, invalidating the receipt written by the pre-start installation.
+    marketplace = plugin._marketplace_plugin_root(config)
+    for relative in (Path("src/trace.ts"), Path("dist/index.mjs")):
+        source = marketplace / relative
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("\n".join(
+            original for original, _ in (
+                plugin._SOURCE_USAGE_REPLACEMENTS
+                if relative.name == "trace.ts"
+                else plugin._BUNDLE_USAGE_REPLACEMENTS
+            )
+        ))
+        (root / relative).write_bytes(source.read_bytes())
+
+    status = await plugin.repair_after_appserver_start(config)
+
+    assert status["ready"] is True
+    assert status["usage_normalization"] == "exclusive-usage-v1"
+    assert plugin._usage_patch_applied(root) is True
+
+
+@pytest.mark.asyncio
+async def test_post_start_repair_rejects_unreviewed_runtime_cache(tmp_path):
+    config = _config(tmp_path)
+    root = _materialize_installed(config)
+    runtime_source = root / "src" / "trace.ts"
+    runtime_source.write_text("unreviewed runtime hook")
+
+    status = await plugin.repair_after_appserver_start(config)
+
+    assert status["ready"] is False
+    assert status["usage_normalization"] is None
+    assert "does not match the reviewed marketplace snapshot" in status["last_error"]
+
+
+@pytest.mark.asyncio
 async def test_usage_patch_mismatch_disables_tracing_without_network(
     tmp_path, monkeypatch,
 ):
