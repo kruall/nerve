@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 _MARKETPLACE = "codex-observability-plugin"
 _PLUGIN = "tracing"
-_USAGE_PATCH_ID = "exclusive-usage-v1"
+_USAGE_PATCH_ID = "exclusive-usage-v2"
 _INSTALL_LOCK = asyncio.Lock()
 _last_error: str | None = None
 
@@ -31,7 +31,7 @@ _SOURCE_USAGE_REPLACEMENTS = (
     (
         '  const details: Record<string, number> = {};',
         '''  const details: Record<string, number> = {};
-  // Nerve managed patch: exclusive-usage-v1
+  // Nerve managed patch: exclusive-usage-v2
   const cachedInputTokens =
     typeof usage.cached_input_tokens === "number" ? usage.cached_input_tokens : 0;
   const reasoningOutputTokens =
@@ -51,11 +51,11 @@ _SOURCE_USAGE_REPLACEMENTS = (
     ),
     (
         "    details.cache_read_input_tokens = usage.cached_input_tokens;",
-        "    details.cache_read_input_tokens = cachedInputTokens;",
+        "    details.input_cached_tokens = cachedInputTokens;",
     ),
     (
         "    details.reasoning_tokens = usage.reasoning_output_tokens;",
-        "    details.reasoning_tokens = reasoningOutputTokens;",
+        "    details.output_reasoning_tokens = reasoningOutputTokens;",
     ),
 )
 
@@ -63,7 +63,7 @@ _BUNDLE_USAGE_REPLACEMENTS = (
     (
         "\tconst details = {};",
         '''\tconst details = {};
-\t/* Nerve managed patch: exclusive-usage-v1 */
+\t/* Nerve managed patch: exclusive-usage-v2 */
 \tconst cachedInputTokens = typeof usage.cached_input_tokens === "number" ? usage.cached_input_tokens : 0;
 \tconst reasoningOutputTokens = typeof usage.reasoning_output_tokens === "number" ? usage.reasoning_output_tokens : 0;''',
     ),
@@ -77,11 +77,11 @@ _BUNDLE_USAGE_REPLACEMENTS = (
     ),
     (
         '\tif (typeof usage.cached_input_tokens === "number") details.cache_read_input_tokens = usage.cached_input_tokens;',
-        '\tif (typeof usage.cached_input_tokens === "number") details.cache_read_input_tokens = cachedInputTokens;',
+        '\tif (typeof usage.cached_input_tokens === "number") details.input_cached_tokens = cachedInputTokens;',
     ),
     (
         '\tif (typeof usage.reasoning_output_tokens === "number") details.reasoning_tokens = usage.reasoning_output_tokens;',
-        '\tif (typeof usage.reasoning_output_tokens === "number") details.reasoning_tokens = reasoningOutputTokens;',
+        '\tif (typeof usage.reasoning_output_tokens === "number") details.output_reasoning_tokens = reasoningOutputTokens;',
     ),
 )
 

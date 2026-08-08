@@ -104,7 +104,7 @@ def test_status_requires_exact_version_revision_and_credentials(tmp_path):
     assert status["version"] == "0.1.0"
     assert status["revision"] == REVISION
     assert status["path"] == str(root)
-    assert status["usage_normalization"] == "exclusive-usage-v1"
+    assert status["usage_normalization"] == "exclusive-usage-v2"
     assert "pk-lf-test" not in json.dumps(status)
     assert "sk-lf-test" not in json.dumps(status)
 
@@ -130,8 +130,8 @@ def test_usage_patch_makes_flat_langfuse_buckets_exclusive(tmp_path):
     for content in (source, bundle):
         assert "usage.input_tokens - cachedInputTokens" in content
         assert "usage.output_tokens - reasoningOutputTokens" in content
-        assert "details.cache_read_input_tokens = cachedInputTokens" in content
-        assert "details.reasoning_tokens = reasoningOutputTokens" in content
+        assert "details.input_cached_tokens = cachedInputTokens" in content
+        assert "details.output_reasoning_tokens = reasoningOutputTokens" in content
     assert plugin._usage_patch_applied(root) is True
 
     # Reapplying the managed patch is deterministic and idempotent.
@@ -156,7 +156,7 @@ async def test_legacy_verified_install_is_patched_without_network(
     status = await plugin.ensure_installed(config)
 
     assert status["ready"] is True
-    assert status["usage_normalization"] == "exclusive-usage-v1"
+    assert status["usage_normalization"] == "exclusive-usage-v2"
     assert plugin._usage_patch_applied(root) is True
 
 
@@ -180,7 +180,7 @@ async def test_verified_unpatched_current_receipt_is_repaired_without_network(
     status = await plugin.ensure_installed(config)
 
     assert status["ready"] is True
-    assert status["usage_normalization"] == "exclusive-usage-v1"
+    assert status["usage_normalization"] == "exclusive-usage-v2"
     assert plugin._usage_patch_applied(root) is True
 
 
@@ -207,7 +207,7 @@ async def test_post_start_repair_restores_cache_rebuilt_by_codex(tmp_path):
     status = await plugin.repair_after_appserver_start(config)
 
     assert status["ready"] is True
-    assert status["usage_normalization"] == "exclusive-usage-v1"
+    assert status["usage_normalization"] == "exclusive-usage-v2"
     assert plugin._usage_patch_applied(root) is True
 
 
