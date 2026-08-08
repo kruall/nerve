@@ -87,9 +87,11 @@ the installed version and revision match. The pinned `0.1.0` artifact reports
 Codex's inclusive input/output counters as flat Langfuse usage buckets. Nerve
 therefore applies the deterministic `exclusive-usage-v2` compatibility patch:
 cached input and reasoning output are subtracted from their inclusive parent
-buckets before export. Both source and bundled hook must match the reviewed
-artifact exactly; the patched bytes and patch id are bound into the managed
-install receipt. A mismatch disables Codex tracing without blocking Codex.
+buckets before export. Nerve patches the pinned marketplace snapshot before
+Codex starts, so runtime-cache materialization and restarts preserve the same
+hook. Both marketplace and runtime source/bundle bytes, plus the patch id, are
+bound into the managed install receipt. A mismatch disables Codex tracing
+without blocking Codex.
 The exported detail names are Langfuse's pricing keys: `input_cached_tokens`
 and `output_reasoning_tokens`; Nerve's internal usage schema remains unchanged.
 

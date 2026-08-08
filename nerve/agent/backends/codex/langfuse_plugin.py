@@ -247,6 +247,7 @@ def _receipt_revision(
     version: str,
     *,
     patch: str | None = _USAGE_PATCH_ID,
+    require_marketplace: bool = True,
 ) -> str:
     path = managed_dir(config.codex.home_dir) / "install-receipt.json"
     try:
@@ -256,6 +257,11 @@ def _receipt_revision(
             and receipt.get("version") == version
             and receipt.get("patch") == patch
             and receipt.get("digest") == _tree_digest(plugin_root)
+            and (
+                not require_marketplace
+                or receipt.get("marketplace_digest")
+                == _tree_digest(_marketplace_plugin_root(config))
+            )
             and re.fullmatch(r"[0-9a-f]{40}", str(receipt.get("revision") or ""))
         ):
             return str(receipt["revision"])
@@ -275,17 +281,18 @@ def _write_install_receipt(
             "revision": config.langfuse.codex.revision,
             "patch": _USAGE_PATCH_ID,
             "digest": _tree_digest(plugin_root),
+            "marketplace_digest": _tree_digest(
+                _marketplace_plugin_root(config),
+            ),
         }, indent=2) + "\n",
     )
 
 
-def _runtime_matches_marketplace_unpatched(config: Any, root: Path) -> bool:
+def _runtime_matches_marketplace_snapshot(config: Any, root: Path) -> bool:
     """Accept only the exact hook files Codex just copied from the pinned tree.
 
     Codex rebuilds its git-less runtime cache while starting an app-server.  The
-    pre-start receipt therefore no longer describes the bytes on disk, but the
-    two hook files may still be safely repaired when they exactly match the
-    reviewed marketplace snapshot.
+    two hook files must exactly match the managed marketplace snapshot.
     """
     marketplace = _marketplace_plugin_root(config)
     for relative in (Path("src/trace.ts"), Path("dist/index.mjs")):
@@ -298,12 +305,11 @@ def _runtime_matches_marketplace_unpatched(config: Any, root: Path) -> bool:
 
 
 async def repair_after_appserver_start(config: Any) -> dict[str, Any]:
-    """Restore the managed patch after Codex rebuilds its runtime cache.
+    """Verify a runtime cache rebuilt from the patched marketplace snapshot.
 
-    The official CLI materializes plugins after the Nerve preflight patch but
-    before its app-server handshake completes.  This local, content-bound
-    repair runs before Nerve starts a Codex thread, so no generation can use
-    the inclusive hook.
+    The marketplace is patched before app-server startup, so any runtime cache
+    Codex materializes already contains the exclusive counters.  This repair
+    only binds the newly materialized bytes to a fresh receipt.
     """
     global _last_error
     plugin = config.langfuse.codex
@@ -338,8 +344,9 @@ async def repair_after_appserver_start(config: Any) -> dict[str, Any]:
                 manifest.get("name") == _PLUGIN
                 and manifest.get("version") == plugin.version
                 and _git_revision(_marketplace_root(config)) == plugin.revision
+                and _usage_patch_applied(_marketplace_plugin_root(config))
                 and _hook_entrypoint(root).is_file()
-                and _runtime_matches_marketplace_unpatched(config, root)
+                and _runtime_matches_marketplace_snapshot(config, root)
             ):
                 raise RuntimeError(
                     "Codex post-start plugin cache does not match the reviewed "
@@ -384,6 +391,7 @@ def installation_status(config: Any) -> dict[str, Any]:
     version = str(manifest.get("version") or "")
     receipt_revision = _receipt_revision(config, root, version)
     usage_patched = _usage_patch_applied(root)
+    marketplace_patched = _usage_patch_applied(_marketplace_plugin_root(config))
     revision_configured = bool(re.fullmatch(r"[0-9a-f]{40}", plugin.revision))
     installed = bool(
         revision_configured
@@ -393,6 +401,7 @@ def installation_status(config: Any) -> dict[str, Any]:
         and receipt_revision == plugin.revision
         and _hook_entrypoint(root).is_file()
         and usage_patched
+        and marketplace_patched
     )
     auth = _credentials_configured(config)
     requested = bool(plugin.enabled)
@@ -415,7 +424,9 @@ def installation_status(config: Any) -> dict[str, Any]:
         "expected_revision": plugin.revision or None,
         "path": str(root) if root.exists() else None,
         "auto_update": False,
-        "usage_normalization": _USAGE_PATCH_ID if usage_patched else None,
+        "usage_normalization": (
+            _USAGE_PATCH_ID if usage_patched and marketplace_patched else None
+        ),
         "max_chars": plugin.max_chars,
         "last_error": error,
     }
@@ -501,9 +512,12 @@ async def ensure_installed(config: Any) -> dict[str, Any]:
             except (OSError, ValueError):
                 manifest = {}
             receipt_matches_runtime = (
-                _receipt_revision(config, root, plugin.version) == plugin.revision
+                _receipt_revision(
+                    config, root, plugin.version, require_marketplace=False,
+                ) == plugin.revision
                 or _receipt_revision(
                     config, root, plugin.version, patch=None,
+                    require_marketplace=False,
                 ) == plugin.revision
             )
             repairable_snapshot = bool(
@@ -515,6 +529,7 @@ async def ensure_installed(config: Any) -> dict[str, Any]:
             )
             if repairable_snapshot:
                 try:
+                    _apply_usage_patch(_marketplace_plugin_root(config))
                     _apply_usage_patch(root)
                     _write_install_receipt(config, root, plugin.version)
                     status = installation_status(config)
@@ -561,6 +576,7 @@ async def ensure_installed(config: Any) -> dict[str, Any]:
                     raise RuntimeError(
                         "Codex marketplace snapshot does not match the pinned revision"
                     )
+                _apply_usage_patch(_marketplace_plugin_root(config))
                 await _run(
                     config.codex.bin_path,
                     "plugin", "add", f"{_PLUGIN}@{_MARKETPLACE}", "--json",

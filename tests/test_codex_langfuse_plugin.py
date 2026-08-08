@@ -49,6 +49,17 @@ def _materialize_marketplace(config: NerveConfig) -> Path:
     )
     (root / ".git").mkdir(parents=True)
     (root / ".git" / "HEAD").write_text(REVISION)
+    plugin_root = root / "plugins" / "tracing"
+    entrypoint = plugin_root / "dist" / "index.mjs"
+    entrypoint.parent.mkdir(parents=True)
+    entrypoint.write_text("\n".join(
+        original for original, _ in plugin._BUNDLE_USAGE_REPLACEMENTS
+    ))
+    source = plugin_root / "src" / "trace.ts"
+    source.parent.mkdir()
+    source.write_text("\n".join(
+        original for original, _ in plugin._SOURCE_USAGE_REPLACEMENTS
+    ))
     return root
 
 
@@ -77,6 +88,7 @@ def _materialize_runtime(config: NerveConfig) -> Path:
 def _materialize_installed(config: NerveConfig) -> Path:
     _materialize_marketplace(config)
     root = _materialize_runtime(config)
+    plugin._apply_usage_patch(plugin._marketplace_plugin_root(config))
     plugin._apply_usage_patch(root)
     plugin._write_install_receipt(config, root, "0.1.0")
     return root
@@ -189,19 +201,11 @@ async def test_post_start_repair_restores_cache_rebuilt_by_codex(tmp_path):
     config = _config(tmp_path)
     root = _materialize_installed(config)
 
-    # Codex copies the marketplace's original hook files during app-server
-    # start, invalidating the receipt written by the pre-start installation.
+    # Codex rebuilds the cache from the already-patched marketplace during
+    # app-server start, invalidating only the pre-start receipt.
     marketplace = plugin._marketplace_plugin_root(config)
     for relative in (Path("src/trace.ts"), Path("dist/index.mjs")):
         source = marketplace / relative
-        source.parent.mkdir(parents=True, exist_ok=True)
-        source.write_text("\n".join(
-            original for original, _ in (
-                plugin._SOURCE_USAGE_REPLACEMENTS
-                if relative.name == "trace.ts"
-                else plugin._BUNDLE_USAGE_REPLACEMENTS
-            )
-        ))
         (root / relative).write_bytes(source.read_bytes())
 
     status = await plugin.repair_after_appserver_start(config)
@@ -209,6 +213,28 @@ async def test_post_start_repair_restores_cache_rebuilt_by_codex(tmp_path):
     assert status["ready"] is True
     assert status["usage_normalization"] == "exclusive-usage-v2"
     assert plugin._usage_patch_applied(root) is True
+
+
+def test_marketplace_patch_survives_runtime_rematerialization(tmp_path):
+    config = _config(tmp_path)
+    root = _materialize_installed(config)
+    marketplace = plugin._marketplace_plugin_root(config)
+
+    for relative in (Path("src/trace.ts"), Path("dist/index.mjs")):
+        (root / relative).write_bytes((marketplace / relative).read_bytes())
+
+    assert plugin._usage_patch_applied(marketplace) is True
+    assert plugin._usage_patch_applied(root) is True
+
+
+def test_marketplace_patch_is_content_bound_by_receipt(tmp_path):
+    config = _config(tmp_path)
+    _materialize_installed(config)
+    marketplace_bundle = plugin._marketplace_plugin_root(config) / "dist/index.mjs"
+
+    marketplace_bundle.write_text("externally reset marketplace")
+
+    assert plugin.installation_status(config)["ready"] is False
 
 
 @pytest.mark.asyncio
