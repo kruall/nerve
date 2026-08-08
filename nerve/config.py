@@ -2256,6 +2256,7 @@ class CodexConfig:
     home_dir: str = field(default_factory=lambda: str(paths.nerve_path("codex")))  # isolated CODEX_HOME (auth/config/sessions)
     model: str = "gpt-5.6-sol"
     cron_model: str = ""                    # empty → model
+    plan_model: str = "gpt-5.6-terra"       # approved-plan implementation sessions
     auth: str = "chatgpt"                   # chatgpt | api_key
     api_key: str = ""                       # literal key (config.local.yaml)
     api_key_env: str = "OPENAI_API_KEY"     # env fallback when auth=api_key
@@ -2313,6 +2314,7 @@ class CodexConfig:
             ),
             model=str(d.get("model", "gpt-5.6-sol") or "").strip(),
             cron_model=str(d.get("cron_model") or "").strip(),
+            plan_model=str(d.get("plan_model", "gpt-5.6-terra") or "").strip(),
             auth=str(d.get("auth", "chatgpt")).strip().lower(),
             api_key=str(d.get("api_key") or ""),
             api_key_env=str(d.get("api_key_env", "OPENAI_API_KEY")),

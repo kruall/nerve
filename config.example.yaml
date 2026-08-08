@@ -185,6 +185,12 @@ memory:
   # memorize_model: gpt-5.6-terra
   # fast_model: gpt-5.6-terra
 
+# Codex agent backend settings.
+# codex:
+#   model: gpt-5.6-sol                       # interactive web sessions
+#   cron_model: gpt-5.6-terra                # cron and hook sessions (empty → model)
+#   plan_model: gpt-5.6-terra                # approved-plan implementation sessions
+
 # Cron — no path keys needed. Cron config lives in <workspace>/config/cron/
 # (system.yaml, jobs.yaml, gates/) and is resolved from the workspace, with a
 # fallback to the legacy ~/.nerve/cron for un-migrated installs.

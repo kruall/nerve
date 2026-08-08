@@ -943,6 +943,7 @@ codex:                     # active when a codex backend is selected
   home_dir: ~/.nerve/codex # isolated CODEX_HOME (auth, config, sessions)
   model: gpt-5.6-sol
   cron_model: null         # null → model
+  plan_model: gpt-5.6-terra # approved-plan implementation sessions
   auth: chatgpt            # chatgpt | api_key
   api_key: null            # config.local.yaml; or api_key_env: OPENAI_API_KEY
   sandbox: danger-full-access   # read-only | workspace-write | danger-full-access

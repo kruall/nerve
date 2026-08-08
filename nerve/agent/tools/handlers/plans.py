@@ -230,8 +230,14 @@ async def plan_approve_handler(ctx: ToolContext, args: dict) -> ToolResult:
     await ctx.db.update_plan(plan_id, status="implementing", reviewed_at=now)
 
     impl_session_id = f"impl-{str(uuid.uuid4())[:8]}"
+    implementation_model = None
+    if ctx.config and ctx.config.agent.backend == "codex":
+        implementation_model = ctx.config.codex.plan_model
     await ctx.engine.sessions.get_or_create(
-        impl_session_id, title=f"Implement: {task['title']}", source="web",
+        impl_session_id,
+        title=f"Implement: {task['title']}",
+        source="web",
+        model=implementation_model,
     )
     await ctx.db.update_plan(plan_id, impl_session_id=impl_session_id)
 
@@ -300,7 +306,10 @@ async def plan_approve_handler(ctx: ToolContext, args: dict) -> ToolResult:
     async def _run_impl():
         try:
             await engine.run(
-                session_id=impl_session_id, user_message=prompt, source="web",
+                session_id=impl_session_id,
+                user_message=prompt,
+                source="web",
+                model=implementation_model,
             )
         except Exception:
             logger.exception("Implementation session %s failed", impl_session_id)
