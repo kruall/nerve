@@ -320,12 +320,10 @@ class TestMemoryProviderResolution:
             "codex": {
                 "model": "  gpt-5.6-sol  ",
                 "cron_model": "   ",
-                "plan_model": "  gpt-5.6-terra  ",
             },
         })
         assert config.codex.model == "gpt-5.6-sol"
         assert config.codex.cron_model == ""
-        assert config.codex.plan_model == "gpt-5.6-terra"
 
 
 class TestTelegramDmPolicy:
