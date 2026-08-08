@@ -40,7 +40,7 @@ async def start_handler(ctx, args):
     return _out({"plan":plan.as_dict(), "workflow":dict(started)})
 
 WORKFLOW_PRESET_SPECS = [
-    ToolSpec("workflow_preset_list", "List compact summaries of reviewed workflow presets.", {"type":"object","properties":{}}, list_handler),
+    ToolSpec("workflow_preset_list", "List compact summaries of reviewed workflow presets.", {"type":"object","properties":{},"required":[]}, list_handler),
     ToolSpec("workflow_preset_describe", "Describe one workflow preset and its static stages.", _NAME, describe_handler),
     ToolSpec("workflow_preset_validate", "Resolve and pin a workflow preset without starting it.", _START, validate_handler),
     ToolSpec("workflow_preset_start", "Start a pinned preset through the installed workflow controller.", _START, start_handler),

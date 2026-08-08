@@ -276,6 +276,7 @@ class AgentEngine:
         # Supplied by the separate lifecycle implementation. The catalog task
         # exposes start behind this boundary without owning processes itself.
         self.execution_service: ExecutionService | None = None
+        self.workflow_preset_service: Any = None
         self._execution_stop_listener: Any | None = None
 
         # Tool registry — built once at construction. Per-session MCP
@@ -371,6 +372,20 @@ class AgentEngine:
                 return await service.cancel_session(
                     session_id, reason="session archived",
                 )
+
+            self.sessions._on_archive = cancel_for_archive
+
+    def set_workflow_preset_service(self, service: Any) -> None:
+        """Install the preset controller and cascade session termination to it."""
+        self.workflow_preset_service = service
+        if service is not None:
+            self.add_stop_listener(service.cancel_session)
+            previous_archive = self.sessions._on_archive
+
+            async def cancel_for_archive(session_id: str) -> bool:
+                first = await previous_archive(session_id) if previous_archive else False
+                second = await service.cancel_session(session_id, reason="session archived")
+                return bool(first or second)
 
             self.sessions._on_archive = cancel_for_archive
 

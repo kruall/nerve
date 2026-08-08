@@ -54,6 +54,8 @@ class ExecutionStore:
         profile_snapshot: Mapping[str, Any],
         plan: Mapping[str, Any],
         resource_requests: Sequence[Mapping[str, Any]],
+        completion_target_type: str = "session",
+        completion_target_id: str | None = None,
     ) -> dict[str, Any]:
         now = utc_now_iso()
         try:
@@ -61,12 +63,12 @@ class ExecutionStore:
                 """INSERT INTO executions
                    (id, session_id, kind, profile_version, profile_hash,
                     profile_snapshot, plan, resource_requests, selected_leases,
-                    status, created_at, queued_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]', 'queued', ?, ?, ?)""",
+                    completion_target_type, completion_target_id, status, created_at, queued_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, 'queued', ?, ?, ?)""",
                 (
                     execution_id, session_id, kind, profile_version, profile_hash,
                     json.dumps(dict(profile_snapshot)), json.dumps(dict(plan)),
-                    json.dumps(list(resource_requests)), now, now, now,
+                    json.dumps(list(resource_requests)), completion_target_type, completion_target_id, now, now, now,
                 ),
             )
         except sqlite3.IntegrityError as exc:

@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 _engine: AgentEngine | None = None
 _cron_service = None  # CronService
 _workflow_run_service = None  # WorkflowRunService (nerve.workflows)
+_workflow_preset_service = None
 _review_loop_service = None  # ReviewLoopService (nerve.workflows.review_loop)
 # StreamableHTTPSessionManager assigned during lifespan when
 # config.mcp_endpoint.enabled. The /mcp/v1 mount handler reads it; until
@@ -466,6 +467,21 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
 
+    # Preset workflows are a separate durable controller.  They deliberately
+    # start after both child adapters exist, then recover their stage journal.
+    global _workflow_preset_service
+    try:
+        from nerve.workflows.controller import WorkflowPresetService
+        _workflow_preset_service = WorkflowPresetService(
+            db=db, engine=_engine, executions=_engine.execution_service,
+            agent_runs=_workflow_run_service,
+        )
+        _engine.set_workflow_preset_service(_workflow_preset_service)
+        await _workflow_preset_service.initialize()
+    except Exception as e:
+        logger.error("Workflow preset controller failed to start: %s", e)
+        _workflow_preset_service = None
+
     # One-shot cleanup of retired houseofagents artifacts. Gated on the
     # NERVE-MANAGED binary existing (our own bin/ is ours): a standalone
     # houseofagents install the user runs outside Nerve keeps its
@@ -730,6 +746,9 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("Workflow run service shutdown raised: %s", e)
         _workflow_run_service = None
+    if _workflow_preset_service is not None:
+        await _workflow_preset_service.shutdown()
+        _workflow_preset_service = None
 
     db_retention_task.cancel()
     notify_maintenance_task.cancel()

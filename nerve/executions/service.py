@@ -182,6 +182,7 @@ class ExecutionService:
 
     async def start(
         self, *, session_id: str, plan: CompiledExecutionPlan,
+        completion_target: Mapping[str, str] | None = None,
     ) -> Mapping[str, Any]:
         session = await self.db.get_session(session_id)
         if (
@@ -194,6 +195,7 @@ class ExecutionService:
             session_id=session_id,
             plan=serialized,
             profile_snapshot={**plan.profile.describe(), "source": plan.profile.source},
+            completion_target=completion_target,
         )
 
     async def _start_serialized(
@@ -202,6 +204,7 @@ class ExecutionService:
         session_id: str,
         plan: Mapping[str, Any],
         profile_snapshot: Mapping[str, Any],
+        completion_target: Mapping[str, str] | None = None,
     ) -> Mapping[str, Any]:
         execution_id = f"exec-{uuid.uuid4().hex[:12]}"
         plan_data = dict(plan)
@@ -219,6 +222,8 @@ class ExecutionService:
             profile_snapshot=profile_snapshot,
             plan=plan_data,
             resource_requests=requests,
+            completion_target_type=str((completion_target or {}).get("type", "session")),
+            completion_target_id=(completion_target or {}).get("id"),
         )
         await self._broadcast(execution_id)
         self._spawn_runner(execution_id)
@@ -464,6 +469,11 @@ class ExecutionService:
             await self.resource_manager.release(execution_id=row["id"], leases=leases)
 
     def _schedule_continuation(self, execution_id: str) -> None:
+        # A workflow controller owns its child completion.  It polls durable
+        # child state; suppressing the session continuation is the critical
+        # boundary that prevents an intermediate model wakeup.
+        # (The controller is deliberately restart-safe and does not rely on
+        # this in-memory notification.)
         if (
             self._stopping or not self._continuations_ready
             or execution_id in self._continuations
@@ -475,6 +485,10 @@ class ExecutionService:
     async def _continue(self, execution_id: str) -> None:
         claimed, row = await self.db.claim_execution_continuation(execution_id)
         if not claimed or row is None:
+            await self._broadcast(execution_id)
+            return
+        if row.get("completion_target_type") == "workflow":
+            await self.db.settle_execution_continuation(execution_id, success=True)
             await self._broadcast(execution_id)
             return
         tail = await self.db.tail_execution_logs(

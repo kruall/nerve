@@ -35,6 +35,7 @@ from nerve.db.tasks import TaskStore
 from nerve.db.usage import UsageStore
 from nerve.db.wakeups import WakeupStore
 from nerve.db.workflow_runs import WorkflowRunStore
+from nerve.db.preset_workflows import PresetWorkflowStore
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +107,7 @@ class Database(
     FileStore,
     WakeupStore,
     WorkflowRunStore,
+    PresetWorkflowStore,
     ReviewLoopStore,
     ResourceStore,
     ExecutionStore,
