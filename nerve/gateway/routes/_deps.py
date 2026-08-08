@@ -94,4 +94,6 @@ def build_route_tool_context(session_id: str = "system") -> "ToolContext":
         skill_manager=engine._skill_manager,
         engine=engine,
         notification_service=deps.notification_service,
+        execution_catalog=engine.execution_catalog,
+        execution_service=engine.execution_service,
     )

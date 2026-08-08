@@ -1,0 +1,36 @@
+schema_version: 1
+kind: local.echo
+version: 1
+title: Echo text
+description: Print caller-provided text without invoking a shell.
+arguments:
+  message:
+    type: string
+    required: true
+    description: Text passed as one argv element.
+  extra:
+    type: string_list
+    default: []
+    description: Optional additional argv elements.
+steps:
+  - id: echo
+    type: command
+    transport: local
+    executable: /usr/bin/printf
+    argv:
+      - literal: "%s\n"
+      - arg: message
+      - spread: extra
+    capture_stdout: output
+result:
+  success_exit_codes: [0]
+  output_capture: output
+timeout_seconds: 30
+cleanup:
+  when: always
+  timeout_seconds: 10
+  steps: []
+cancellation:
+  mode: terminate
+  grace_seconds: 5
+  run_cleanup: true

@@ -3,7 +3,8 @@
 A single entry point that re-reads config from disk and reloads every subsystem
 that supports it without a restart: the process config object (so lockdown and
 settings changes engage), the long-lived services that captured that object at
-start-up, cron jobs, cron sources, MCP servers, and skills. Best-effort per
+start-up, cron jobs, cron sources, declarative execution kinds, MCP servers, and
+skills. Best-effort per
 subsystem — one failure is reported but does not abort the rest, because
 refusing a valid cron edit over an unrelated typo in ``settings.yaml`` is the
 worse outcome. Which subsystems fell over is reported, never inferred: see
@@ -325,6 +326,18 @@ async def reload_all(engine, cron_service, config_dir: Path) -> dict:
             summary["sources"] = await cron_service.reload_sources()
         except Exception as e:  # noqa: BLE001
             summary["sources"] = f"{_ERROR_PREFIX}{e}"
+
+    # Declarative execution kinds. ``ExecutionCatalog.reload`` constructs a
+    # complete candidate first, so an error here leaves the previous generation
+    # active for all new operations and cannot partially install a directory.
+    catalog = getattr(engine, "execution_catalog", None) if engine is not None else None
+    if catalog is not None:
+        try:
+            snapshot = catalog.reload()
+            summary["executions"] = f"{len(snapshot.profiles)} kind(s), generation {snapshot.generation}"
+        except Exception as e:  # noqa: BLE001 — malformed reviewed profile
+            summary["executions"] = f"{_ERROR_PREFIX}{e}"
+            logger.warning("execution catalog reload failed: %s", e, exc_info=True)
 
     # 3. MCP servers.
     if engine is not None:

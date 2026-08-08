@@ -4,6 +4,27 @@
 
 All endpoints require JWT authentication via `Authorization: Bearer <token>` header or `nerve_token` cookie.
 
+### Declarative execution kinds
+
+#### `GET /api/execution-kinds`
+
+List compact summaries from the active catalog generation.
+
+#### `GET /api/execution-kinds/{kind}`
+
+Describe one kind's typed arguments, resource slots, result rules, timeout,
+cleanup, cancellation, version, and profile hash.
+
+#### `POST /api/execution-kinds/{kind}/validate`
+
+Compile `{"arguments": {...}, "resources": {"slot": "pool"}}` without
+starting it. The returned immutable plan redacts secret arguments.
+
+#### `POST /api/execution-kinds/{kind}/start`
+
+Compile and submit the plan to the installed execution lifecycle service. Returns
+503 when that separate service is unavailable. See [executions.md](executions.md).
+
 ### Auth
 
 #### `POST /api/auth/login`

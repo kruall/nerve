@@ -7,6 +7,7 @@ holds:
 
 - `config/settings.yaml` — shareable settings (secrets are `${ENV_VAR}` refs)
 - `config/cron/` — cron jobs, system jobs, and drop-in gate plugins
+- `config/executions/kinds/*.yaml` — reviewed declarative execution profiles
 - `config/favicon.{svg,png,ico}` — optional; served at `/favicon.ico`, so every
   instance syncing this repo is identifiable in a browser tab
 - `skills/<id>/SKILL.md` — skills

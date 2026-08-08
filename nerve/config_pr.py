@@ -141,6 +141,7 @@ _SECURITY_SETTINGS_KEYS: dict[tuple[str, ...], str] = {
 }
 
 _SETTINGS_FILE = "config/settings.yaml"
+_EXECUTION_KIND_DIR = ("config", "executions", "kinds")
 
 # Under ``portable_only`` a bundle with no portable config file at all is an
 # error: a CI gate that validated nothing must not report success. A proposal is
@@ -518,6 +519,12 @@ def _executable_effect(staged: str, dst: Path, content: str) -> str | None:
         changed = _security_settings_change(content, dst)
         if changed:
             reasons.append(changed)
+    parts = Path(staged).parts
+    if parts[:len(_EXECUTION_KIND_DIR)] == _EXECUTION_KIND_DIR:
+        reasons.append(
+            "declares executable steps, resource selection, cleanup, and "
+            "cancellation policy loaded by the execution catalog"
+        )
     return "; ".join(reasons) or None
 
 

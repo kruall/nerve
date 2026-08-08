@@ -14,6 +14,55 @@ time — see that function for the historical rationale.
 from __future__ import annotations
 
 
+# ----- Declarative execution kinds -----
+
+EXECUTION_KIND_LIST_SCHEMA = {
+    "type": "object",
+    "properties": {},
+    "required": [],
+    "additionalProperties": False,
+}
+
+EXECUTION_KIND_DESCRIBE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "kind": {"type": "string", "description": "Execution kind id returned by execution_kind_list"},
+    },
+    "required": ["kind"],
+    "additionalProperties": False,
+}
+
+_EXECUTION_OPERATION_PROPERTIES = {
+    "kind": {"type": "string", "description": "Execution kind id"},
+    "arguments": {
+        "type": "object",
+        "description": "Typed operation arguments; use execution_kind_describe for the exact schema",
+        "additionalProperties": True,
+        "default": {},
+    },
+    "resources": {
+        "type": "object",
+        "description": "Named resource slot to selected pool",
+        "additionalProperties": {"type": "string"},
+        "default": {},
+    },
+}
+
+EXECUTION_KIND_VALIDATE_SCHEMA = {
+    "type": "object",
+    "properties": _EXECUTION_OPERATION_PROPERTIES,
+    "required": ["kind"],
+    "additionalProperties": False,
+}
+
+EXECUTION_KIND_START_SCHEMA = {
+    "type": "object",
+    "properties": _EXECUTION_OPERATION_PROPERTIES,
+    "required": ["kind"],
+    "additionalProperties": False,
+}
+
+
 # ----- Task tools -----
 
 TASK_SEARCH_SCHEMA = {

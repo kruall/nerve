@@ -1,4 +1,8 @@
 # Nerve — Personal AI Assistant Configuration
+#
+# Declarative execution kinds are separate reviewed files under
+# <workspace>/config/executions/kinds/*.yaml; see docs/executions.md. They are
+# not embedded here so the MCP surface can disclose one kind at a time.
 # Copy to config.yaml and customize. Secrets go in config.local.yaml (gitignored).
 #
 # Any string value may reference an environment variable — the recommended way

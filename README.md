@@ -275,6 +275,7 @@ See [docs/config.md](docs/config.md) for all options.
 | [Architecture](docs/architecture.md) | System overview, modes, deployment, data flow |
 | [Setup](docs/setup.md) | Installation, config, Docker, HTTPS, systemd |
 | [Config](docs/config.md) | All config options with descriptions and defaults |
+| [Execution kinds](docs/executions.md) | Reviewed declarative command profiles and safe argv compilation |
 | [Worker Guide](docs/worker-guide.md) | Worker mode setup, onboarding, plan-approve loop |
 | [API Reference](docs/api.md) | REST API and WebSocket protocol |
 | [SDK Sessions](docs/sdk-sessions.md) | Session lifecycle, resume, forking |

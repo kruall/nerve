@@ -242,6 +242,7 @@ A reload is always explicit. Two things cause one:
 | Cron sources: `sync.telegram`, `.gmail`, `.github`, `.github_events`, `.github_repos`, `.message_ttl_days`, and each source's `schedule` | ✅ runners are rebuilt and rescheduled, all or nothing: a `schedule` the scheduler will not take refuses the source reload with the running sources on their old triggers, and reports the error rather than `ok`. **`sync.codex` is not one of these**; see the restart table |
 | MCP servers (`mcp_servers`) | ✅ new sessions get the new set |
 | Skills (`skills/`) | ✅ re-scanned |
+| Declarative execution kinds (`config/executions/kinds/*.yaml`) | ✅ atomically rebuilt; malformed files leave the previous valid catalog active, and existing compiled plans keep their pinned profile snapshot/hash |
 | `lockdown` | ✅ the write guards and the layer stack both follow |
 | Web gateway auth (`auth.*`) | ✅ read per request. Only the gateway's own auth: the MCP endpoint checks `/mcp/v1` against the `auth.jwt_secret` it was mounted with, so rotating that secret is half-hot (see the restart table). `auth.jwt_expiry_hours` governs tokens minted *after* the reload; already-issued tokens keep the window they were signed with until they next slide |
 | `notifications.*` | ✅ read per notification |

@@ -208,6 +208,8 @@ def build_ctx_resolver(engine: "AgentEngine", resolver: SatelliteSessionResolver
             skill_manager=engine._skill_manager,
             engine=engine,
             notification_service=engine.notification_service,
+            execution_catalog=engine.execution_catalog,
+            execution_service=engine.execution_service,
             runtime_metadata=runtime_metadata,
         )
 

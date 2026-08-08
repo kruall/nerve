@@ -112,6 +112,8 @@ def _legacy_ctx(session_id: str | None = None) -> ToolContext:
         skill_manager=_skill_manager,
         engine=_engine,
         notification_service=_notification_service,
+        execution_catalog=getattr(_engine, "execution_catalog", None),
+        execution_service=getattr(_engine, "execution_service", None),
     )
 
 

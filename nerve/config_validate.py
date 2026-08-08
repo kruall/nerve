@@ -287,6 +287,29 @@ def validate_config_bundle(
             cfg.lockdown_machine_local_notes(merged, machine if locked else None)
         )
 
+    # Execution profiles are separate reviewed files rather than keys in
+    # settings.yaml, so typed NerveConfig construction cannot see them. Parse
+    # the complete directory with the runtime loader: this is the CI/lockdown
+    # gate that prevents executable configuration from reaching reload first.
+    from nerve.executions import ExecutionCatalog, ExecutionProfileError
+
+    execution_files: list[Path] = []
+    execution_catalog = ExecutionCatalog(workspace)
+    try:
+        execution_snapshot = execution_catalog.build_candidate()
+    except ExecutionProfileError as e:
+        result.errors.append(f"execution catalog: {e}")
+        directory = execution_catalog.directory
+        if directory.is_dir():
+            execution_files = [p for p in directory.glob("*.yaml") if p.is_file()]
+    else:
+        execution_files = [Path(profile.source) for profile in execution_snapshot.profiles.values()]
+        if execution_catalog.directory.exists() or execution_files:
+            result.info.append(
+                f"execution catalog: {len(execution_snapshot.profiles)} kind(s) "
+                f"({execution_catalog.directory})"
+            )
+
     # Resolve the cron locations even if full typed construction failed above.
     if config is not None:
         cron_files = (
@@ -322,6 +345,10 @@ def validate_config_bundle(
         p for p in (cfg.workspace_settings_file(workspace), *(p for _, p in cron_files))
         if p.is_file() and p.is_relative_to(portable_root)
     ]
+    read.extend(
+        p for p in execution_files
+        if p.is_file() and p.is_relative_to(portable_root)
+    )
     _note_layers(
         config_dir, workspace, result,
         portable_only=portable_only,

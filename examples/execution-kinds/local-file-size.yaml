@@ -1,0 +1,38 @@
+schema_version: 1
+kind: local.file_size
+version: 1
+title: Read file size
+description: Count bytes in a workspace-relative file through a selected local pool.
+arguments:
+  path:
+    type: path
+    required: true
+    description: Relative path below the workspace; traversal is rejected.
+resource_slots:
+  worker:
+    description: Local worker selected by the lifecycle service.
+    allowed_pools: [local.default, local.isolated]
+    default_pool: local.default
+steps:
+  - id: size
+    type: command
+    transport: resource
+    resource_slot: worker
+    executable: /usr/bin/wc
+    cwd: workspace
+    argv:
+      - literal: -c
+      - arg: path
+    capture_stdout: byte_count
+result:
+  success_exit_codes: [0]
+  output_capture: byte_count
+timeout_seconds: 30
+cleanup:
+  when: always
+  timeout_seconds: 10
+  steps: []
+cancellation:
+  mode: terminate
+  grace_seconds: 5
+  run_cleanup: true

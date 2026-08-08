@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from nerve.memory.xmemory_bridge import XmemoryBridge
     from nerve.notifications.service import NotificationService
     from nerve.skills.manager import SkillManager
+    from nerve.executions import ExecutionCatalog, ExecutionService
 
 
 @dataclass
@@ -50,6 +51,8 @@ class ToolContext:
     skill_manager: "SkillManager | None" = None
     engine: "AgentEngine | None" = None
     notification_service: "NotificationService | None" = None
+    execution_catalog: "ExecutionCatalog | None" = None
+    execution_service: "ExecutionService | None" = None
     runtime_metadata: dict[str, Any] = field(default_factory=dict)
 
 

@@ -66,6 +66,7 @@ from nerve.agent.tools import (
 from nerve.agent.tools import init_tools
 from nerve.config import NerveConfig, RESUME_QUEUE_FILE, load_mcp_servers
 from nerve.db import Database
+from nerve.executions import ExecutionCatalog, ExecutionService
 from nerve.observability.langfuse import attributes as lf_attrs
 from nerve.skills.manager import SkillManager
 
@@ -261,6 +262,16 @@ class AgentEngine:
         self._mcp_servers_cache = list(config.mcp_servers)  # hot-reloadable
         self._claude_code_plugins: list[dict[str, str]] = []  # plugin dirs
 
+        # Reviewed declarative execution kinds. Startup is strict: a malformed
+        # profile is executable configuration and must stop the daemon rather
+        # than quietly disappear. Reload builds and validates a full candidate
+        # before swapping, so this object remains safe to hand to every session.
+        self.execution_catalog = ExecutionCatalog(config.workspace)
+        self.execution_catalog.reload()
+        # Supplied by the separate lifecycle implementation. The catalog task
+        # exposes start behind this boundary without owning processes itself.
+        self.execution_service: ExecutionService | None = None
+
         # Tool registry — built once at construction. Per-session MCP
         # servers are built in ``_build_mcp_servers`` by binding a fresh
         # ``ToolContext`` (with the session_id) into closures.
@@ -339,6 +350,10 @@ class AgentEngine:
         """
         self.notification_service = service
 
+    def set_execution_service(self, service: ExecutionService | None) -> None:
+        """Install the lifecycle owner used by ``execution_kind_start``."""
+        self.execution_service = service
+
     def get_active_channel(self, session_id: str) -> str | None:
         """Return the channel name currently driving ``session_id`` (or None)."""
         return self._active_channel.get(session_id)
@@ -359,6 +374,8 @@ class AgentEngine:
             skill_manager=self._skill_manager,
             engine=self,
             notification_service=self.notification_service,
+            execution_catalog=self.execution_catalog,
+            execution_service=self.execution_service,
         )
 
     def _gateway_port(self) -> int | None:

@@ -70,6 +70,9 @@ Claude Agent SDK wrapper providing:
 - **Per-run cron sessions** — each cron run gets a unique session ID (`cron:{job_id}:{timestamp}`) to prevent unbounded message accumulation
 - AI-generated session titles via lightweight Haiku API call
 - Custom MCP tools (tasks, memory recall, conversation history, sync status, skills CRUD, notifications)
+- A reviewed declarative execution catalog (`nerve/executions/`) compiles typed
+  kind arguments and resource-pool selections into immutable shell-free plans;
+  process lifecycle is supplied through a separate `ExecutionService` boundary
 - API calls routed through configurable base URL (direct Anthropic API or local CLIProxyAPI proxy)
 
 ### Channels (`nerve/channels/`)
