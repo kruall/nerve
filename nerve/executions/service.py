@@ -71,6 +71,9 @@ class ExecutionService:
     async def initialize(self, *, dispatch_continuations: bool = True) -> None:
         """Reconcile active rows and recover only unclaimed outbox items."""
         self.execution_root.mkdir(parents=True, exist_ok=True)
+        initialize_resources = getattr(self.resource_manager, "initialize", None)
+        if callable(initialize_resources):
+            await initialize_resources()
         failed_claims = await self.db.fail_claimed_execution_continuations_on_restart()
         if failed_claims:
             logger.warning(
@@ -147,6 +150,9 @@ class ExecutionService:
         )
         self._tasks.clear()
         self._continuations.clear()
+        shutdown_resources = getattr(self.resource_manager, "shutdown", None)
+        if callable(shutdown_resources):
+            await shutdown_resources()
 
     @staticmethod
     def _track(registry: dict[str, asyncio.Task[Any]], key: str, task: asyncio.Task[Any]) -> None:

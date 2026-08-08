@@ -42,6 +42,11 @@ class RecoverHostRequest(BaseModel):
     remote_quiescence_confirmed: bool
 
 
+class QuarantineHostRequest(BaseModel):
+    confirm_host_id: str
+    reason: str = Field(min_length=1, max_length=500)
+
+
 def _execution_service():
     service = getattr(get_deps().engine, "execution_service", None)
     if service is None:
@@ -322,6 +327,24 @@ async def list_resources(user: dict = Depends(require_auth)):
     return {"resources": public_resource_snapshot(raw)}
 
 
+@router.get("/api/resources/availability")
+async def resource_availability(user: dict = Depends(require_auth)):
+    raw = public_resource_snapshot(await _resource_call("resource_snapshot"))
+    return {"pools": raw["pools"], "queue": raw["queue"]}
+
+
+@router.get("/api/resources/leases")
+async def resource_leases(user: dict = Depends(require_auth)):
+    raw = public_resource_snapshot(await _resource_call("resource_snapshot"))
+    return {"leases": raw["leases"], "queue": raw["queue"]}
+
+
+@router.get("/api/resources/diagnostics")
+async def resource_diagnostics(limit: int = 100, user: dict = Depends(require_auth)):
+    raw = await _resource_call("diagnostics", limit=max(1, min(limit, 500)))
+    return {"resources": public_resource_snapshot(raw["snapshot"]), "events": raw["events"]}
+
+
 @router.post("/api/resources/hosts/{host_id}/drain")
 async def set_host_draining(
     host_id: str,
@@ -364,4 +387,20 @@ async def recover_host(
     snapshot = public_resource_snapshot({"hosts": [raw]}) if isinstance(raw, Mapping) else None
     if snapshot is None or not snapshot["hosts"]:
         raise HTTPException(status_code=503, detail="resource service returned an invalid host")
+    return {"host": snapshot["hosts"][0]}
+
+
+@router.post("/api/resources/hosts/{host_id}/quarantine")
+async def quarantine_host(
+    host_id: str,
+    request: QuarantineHostRequest,
+    user: dict = Depends(require_auth),
+):
+    if request.confirm_host_id != host_id:
+        raise HTTPException(status_code=409, detail="host confirmation does not match")
+    raw = await _resource_call(
+        "quarantine_host", host_id=host_id, reason=request.reason,
+        requested_by=str(user.get("sub", "user")),
+    )
+    snapshot = public_resource_snapshot({"hosts": [raw]})
     return {"host": snapshot["hosts"][0]}

@@ -102,6 +102,48 @@ EXECUTION_LIST_SCHEMA = {
     "additionalProperties": False,
 }
 
+# ----- Resource inventory and leases -----
+
+RESOURCE_EMPTY_SCHEMA = {
+    "type": "object", "properties": {}, "required": [],
+    "additionalProperties": False,
+}
+RESOURCE_DIAGNOSTICS_SCHEMA = {
+    "type": "object",
+    "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}},
+    "required": [], "additionalProperties": False,
+}
+RESOURCE_DRAIN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "host_id": {"type": "string"},
+        "draining": {"type": "boolean"},
+        "confirm_host_id": {"type": "string"},
+    },
+    "required": ["host_id", "draining", "confirm_host_id"],
+    "additionalProperties": False,
+}
+RESOURCE_RECOVER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "host_id": {"type": "string"},
+        "confirm_host_id": {"type": "string"},
+        "remote_quiescence_confirmed": {"type": "boolean"},
+    },
+    "required": ["host_id", "confirm_host_id", "remote_quiescence_confirmed"],
+    "additionalProperties": False,
+}
+RESOURCE_QUARANTINE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "host_id": {"type": "string"},
+        "confirm_host_id": {"type": "string"},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 500},
+    },
+    "required": ["host_id", "confirm_host_id", "reason"],
+    "additionalProperties": False,
+}
+
 
 # ----- Task tools -----
 

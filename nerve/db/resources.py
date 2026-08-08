@@ -31,6 +31,164 @@ def _row(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
 
 
 class ResourceStore:
+    async def enqueue_resource_request(self, *, request_id: str, execution_id: str,
+                                       session_id: str, slot: str, pool: str) -> dict[str, Any]:
+        now = utc_now_iso()
+        try:
+            await self._write(
+                """INSERT INTO resource_lease_requests
+                   (id, execution_id, session_id, slot, pool, mode, state, requested_at)
+                   VALUES (?, ?, ?, ?, ?, 'exclusive', 'queued', ?)""",
+                (request_id, execution_id, session_id, slot, pool, now),
+            )
+        except sqlite3.IntegrityError:
+            pass
+        async with self.db.execute(
+            """SELECT * FROM resource_lease_requests
+               WHERE execution_id=? AND slot=? AND state='queued'""",
+            (execution_id, slot),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            raise ValueError("resource request could not be queued")
+        return dict(row)
+
+    async def cancel_resource_requests(self, execution_id: str) -> int:
+        now = utc_now_iso()
+        result = await self._write(
+            """UPDATE resource_lease_requests SET state='cancelled', settled_at=?
+               WHERE execution_id=? AND state='queued'""",
+            (now, execution_id),
+        )
+        return result.rowcount
+
+    async def try_acquire_resource_request(
+        self, *, request_id: str, lease_id: str, host_ids: list[str],
+        ttl_seconds: int,
+    ) -> dict[str, Any] | None:
+        """Atomically grant only the oldest queued request for its pool."""
+        from datetime import datetime, timedelta, timezone
+
+        now = utc_now_iso()
+        expires = (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()
+        async with self._atomic():
+            async with self.db.execute(
+                "SELECT * FROM resource_lease_requests WHERE id=? AND state='queued'",
+                (request_id,),
+            ) as cursor:
+                request = await cursor.fetchone()
+            if request is None:
+                return None
+            async with self.db.execute(
+                """SELECT id FROM resource_lease_requests
+                   WHERE pool=? AND state='queued' ORDER BY sequence LIMIT 1""",
+                (request["pool"],),
+            ) as cursor:
+                head = await cursor.fetchone()
+            if head is None or head[0] != request_id:
+                return None
+            for host_id in host_ids:
+                async with self.db.execute(
+                    """SELECT fencing_token FROM resource_hosts h
+                       WHERE id=? AND enabled=1 AND draining=0 AND offline=0
+                         AND quarantined=0 AND NOT EXISTS (
+                           SELECT 1 FROM resource_leases l WHERE l.host_id=h.id
+                           AND l.state IN ('active','revoking','quarantined'))""",
+                    (host_id,),
+                ) as cursor:
+                    host = await cursor.fetchone()
+                if host is None:
+                    continue
+                token = int(host[0]) + 1
+                await self.db.execute(
+                    "UPDATE resource_hosts SET fencing_token=?, updated_at=? WHERE id=? AND fencing_token=?",
+                    (token, now, host_id, host[0]),
+                )
+                try:
+                    await self.db.execute(
+                        """INSERT INTO resource_leases
+                           (id, host_id, execution_id, session_id, pool, fencing_token,
+                            state, requested_at, acquired_at, heartbeat_at, expires_at)
+                           VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)""",
+                        (lease_id, host_id, request["execution_id"], request["session_id"],
+                         request["pool"], token, request["requested_at"], now, now, expires),
+                    )
+                except sqlite3.IntegrityError:
+                    continue
+                await self.db.execute(
+                    """UPDATE resource_lease_requests
+                       SET state='acquired', lease_id=?, settled_at=?
+                       WHERE id=? AND state='queued'""",
+                    (lease_id, now, request_id),
+                )
+                await self.db.execute(
+                    """INSERT INTO resource_events
+                       (event_type, host_id, execution_id, lease_id, created_at)
+                       VALUES ('lease_acquired', ?, ?, ?, ?)""",
+                    (host_id, request["execution_id"], lease_id, now),
+                )
+                break
+            else:
+                return None
+        return await self.get_resource_lease(lease_id)
+
+    async def heartbeat_resource_lease(self, *, lease_id: str, execution_id: str,
+                                       fencing_token: int, ttl_seconds: int) -> bool:
+        from datetime import datetime, timedelta, timezone
+        expires = (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()
+        result = await self._write(
+            """UPDATE resource_leases SET heartbeat_at=?, expires_at=?
+               WHERE id=? AND execution_id=? AND fencing_token=? AND state='active'""",
+            (utc_now_iso(), expires, lease_id, execution_id, fencing_token),
+        )
+        return bool(result.rowcount)
+
+    async def revoke_expired_resource_leases(self) -> list[dict[str, Any]]:
+        now = utc_now_iso()
+        async with self._atomic():
+            async with self.db.execute(
+                "SELECT id FROM resource_leases WHERE state='active' AND expires_at IS NOT NULL AND expires_at<=?",
+                (now,),
+            ) as cursor:
+                ids = [str(row[0]) async for row in cursor]
+            if ids:
+                marks = ",".join("?" for _ in ids)
+                await self.db.execute(
+                    f"UPDATE resource_leases SET state='revoking', revoking_at=? WHERE id IN ({marks}) AND state='active'",
+                    (now, *ids),
+                )
+                for lease_id in ids:
+                    await self.db.execute(
+                        """INSERT INTO resource_events(event_type, lease_id, created_at)
+                           VALUES ('lease_expired_revoking', ?, ?)""",
+                        (lease_id, now),
+                    )
+        rows = []
+        for lease_id in ids:
+            row = await self.get_resource_lease(lease_id)
+            if row is not None:
+                rows.append(row)
+        return rows
+
+    async def list_resource_requests(self) -> list[dict[str, Any]]:
+        async with self.db.execute(
+            """SELECT * FROM resource_lease_requests
+               WHERE state='queued' ORDER BY sequence"""
+        ) as cursor:
+            rows = [dict(row) async for row in cursor]
+        positions: dict[str, int] = {}
+        for row in rows:
+            pool = str(row["pool"])
+            positions[pool] = positions.get(pool, 0) + 1
+            row["position"] = positions[pool]
+        return rows
+
+    async def list_resource_events(self, limit: int = 100) -> list[dict[str, Any]]:
+        async with self.db.execute(
+            "SELECT * FROM resource_events ORDER BY sequence DESC LIMIT ?",
+            (max(1, min(limit, 500)),),
+        ) as cursor:
+            return [dict(row) async for row in cursor]
     async def seed_resource_host(self, host: Mapping[str, Any]) -> None:
         now = utc_now_iso()
         await self._write(
