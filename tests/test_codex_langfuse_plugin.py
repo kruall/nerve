@@ -161,6 +161,30 @@ async def test_legacy_verified_install_is_patched_without_network(
 
 
 @pytest.mark.asyncio
+async def test_verified_unpatched_current_receipt_is_repaired_without_network(
+    tmp_path, monkeypatch,
+):
+    config = _config(tmp_path)
+    _materialize_marketplace(config)
+    root = _materialize_runtime(config)
+    # A previously interrupted or externally reset cache can retain a receipt
+    # that claims the normalization patch while its verified bytes are original.
+    plugin._write_install_receipt(config, root, "0.1.0")
+
+    async def unexpected_run(*args, **kwargs):
+        raise AssertionError(
+            "verified cache repair must not invoke Codex or the network"
+        )
+
+    monkeypatch.setattr(plugin, "_run", unexpected_run)
+    status = await plugin.ensure_installed(config)
+
+    assert status["ready"] is True
+    assert status["usage_normalization"] == "exclusive-usage-v1"
+    assert plugin._usage_patch_applied(root) is True
+
+
+@pytest.mark.asyncio
 async def test_usage_patch_mismatch_disables_tracing_without_network(
     tmp_path, monkeypatch,
 ):

@@ -409,16 +409,20 @@ async def ensure_installed(config: Any) -> dict[str, Any]:
                 )
             except (OSError, ValueError):
                 manifest = {}
-            legacy_ready = bool(
+            receipt_matches_runtime = (
+                _receipt_revision(config, root, plugin.version) == plugin.revision
+                or _receipt_revision(
+                    config, root, plugin.version, patch=None,
+                ) == plugin.revision
+            )
+            repairable_snapshot = bool(
                 manifest.get("name") == _PLUGIN
                 and manifest.get("version") == plugin.version
                 and _git_revision(_marketplace_root(config)) == plugin.revision
-                and _receipt_revision(
-                    config, root, plugin.version, patch=None,
-                ) == plugin.revision
+                and receipt_matches_runtime
                 and _hook_entrypoint(root).is_file()
             )
-            if legacy_ready:
+            if repairable_snapshot:
                 try:
                     _apply_usage_patch(root)
                     _write_install_receipt(config, root, plugin.version)
