@@ -127,6 +127,18 @@ def _parse_mcp_tool_name(tool_name: str) -> tuple[str, str] | None:
     return None
 
 
+def _isolated_stage_system_prompt(sandbox: str) -> str:
+    return (
+        "You are an isolated workflow agent. Treat the first user message as "
+        "the complete task and data context. Native Codex filesystem, search, "
+        f"and shell tools granted by the {sandbox or 'read-only'} sandbox are "
+        "part of the stage runtime and may be used directly. The capabilities "
+        "listed in StageContext are the complete allowlist for MCP calls only. "
+        "Do not seek ambient context, start subagents or workflows, or expand "
+        "either native or MCP capabilities."
+    )
+
+
 def _model_family(model: str) -> str:
     """Normalize a model identifier to a comparable family name.
 
@@ -1329,10 +1341,8 @@ class AgentEngine:
                 # The workflow controller supplied the complete StageContext
                 # in the first turn. Ambient identity, memories, skill index,
                 # and conversation history are intentionally absent.
-                system_prompt = (
-                    "You are an isolated workflow agent. Treat the first user "
-                    "message as the complete StageContext; do not use or seek "
-                    "ambient context or expand capabilities."
+                system_prompt = _isolated_stage_system_prompt(
+                    str(session_meta.get("codex_sandbox") or "read-only")
                 )
             else:
                 system_prompt = build_system_prompt(

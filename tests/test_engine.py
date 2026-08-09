@@ -14,8 +14,15 @@ from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 from nerve.agent.backends import events as ev
 from nerve.agent.backends.base import SessionSpec, TransportDiedError
 from nerve.agent.backends.claude import ClaudeBackend, ClaudeClient, translate_message
-from nerve.agent.engine import AgentEngine, _TurnState, _model_family
+from nerve.agent.engine import AgentEngine, _TurnState, _isolated_stage_system_prompt, _model_family
 from nerve.config import AgentConfig, NerveConfig
+
+
+def test_isolated_stage_system_prompt_separates_native_and_mcp_capabilities():
+    prompt = _isolated_stage_system_prompt("workspace-write")
+    assert "filesystem, search, and shell tools" in prompt
+    assert "workspace-write sandbox" in prompt
+    assert "allowlist for MCP calls only" in prompt
 
 
 @pytest.mark.parametrize(
