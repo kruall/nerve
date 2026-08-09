@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from nerve.agent.tools.registry import ToolContext, ToolResult, ToolSpec
-from nerve.workflows.controller import WorkflowActionError
 from nerve.workflows.presets import WorkflowPresetValidationError
 
 _NAME = {"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}
@@ -49,7 +48,12 @@ async def join_handler(ctx, args):
     service = getattr(ctx.engine, "workflow_preset_service", None)
     if service is None: return ToolResult.text("Workflow preset controller is not installed.", is_error=True)
     try: return _out(await service.join(str(args.get("workflow_id") or ""), session_id=ctx.session_id))
-    except WorkflowActionError as error: return ToolResult.text(str(error), is_error=True)
+    except Exception as error:
+        # Import lazily: controller imports stage resolution, which imports the
+        # tool registry while this handler module is still being initialized.
+        from nerve.workflows.controller import WorkflowActionError
+        if isinstance(error, WorkflowActionError): return ToolResult.text(str(error), is_error=True)
+        raise
 
 WORKFLOW_PRESET_SPECS = [
     ToolSpec("workflow_preset_list", "List compact, safe summaries of reviewed workflow presets; use describe before choosing one.", {"type":"object","properties":{},"required":[]}, list_handler),
