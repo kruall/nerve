@@ -31,6 +31,24 @@ class _Executions:
     async def get_execution(self, **kwargs): return self.child
     async def cancel_execution(self, **kwargs): return self.child
 
+class _AgentRuns:
+    def __init__(self, result='{"summary":"done"}'):
+        self.child={"id":"agent-child","status":"done","result":result}
+    async def get_run(self, run_id): return self.child
+
+async def _agent_stage(db, workflow_id="w", *, result='{"summary":"done"}'):
+    await db.create_session("owner", source="web", backend="codex", status="idle")
+    stage={"id":"canary","depends_on":[],"runner":"agent","inputs":{},
+           "outputs":{"type":"object","required":["summary"],"properties":{"summary":{"type":"string"}}},
+           "timeout_seconds":10,"spec":{}}
+    preset={"name":"p","version":"1","preset_hash":"pinned","budget_usd":1,"stages":[stage]}
+    await db.create_preset_workflow(workflow_id,session_id="owner",plan={"preset":preset,"inputs":{}},preset_hash="pinned",spec_hash="x")
+    await db.transition_preset_workflow(workflow_id,to_status="running",expect=("queued",))
+    await db.create_stage_run("stage",workflow_id=workflow_id,stage_id="canary",runner="agent",spec=stage,spec_hash="x")
+    await db.transition_stage_run("stage",to_status="running",expect=("queued",),child_type="agent",child_id="agent-child")
+    engine=SimpleNamespace(run=AsyncMock())
+    return engine, WorkflowPresetService(db=db,engine=engine,executions=_Executions(),agent_runs=_AgentRuns(result))
+
 async def _wait(predicate):
     async with asyncio.timeout(2):
         while not await predicate(): await asyncio.sleep(.01)
@@ -61,3 +79,75 @@ async def test_cancelled_workflow_suppresses_final_continuation(db):
     await service._terminal(row,"cancelled",{"outcome":"cancelled"})
     async with db.db.execute("SELECT state FROM workflow_completion_outbox WHERE workflow_id='w'") as c: assert (await c.fetchone())[0] == "suppressed"
     engine.run.assert_not_awaited()
+
+@pytest.mark.asyncio
+async def test_codex_json_string_result_completes_stage_parent_and_outbox(db):
+    engine, service = await _agent_stage(db)
+    await service.initialize()
+    await _wait(lambda: _done(db, "w"))
+    stage = await db.get_stage_run("stage")
+    assert stage["status"] == "succeeded"
+    assert stage["artifact"] == {"summary":"done"}
+    async with db.db.execute("SELECT state FROM workflow_completion_outbox WHERE workflow_id='w'") as c:
+        assert (await c.fetchone())[0] == "completed"
+    assert engine.run.await_count == 1
+    await service.shutdown()
+
+@pytest.mark.asyncio
+async def test_malformed_agent_artifact_fails_closed_and_continues_once(db):
+    engine, service = await _agent_stage(db, result="not json")
+    await service.initialize()
+    async with asyncio.timeout(2):
+        while (await db.get_preset_workflow("w"))["status"] != "failed": await asyncio.sleep(.01)
+    assert (await db.get_stage_run("stage"))["status"] == "failed"
+    assert engine.run.await_count == 1
+    await service.shutdown()
+
+@pytest.mark.asyncio
+async def test_controller_exception_is_terminal_and_restart_does_not_repeat_observer(db, monkeypatch):
+    engine, service = await _agent_stage(db)
+    async def broken(stage): raise RuntimeError("boom")
+    monkeypatch.setattr(service, "_reconcile_child", broken)
+    await service.initialize()
+    async with asyncio.timeout(2):
+        while (await db.get_preset_workflow("w"))["status"] != "failed": await asyncio.sleep(.01)
+    assert engine.run.await_count == 1
+    await service.shutdown()
+    restarted = WorkflowPresetService(db=db,engine=engine,executions=_Executions(),agent_runs=_AgentRuns())
+    await restarted.initialize()
+    assert engine.run.await_count == 1
+    await restarted.shutdown()
+
+@pytest.mark.asyncio
+async def test_restart_reconciles_existing_child_without_dispatching_another(db):
+    await db.create_session("owner", source="web", backend="codex", status="idle")
+    engine=SimpleNamespace(run=AsyncMock(), _skill_manager=None, registry=None,
+        config=SimpleNamespace(agent=SimpleNamespace(model="x"),codex=SimpleNamespace(model="x")))
+    executions=_Executions()
+    preset={"name":"p","version":"1","preset_hash":"pinned","budget_usd":1,"stages":[{"id":"one","depends_on":[],"runner":"execution","inputs":{},"outputs":{},"timeout_seconds":10,"spec":{"kind":"test","arguments":{},"resources":{}}}]}
+    plan=SimpleNamespace(preset=SimpleNamespace(describe=lambda:preset),inputs={},preset_hash="pinned")
+    first=WorkflowPresetService(db=db,engine=engine,executions=executions,agent_runs=None)
+    workflow=await first.start(session_id="owner",plan=plan)
+    await _wait(lambda: _has_stage(db,workflow["id"]))
+    await first.shutdown()
+    executions.child={"id":"exec-child","status":"succeeded","result":{"outcome":"succeeded"}}
+    resumed=WorkflowPresetService(db=db,engine=engine,executions=executions,agent_runs=None)
+    await resumed.initialize()
+    await _wait(lambda: _done(db, workflow["id"]))
+    assert engine.run.await_count == 1
+    await resumed.shutdown()
+
+@pytest.mark.asyncio
+async def test_cancellation_wins_controller_failure_race(db, monkeypatch):
+    engine, service = await _agent_stage(db)
+    async def broken(stage):
+        await service.cancel_session("owner")
+        raise RuntimeError("boom")
+    monkeypatch.setattr(service, "_reconcile_child", broken)
+    await service.initialize()
+    async with asyncio.timeout(2):
+        while (await db.get_preset_workflow("w"))["status"] != "cancelled": await asyncio.sleep(.01)
+    assert engine.run.await_count == 0
+    async with db.db.execute("SELECT state FROM workflow_completion_outbox WHERE workflow_id='w'") as c:
+        assert (await c.fetchone())[0] == "suppressed"
+    await service.shutdown()

@@ -16,7 +16,7 @@ def _row(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
     if value is None:
         return None
     result = dict(value)
-    for name in ("plan", "result", "artifact"):
+    for name in ("plan", "spec", "result", "artifact"):
         if result.get(name) is not None:
             try: result[name] = json.loads(result[name])
             except (TypeError, ValueError): result[name] = {}
@@ -49,6 +49,14 @@ class PresetWorkflowStore:
         async with self.db.execute(f"SELECT * FROM preset_workflows WHERE status IN ({marks}) ORDER BY created_at", ACTIVE_PRESET_WORKFLOWS) as c:
             return [_row(row) async for row in c]  # type: ignore[misc]
 
+    async def pending_preset_workflow_completions(self) -> list[dict]:
+        """Terminal workflows whose durable observer continuation was not claimed."""
+        async with self.db.execute("""SELECT w.* FROM preset_workflows AS w
+            JOIN workflow_completion_outbox AS o ON o.workflow_id = w.id
+            WHERE w.status IN ('succeeded', 'failed', 'lost', 'blocked')
+              AND o.state = 'pending' ORDER BY w.finished_at""") as c:
+            return [_row(row) async for row in c]  # type: ignore[misc]
+
     async def active_preset_workflow_count(self, session_id: str) -> int:
         marks = ",".join("?" for _ in ACTIVE_PRESET_WORKFLOWS)
         async with self.db.execute(f"SELECT COUNT(*) FROM preset_workflows WHERE observer_session_id = ? AND status IN ({marks})", (session_id, *ACTIVE_PRESET_WORKFLOWS)) as c:
@@ -65,6 +73,31 @@ class PresetWorkflowStore:
         params.extend([workflow_id, *expect])
         outcome = await self._write(f"UPDATE preset_workflows SET {', '.join(fields)} WHERE id = ? AND status IN ({marks})", tuple(params))
         return bool(outcome.rowcount)
+
+    async def terminalize_preset_workflow(self, workflow_id: str, *, to_status: str,
+                                          result: Mapping[str, Any],
+                                          expect: tuple[str, ...] = ACTIVE_PRESET_WORKFLOWS) -> bool:
+        """CAS a workflow to terminal and create its outbox record atomically."""
+        if to_status not in TERMINAL_PRESET_WORKFLOWS:
+            raise ValueError("terminal status required")
+        now = utc_now_iso(); marks = ",".join("?" for _ in expect)
+        outbox_state = "suppressed" if to_status == "cancelled" else "pending"
+        async with self._atomic():
+            cursor = await self.db.execute(
+                f"""UPDATE preset_workflows SET status=?, result=?, finished_at=?,
+                    updated_at=?, revision=revision+1
+                    WHERE id=? AND status IN ({marks})""",
+                (to_status, json.dumps(dict(result)), now, now, workflow_id, *expect),
+            )
+            changed = bool(cursor.rowcount)
+            await cursor.close()
+            if changed:
+                await self.db.execute(
+                    """INSERT OR IGNORE INTO workflow_completion_outbox
+                    (workflow_id,state,created_at,updated_at) VALUES (?, ?, ?, ?)""",
+                    (workflow_id, outbox_state, now, now),
+                )
+        return changed
 
     async def create_stage_run(self, stage_run_id: str, *, workflow_id: str, stage_id: str, runner: str, spec: Mapping[str, Any], spec_hash: str) -> dict:
         now = utc_now_iso()
