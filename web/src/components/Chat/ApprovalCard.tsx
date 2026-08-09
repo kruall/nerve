@@ -1,5 +1,7 @@
 import { ShieldQuestion, Terminal, FileDiff, Check, Ban } from 'lucide-react';
 import { useChatStore } from '../../stores/chatStore';
+import { approvalCardActions } from './approvalCardActions';
+import { approvalCardClassNames } from './approvalCardLayout';
 
 /**
  * Floating approval card for backend approval requests (Codex sandbox:
@@ -29,6 +31,7 @@ export function ApprovalCard() {
   const pendingInteraction = useChatStore(s => s.pendingInteraction);
   const answerInteraction = useChatStore(s => s.answerInteraction);
   const denyInteraction = useChatStore(s => s.denyInteraction);
+  const actions = approvalCardActions(answerInteraction, denyInteraction);
 
   if (!pendingInteraction || !APPROVAL_TYPES.has(pendingInteraction.interactionType)) {
     return null;
@@ -61,21 +64,21 @@ export function ApprovalCard() {
     : ShieldQuestion;
 
   return (
-    <div className="mx-4 mb-2 border border-hue-orange/40 rounded-lg bg-surface shadow-lg overflow-hidden">
-      <div className="px-3 py-2 flex items-center gap-2 bg-hue-orange/10">
+    <div className={approvalCardClassNames.card} role="region" aria-label="Approval request">
+      <div className={approvalCardClassNames.header}>
         <Icon size={15} className="text-hue-orange" />
-        <span className="text-[13px] font-medium text-text-primary">{title}</span>
-        <span className="ml-auto text-[11px] text-text-muted">approval required</span>
+        <span className={approvalCardClassNames.title}>{title}</span>
+        <span className="ml-auto shrink-0 text-[11px] text-text-muted">approval required</span>
       </div>
 
-      <div className="px-3 py-2 space-y-1.5">
+      <div className={approvalCardClassNames.content}>
         {command && (
-          <pre className="text-[12px] font-mono bg-surface-deep rounded px-2 py-1.5 overflow-x-auto whitespace-pre-wrap break-all">
+          <pre className={approvalCardClassNames.code}>
             {command}
           </pre>
         )}
         {mcpArguments && (
-          <pre className="text-[12px] font-mono bg-surface-deep rounded px-2 py-1.5 overflow-x-auto whitespace-pre-wrap break-all">
+          <pre className={approvalCardClassNames.code}>
             {JSON.stringify(mcpArguments, null, 2)}
           </pre>
         )}
@@ -97,15 +100,17 @@ export function ApprovalCard() {
         )}
       </div>
 
-      <div className="px-3 py-2 flex gap-2 border-t border-border">
+      <div className={approvalCardClassNames.footer}>
         <button
-          onClick={() => answerInteraction(null)}
+          onClick={actions.approve}
+          aria-label="Approve approval request"
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-hue-green/15 text-hue-green text-[12px] font-medium hover:bg-hue-green/25 transition-colors"
         >
           <Check size={13} /> Approve
         </button>
         <button
-          onClick={() => denyInteraction('Declined by user.')}
+          onClick={actions.decline}
+          aria-label="Decline approval request"
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-hue-red/15 text-hue-red text-[12px] font-medium hover:bg-hue-red/25 transition-colors"
         >
           <Ban size={13} /> Decline
