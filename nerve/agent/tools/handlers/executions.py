@@ -13,6 +13,8 @@ from nerve.agent.tools.schemas import (
     EXECUTION_KIND_LIST_SCHEMA,
     EXECUTION_KIND_START_SCHEMA,
     EXECUTION_KIND_VALIDATE_SCHEMA,
+    EXECUTION_JOIN_SCHEMA,
+    EXECUTION_FORGET_SCHEMA,
     EXECUTION_LIST_SCHEMA,
     EXECUTION_STATUS_SCHEMA,
     EXECUTION_TAIL_SCHEMA,
@@ -85,9 +87,16 @@ async def execution_kind_start_handler(ctx: ToolContext, args: dict) -> ToolResu
             is_error=True,
         )
     try:
-        started = await service.start(session_id=ctx.session_id, plan=plan)
+        detached = bool(args.get("detached", False))
+        started = await service.start(
+            session_id=ctx.session_id, plan=plan, auto_continue=detached,
+        )
         if not isinstance(started, Mapping):
             raise TypeError("ExecutionService.start must return a mapping")
+        if not detached:
+            started = await service.join_execution(
+                execution_id=str(started["id"]), session_id=ctx.session_id,
+            )
     except Exception as e:  # lifecycle errors may contain secret argv; never echo them
         logger.error(
             "Execution lifecycle service failed to start kind %s (%s)",
@@ -123,6 +132,30 @@ async def execution_status_handler(ctx: ToolContext, args: dict) -> ToolResult:
     try:
         _, row = await _owned_execution(ctx, str(args.get("execution_id") or ""))
     except (RuntimeError, LookupError) as e:
+        return ToolResult.text(str(e), is_error=True)
+    return _json({"execution": public_execution(row)})
+
+
+async def execution_join_handler(ctx: ToolContext, args: dict) -> ToolResult:
+    execution_id = str(args.get("execution_id") or "")
+    try:
+        service, _ = await _owned_execution(ctx, execution_id)
+        row = await service.join_execution(
+            execution_id=execution_id, session_id=ctx.session_id,
+        )
+    except (RuntimeError, LookupError, KeyError, ValueError) as e:
+        return ToolResult.text(str(e), is_error=True)
+    return _json({"execution": public_execution(row)})
+
+
+async def execution_forget_handler(ctx: ToolContext, args: dict) -> ToolResult:
+    execution_id = str(args.get("execution_id") or "")
+    try:
+        service, _ = await _owned_execution(ctx, execution_id)
+        row = await service.forget_execution(
+            execution_id=execution_id, session_id=ctx.session_id,
+        )
+    except (RuntimeError, LookupError, KeyError, ValueError) as e:
         return ToolResult.text(str(e), is_error=True)
     return _json({"execution": public_execution(row)})
 
@@ -190,15 +223,28 @@ EXECUTION_SPECS = [
     ),
     ToolSpec(
         "execution_kind_start",
-        "Validate and start a configured execution kind through Nerve's lifecycle service. Arguments never pass through a shell.",
+        "Validate and start a configured execution kind. Waits by default; "
+        "pass detached=true to return immediately with a durable completion wakeup.",
         EXECUTION_KIND_START_SCHEMA,
         execution_kind_start_handler,
     ),
     ToolSpec(
         "execution_status",
-        "Get one execution owned by this session. This is an on-demand check; detached completion resumes the session automatically.",
+        "Get one execution owned by this session without changing its wait state.",
         EXECUTION_STATUS_SCHEMA,
         execution_status_handler,
+    ),
+    ToolSpec(
+        "execution_join",
+        "Wait for one execution owned by this session. Joining consumes its automatic completion wakeup.",
+        EXECUTION_JOIN_SCHEMA,
+        execution_join_handler,
+    ),
+    ToolSpec(
+        "execution_forget",
+        "Stop waiting for an execution without cancelling it or waking this session on completion.",
+        EXECUTION_FORGET_SCHEMA,
+        execution_forget_handler,
     ),
     ToolSpec(
         "execution_tail",

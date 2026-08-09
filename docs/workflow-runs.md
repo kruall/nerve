@@ -153,22 +153,27 @@ survives session deletion — the journal directory keeps the details.
 
 | Tool | Arguments |
 |------|-----------|
-| `workflow_run_start` | `engine`, `prompt`, `budget_usd` (required); `title`, `model`, `effort`, `cwd` |
+| `workflow_run_start` | `engine`, `prompt`, `budget_usd` (required); `title`, `model`, `effort`, `cwd`, `detached` |
 | `workflow_run_status` | `run_id` |
+| `workflow_run_join` | `run_id` |
+| `workflow_run_forget` | `run_id` |
 | `workflow_run_kill` | `run_id`, `reason` |
 | `workflow_run_list` | `status` (`active`, exact status, or empty), `limit` |
 
-`workflow_run_start` returns the run id immediately; execution happens in the
-background. Typical agent usage:
+`workflow_run_start` waits for terminal state by default. With `detached: true`
+it returns the run id immediately and keeps a durable watch that resumes the
+owner session on completion. `workflow_run_join` waits explicitly;
+`workflow_run_forget` removes the watch without killing the run.
 
 ```
 workflow_run_start(engine="claude-workflow", title="Sample batch audit",
-                   budget_usd=12, prompt="Audit samples/batch-07/ for ...")
+                   budget_usd=12, prompt="Audit samples/batch-07/ for ...",
+                   detached=true)
 → Workflow run wfr-3fa2b81c created (pending). Engine: claude-workflow,
   budget: $12.00. Journal: ~/.nerve/workflow-runs/wfr-3fa2b81c. ...
 
-# later — poll instead of waiting; the run notifies on finish/warn/kill
-workflow_run_status(run_id="wfr-3fa2b81c")
+# later — block explicitly, or forget it without killing it
+workflow_run_join(run_id="wfr-3fa2b81c")
 ```
 
 Start/kill are engine-owned operations and are rejected for external MCP

@@ -123,6 +123,8 @@ class WorkflowRunService:
         # from _finalize_terminal with the fresh terminal run row. Listeners
         # must hand off quickly (enqueue) — never start work inline.
         self._completion_listeners: list[Any] = []
+        self._continuations: dict[str, asyncio.Task] = {}
+        self._terminal_changed = asyncio.Condition()
 
     # ------------------------------------------------------------------ #
     #  Lifespan                                                           #
@@ -131,6 +133,7 @@ class WorkflowRunService:
     async def start(self) -> None:
         """Recovery pass + monitor loop startup."""
         self._stopping = False
+        await self.db.fail_claimed_workflow_run_continuations_on_restart()
         if not self._stop_listener_registered:
             # CAS runs terminal BEFORE any session stop lands (engine.run
             # swallows interrupts/cancels — see module docstring).
@@ -164,6 +167,8 @@ class WorkflowRunService:
             )
         interval = max(5, int(self.config.workflows.poll_interval_seconds))
         self._monitor_task = asyncio.create_task(self._monitor_loop(interval))
+        for run in await self.db.list_pending_workflow_run_continuations():
+            self._schedule_continuation(run["id"])
         logger.info(
             "WorkflowRunService started (poll=%ss, max_concurrent=%s)",
             interval, self.config.workflows.max_concurrent_runs,
@@ -178,6 +183,11 @@ class WorkflowRunService:
             except (asyncio.CancelledError, Exception):
                 pass
             self._monitor_task = None
+        for task in self._continuations.values():
+            task.cancel()
+        if self._continuations:
+            await asyncio.gather(*self._continuations.values(), return_exceptions=True)
+        self._continuations.clear()
         # Running _execute tasks die with the daemon; the next start()'s
         # recovery pass marks their rows failed.
 
@@ -211,6 +221,8 @@ class WorkflowRunService:
         title: str = "",
         created_by: str = "user",
         run_id: str | None = None,
+        owner_session_id: str | None = None,
+        auto_continue: bool = False,
     ) -> dict:
         """Validate, persist, journal, and (slots permitting) dispatch.
 
@@ -290,6 +302,8 @@ class WorkflowRunService:
                 run_id, engine_kind, spec, budget,
                 title=title.strip(), created_by=created_by,
                 journal_dir=str(journal_dir),
+                owner_session_id=owner_session_id,
+                auto_continue=auto_continue,
             )
         except Exception as e:
             if "UNIQUE" in str(e) or "unique" in str(e):
@@ -362,6 +376,37 @@ class WorkflowRunService:
 
     async def get_run(self, run_id: str) -> dict | None:
         return await self.db.get_workflow_run(run_id)
+
+    async def join_run(self, run_id: str, *, session_id: str) -> dict:
+        run = await self.db.get_workflow_run(run_id)
+        if run is None or run.get("owner_session_id") != session_id:
+            raise WorkflowRunError(f"no such workflow run in this session: {run_id}")
+        if not await self.db.suppress_workflow_run_continuation(run_id, session_id):
+            current = await self.db.get_workflow_run(run_id)
+            if current and current.get("continuation_state") == "claimed":
+                raise WorkflowRunError("workflow completion is already being delivered")
+        task = self._continuations.get(run_id)
+        if task is not None:
+            task.cancel()
+        while True:
+            async with self._terminal_changed:
+                run = await self.db.get_workflow_run(run_id)
+                if run is None:
+                    raise WorkflowRunError(f"no such workflow run: {run_id}")
+                if run["status"] not in ACTIVE_STATUSES:
+                    return run
+                await self._terminal_changed.wait()
+
+    async def forget_run(self, run_id: str, *, session_id: str) -> dict:
+        run = await self.db.get_workflow_run(run_id)
+        if run is None or run.get("owner_session_id") != session_id:
+            raise WorkflowRunError(f"no such workflow run in this session: {run_id}")
+        if not await self.db.suppress_workflow_run_continuation(run_id, session_id):
+            raise WorkflowRunError("workflow completion is already being delivered")
+        task = self._continuations.get(run_id)
+        if task is not None:
+            task.cancel()
+        return await self.db.get_workflow_run(run_id) or run
 
     async def list_runs(
         self, status: str | None = None, limit: int = 50, offset: int = 0,
@@ -778,6 +823,9 @@ class WorkflowRunService:
         self._journal_event(run, status, detail)
         self._write_run_json(run)
         await self._broadcast(run)
+        async with self._terminal_changed:
+            self._terminal_changed.notify_all()
+        self._schedule_continuation(run_id)
         for listener in list(self._completion_listeners):
             try:
                 await listener(run)
@@ -785,6 +833,41 @@ class WorkflowRunService:
                 logger.exception(
                     "workflow run completion listener failed for %s", run_id,
                 )
+
+    def _schedule_continuation(self, run_id: str) -> None:
+        if self._stopping or run_id in self._continuations:
+            return
+        task = asyncio.create_task(self._continue_owner(run_id))
+        self._continuations[run_id] = task
+        task.add_done_callback(
+            lambda finished: self._continuations.pop(run_id, None)
+            if self._continuations.get(run_id) is finished else None
+        )
+
+    async def _continue_owner(self, run_id: str) -> None:
+        claimed, run = await self.db.claim_workflow_run_continuation(run_id)
+        if not claimed or run is None or not run.get("owner_session_id"):
+            return
+        prompt = (
+            "A watched workflow run reached a terminal state. Continue the same task "
+            "from this preserved native thread. Inspect workflow_run_status before "
+            "assuming success.\n\n"
+            f"run_id: {run_id}\nstatus: {run.get('status')}\n"
+            f"result: {run.get('result')}\nerror: {run.get('error')}"
+        )
+        try:
+            await self.engine.run(
+                session_id=run["owner_session_id"], user_message=prompt,
+                source="workflow", internal=True,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            await self.db.settle_workflow_run_continuation(
+                run_id, success=False, error=type(exc).__name__,
+            )
+            return
+        await self.db.settle_workflow_run_continuation(run_id, success=True)
 
     @staticmethod
     def _is_quiet(run: dict | None) -> bool:

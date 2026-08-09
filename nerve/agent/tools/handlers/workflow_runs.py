@@ -68,6 +68,11 @@ WORKFLOW_RUN_START_SCHEMA = {
             "description": "Working directory for the run's session (must exist).",
             "default": "",
         },
+        "detached": {
+            "type": "boolean",
+            "description": "Return immediately and resume this session when the run completes.",
+            "default": False,
+        },
     },
     "required": ["engine", "prompt", "budget_usd"],
 }
@@ -82,6 +87,9 @@ WORKFLOW_RUN_STATUS_SCHEMA = {
     },
     "required": ["run_id"],
 }
+
+WORKFLOW_RUN_JOIN_SCHEMA = WORKFLOW_RUN_STATUS_SCHEMA
+WORKFLOW_RUN_FORGET_SCHEMA = WORKFLOW_RUN_STATUS_SCHEMA
 
 WORKFLOW_RUN_KILL_SCHEMA = {
     "type": "object",
@@ -200,7 +208,11 @@ async def workflow_run_start_handler(ctx: ToolContext, args: dict) -> ToolResult
             budget_usd=args.get("budget_usd"),
             title=str(args.get("title") or ""),
             created_by=f"session:{ctx.session_id}",
+            owner_session_id=ctx.session_id,
+            auto_continue=bool(args.get("detached", False)),
         )
+        if not bool(args.get("detached", False)):
+            run = await service.join_run(run["id"], session_id=ctx.session_id)
     except WorkflowRunError as e:
         return ToolResult.text(str(e), is_error=True)
     except Exception as e:  # noqa: BLE001
@@ -213,6 +225,39 @@ async def workflow_run_start_handler(ctx: ToolContext, args: dict) -> ToolResult
         f"{run['engine']}, budget: {budget_txt}. Journal: "
         f"{run.get('journal_dir')}. Check progress with "
         f"workflow_run_status(run_id=\"{run['id']}\")."
+    )
+
+
+async def workflow_run_join_handler(ctx: ToolContext, args: dict) -> ToolResult:
+    service, reason = _get_service(ctx)
+    if service is None:
+        return ToolResult.text(reason, is_error=True)
+    from nerve.workflows.service import WorkflowRunError
+    try:
+        run = await service.join_run(
+            str(args.get("run_id") or ""), session_id=ctx.session_id,
+        )
+    except WorkflowRunError as e:
+        return ToolResult.text(str(e), is_error=True)
+    return ToolResult.text(
+        _format_run(run, service) + "\n\n" + json.dumps(service.public_run(run), indent=2, default=str)
+    )
+
+
+async def workflow_run_forget_handler(ctx: ToolContext, args: dict) -> ToolResult:
+    service, reason = _get_service(ctx)
+    if service is None:
+        return ToolResult.text(reason, is_error=True)
+    from nerve.workflows.service import WorkflowRunError
+    try:
+        run = await service.forget_run(
+            str(args.get("run_id") or ""), session_id=ctx.session_id,
+        )
+    except WorkflowRunError as e:
+        return ToolResult.text(str(e), is_error=True)
+    return ToolResult.text(
+        f"Workflow run {run['id']} was forgotten. It keeps running, but this "
+        "session will not wait for or resume on its completion."
     )
 
 
@@ -275,8 +320,8 @@ WORKFLOW_RUN_SPECS = [
             "Start a budget-capped multi-agent workflow run (Claude Workflow "
             "or Codex Ultracode) in its own tracked session. Nerve meters "
             "real dollar spend, warns at 80%, and kills the run at 100%. "
-            "Returns the run id immediately; the run executes in the "
-            "background."
+            "Waits by default; pass detached=true to return immediately and "
+            "resume this session when the run completes."
         ),
         input_schema=WORKFLOW_RUN_START_SCHEMA,
         handler=workflow_run_start_handler,
@@ -289,6 +334,24 @@ WORKFLOW_RUN_SPECS = [
         ),
         input_schema=WORKFLOW_RUN_STATUS_SCHEMA,
         handler=workflow_run_status_handler,
+    ),
+    ToolSpec(
+        name="workflow_run_join",
+        description=(
+            "Wait for a workflow run started by this session. Joining consumes "
+            "its automatic completion wakeup."
+        ),
+        input_schema=WORKFLOW_RUN_JOIN_SCHEMA,
+        handler=workflow_run_join_handler,
+    ),
+    ToolSpec(
+        name="workflow_run_forget",
+        description=(
+            "Stop waiting for a workflow run without killing it or waking this "
+            "session on completion."
+        ),
+        input_schema=WORKFLOW_RUN_FORGET_SCHEMA,
+        handler=workflow_run_forget_handler,
     ),
     ToolSpec(
         name="workflow_run_kill",

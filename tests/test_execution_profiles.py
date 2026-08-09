@@ -247,9 +247,15 @@ async def test_progressive_tools_and_start_service(tmp_path):
         def __init__(self):
             self.plan = None
 
-        async def start(self, *, session_id, plan):
+        async def start(self, *, session_id, plan, auto_continue=True):
             self.plan = plan
             return {"id": "exec-1", "session_id": session_id}
+
+        async def join_execution(self, *, execution_id, session_id):
+            return {
+                "id": execution_id, "session_id": session_id,
+                "status": "succeeded", "continuation": {"state": "suppressed"},
+            }
 
     service = Service()
     ctx = ToolContext(

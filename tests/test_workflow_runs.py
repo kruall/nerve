@@ -26,6 +26,8 @@ import pytest
 import pytest_asyncio
 
 from nerve.agent.tools.handlers.workflow_runs import (
+    workflow_run_forget_handler,
+    workflow_run_join_handler,
     workflow_run_kill_handler,
     workflow_run_list_handler,
     workflow_run_start_handler,
@@ -743,6 +745,7 @@ class TestWorkflowRunTools:
             "prompt": "fix issue #12",
             "budget_usd": 3.0,
             "title": "bugfix",
+            "detached": True,
         })
         assert not result.is_error
         text = result.content[0]["text"]
@@ -753,6 +756,39 @@ class TestWorkflowRunTools:
         assert len(runs) == 1
         assert runs[0]["created_by"] == "session:sess-main"
         await _drain(tool_service)
+
+    async def test_join_waits_and_consumes_completion(self, tool_service, db, engine):
+        await db.create_session("sess-main", source="web")
+        await db.create_workflow_run(
+            "wfr-join0001", ENGINE_CLAUDE, {"prompt": "p"}, 1.0,
+            owner_session_id="sess-main", auto_continue=True,
+        )
+        joined = asyncio.create_task(workflow_run_join_handler(
+            _ctx(db, engine), {"run_id": "wfr-join0001"},
+        ))
+        await asyncio.sleep(0)
+        assert await db.transition_workflow_run(
+            "wfr-join0001", "done", expect=("pending",),
+        )
+        await tool_service._finalize_terminal("wfr-join0001", "done", {})
+        result = await joined
+        assert not result.is_error
+        assert "[done]" in result.content[0]["text"]
+        engine.run.assert_not_awaited()
+
+    async def test_forget_does_not_kill_or_resume(self, tool_service, db, engine):
+        await db.create_session("sess-main", source="web")
+        await db.create_workflow_run(
+            "wfr-forget01", ENGINE_CLAUDE, {"prompt": "p"}, 1.0,
+            owner_session_id="sess-main", auto_continue=True,
+        )
+        result = await workflow_run_forget_handler(
+            _ctx(db, engine), {"run_id": "wfr-forget01"},
+        )
+        assert not result.is_error
+        run = await db.get_workflow_run("wfr-forget01")
+        assert run["status"] == "pending"
+        assert run["continuation_state"] == "suppressed"
 
     async def test_start_validation_error_is_tool_error(self, tool_service, db, engine):
         result = await workflow_run_start_handler(_ctx(db, engine), {

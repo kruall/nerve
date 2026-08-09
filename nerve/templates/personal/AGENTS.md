@@ -47,6 +47,7 @@ These tools are always available via MCP. **Call them as `mcp__nerve__<name>`** 
 
 **Workflow Runs** — Budget-capped multi-agent jobs in dedicated tracked sessions.
 - `workflow_run_start` — Launch a Claude Workflow / Codex Ultracode run with a hard dollar budget (warned at 80%, killed at 100%)
+- `workflow_run_join` / `workflow_run_forget` — Wait for a detached run or remove its completion wakeup without killing it
 - `workflow_run_status` — Check a run's status, metered spend vs budget, and result
 - `workflow_run_list` — List runs, filterable by status (`active`, `running`, `done`, ...)
 - `workflow_run_kill` — Terminate a run (scoped to that run's own session only)

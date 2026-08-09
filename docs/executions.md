@@ -122,8 +122,11 @@ The MCP surface is progressive:
   resource/result policies.
 - `execution_kind_validate(kind, arguments, resources)` returns a redacted
   compiled plan without starting it.
-- `execution_kind_start(...)` compiles, persists, and queues the immutable plan
-  in the session-owned execution lifecycle service.
+- `execution_kind_start(...)` compiles, persists, and queues the immutable plan.
+  It waits by default; `detached: true` returns the id immediately and keeps a
+  durable completion watch.
+- `execution_join` waits for a detached execution. `execution_forget` removes
+  the completion watch without cancelling the work.
 - `execution_status`, `execution_tail`, `execution_cancel`, and
   `execution_list` expose only work owned by the calling ToolContext session.
 
@@ -146,6 +149,10 @@ owner Nerve session, profile version/hash and snapshot, normalized unredacted
 plan, resource requests, selected leases, backend handle, result, cancellation
 marker, and continuation outbox state. Secret plan values stay in the local
 database and are never returned by the public projection.
+
+`join` and `forget` atomically suppress automatic delivery before waiting or
+returning. Thus completion is delivered either through the blocked tool call or
+through the preserved session continuation, never both.
 
 Completion and cancellation are compare-and-set transitions. An accepted Stop
 atomically moves active work to `cancelling`, suppresses pending or claimed

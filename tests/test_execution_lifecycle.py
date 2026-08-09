@@ -143,6 +143,62 @@ async def test_start_completes_and_resumes_same_session_once(db, owner, tmp_path
 
 
 @pytest.mark.asyncio
+async def test_join_consumes_completion_without_autonomous_resume(
+    db, owner, tmp_path, broadcast_stub,
+):
+    backend = ControlledBackend()
+    engine = _engine()
+    service = ExecutionService(
+        db=db, engine=engine, workspace=tmp_path, catalog=SimpleNamespace(),
+        backend=backend, execution_root=tmp_path / "runs",
+    )
+    await service.initialize()
+    started = await service.start(
+        session_id=owner, plan=StubPlan(), auto_continue=False,
+    )
+    await backend.started_event.wait()
+    joined = asyncio.create_task(service.join_execution(
+        execution_id=started["id"], session_id=owner,
+    ))
+    backend.release_event.set()
+    row = await joined
+    assert row["status"] == "succeeded"
+    assert row["continuation_state"] == "suppressed"
+    engine.run.assert_not_awaited()
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_forget_keeps_execution_running_and_suppresses_resume(
+    db, owner, tmp_path, broadcast_stub,
+):
+    backend = ControlledBackend()
+    engine = _engine()
+    service = ExecutionService(
+        db=db, engine=engine, workspace=tmp_path, catalog=SimpleNamespace(),
+        backend=backend, execution_root=tmp_path / "runs",
+    )
+    await service.initialize()
+    started = await service.start(session_id=owner, plan=StubPlan())
+    await backend.started_event.wait()
+    forgotten = await service.forget_execution(
+        execution_id=started["id"], session_id=owner,
+    )
+    assert forgotten["status"] == "running"
+    assert backend.cancelled is False
+    backend.release_event.set()
+
+    async def finished():
+        row = await db.get_execution(started["id"])
+        return row if row["status"] == "succeeded" else None
+
+    row = await _eventually(finished)
+    assert row["continuation_state"] == "suppressed"
+    engine.run.assert_not_awaited()
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_failure_continues_with_terminal_metadata(db, owner, tmp_path, broadcast_stub):
     backend = ControlledBackend(result=BackendResult(7, summary="bad"))
     engine = _engine()

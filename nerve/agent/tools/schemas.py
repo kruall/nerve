@@ -57,7 +57,14 @@ EXECUTION_KIND_VALIDATE_SCHEMA = {
 
 EXECUTION_KIND_START_SCHEMA = {
     "type": "object",
-    "properties": _EXECUTION_OPERATION_PROPERTIES,
+    "properties": {
+        **_EXECUTION_OPERATION_PROPERTIES,
+        "detached": {
+            "type": "boolean",
+            "description": "Return immediately and resume this session when the execution completes.",
+            "default": False,
+        },
+    },
     "required": ["kind"],
     "additionalProperties": False,
 }
@@ -70,6 +77,9 @@ EXECUTION_STATUS_SCHEMA = {
     "required": ["execution_id"],
     "additionalProperties": False,
 }
+
+EXECUTION_JOIN_SCHEMA = EXECUTION_STATUS_SCHEMA
+EXECUTION_FORGET_SCHEMA = EXECUTION_STATUS_SCHEMA
 
 EXECUTION_TAIL_SCHEMA = {
     "type": "object",

@@ -165,6 +165,7 @@ class TestDefaultRegistry:
             "nerve_api", "mcp_reload",
             # workflow runs
             "workflow_run_start", "workflow_run_status",
+            "workflow_run_join", "workflow_run_forget",
             "workflow_run_kill", "workflow_run_list",
             # hoa
             "hoa_status", "hoa_list_pipelines", "hoa_execute",

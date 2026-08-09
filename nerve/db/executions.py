@@ -56,6 +56,7 @@ class ExecutionStore:
         resource_requests: Sequence[Mapping[str, Any]],
         completion_target_type: str = "session",
         completion_target_id: str | None = None,
+        auto_continue: bool = True,
     ) -> dict[str, Any]:
         now = utc_now_iso()
         try:
@@ -63,12 +64,14 @@ class ExecutionStore:
                 """INSERT INTO executions
                    (id, session_id, kind, profile_version, profile_hash,
                     profile_snapshot, plan, resource_requests, selected_leases,
-                    completion_target_type, completion_target_id, status, created_at, queued_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, 'queued', ?, ?, ?)""",
+                    completion_target_type, completion_target_id, auto_continue,
+                    status, created_at, queued_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, 'queued', ?, ?, ?)""",
                 (
                     execution_id, session_id, kind, profile_version, profile_hash,
                     json.dumps(dict(profile_snapshot)), json.dumps(dict(plan)),
-                    json.dumps(list(resource_requests)), completion_target_type, completion_target_id, now, now, now,
+                    json.dumps(list(resource_requests)), completion_target_type,
+                    completion_target_id, int(auto_continue), now, now, now,
                 ),
             )
         except sqlite3.IntegrityError as exc:
@@ -201,7 +204,8 @@ class ExecutionStore:
         update = await self._write(
             f"""UPDATE executions
                 SET status = ?, result = ?, finished_at = ?, updated_at = ?,
-                    revision = revision + 1, continuation_state = 'pending',
+                    revision = revision + 1,
+                    continuation_state = CASE WHEN auto_continue = 1 THEN 'pending' ELSE 'suppressed' END,
                     continuation_error = NULL
                 WHERE id = ? AND status IN ({placeholders})
                   AND cancel_requested_at IS NULL""",
@@ -209,6 +213,21 @@ class ExecutionStore:
                 status, json.dumps(dict(result)), now, now, execution_id,
                 *expected,
             ),
+        )
+        return (update.rowcount or 0) == 1
+
+    async def suppress_execution_continuation(self, execution_id: str) -> bool:
+        """Forget automatic delivery without cancelling the execution."""
+        now = utc_now_iso()
+        update = await self._write(
+            """UPDATE executions
+               SET auto_continue = 0,
+                   continuation_state = CASE
+                       WHEN continuation_state IN ('none', 'pending') THEN 'suppressed'
+                       ELSE continuation_state END,
+                   updated_at = ?, revision = revision + 1
+               WHERE id = ? AND continuation_state != 'claimed'""",
+            (now, execution_id),
         )
         return (update.rowcount or 0) == 1
 

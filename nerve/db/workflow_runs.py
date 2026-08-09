@@ -57,17 +57,21 @@ class WorkflowRunStore:
         title: str = "",
         created_by: str = "user",
         journal_dir: str | None = None,
+        owner_session_id: str | None = None,
+        auto_continue: bool = False,
     ) -> dict:
         """Insert a new run in status ``pending`` and return the row."""
         now = utc_now_iso()
         await self._write(
             """INSERT INTO workflow_runs
                (id, engine, title, spec, status, budget_usd, spent_usd,
-                created_by, journal_dir, created_at, updated_at)
-               VALUES (?, ?, ?, ?, 'pending', ?, 0.0, ?, ?, ?, ?)""",
+                created_by, journal_dir, owner_session_id, auto_continue,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, 'pending', ?, 0.0, ?, ?, ?, ?, ?, ?)""",
             (
                 run_id, engine, title, json.dumps(spec), budget_usd,
-                created_by, journal_dir, now, now,
+                created_by, journal_dir, owner_session_id, int(auto_continue),
+                now, now,
             ),
         )
         run = await self.get_workflow_run(run_id)
@@ -189,6 +193,11 @@ class WorkflowRunStore:
         assignments = ", ".join(
             ["status = ?", "updated_at = ?"] + [f"{k} = ?" for k in cols]
         )
+        if to_status in TERMINAL_STATUSES:
+            assignments += (
+                ", continuation_state = CASE WHEN auto_continue = 1 "
+                "THEN 'pending' ELSE 'suppressed' END"
+            )
         placeholders = ",".join("?" for _ in expect)
         result = await self._write(
             f"""UPDATE workflow_runs SET {assignments}
@@ -196,3 +205,65 @@ class WorkflowRunStore:
             (to_status, now, *cols.values(), run_id, *expect),
         )
         return (result.rowcount or 0) == 1
+
+    async def suppress_workflow_run_continuation(self, run_id: str, session_id: str) -> bool:
+        now = utc_now_iso()
+        result = await self._write(
+            """UPDATE workflow_runs
+               SET auto_continue = 0,
+                   continuation_state = CASE
+                       WHEN continuation_state IN ('none', 'pending') THEN 'suppressed'
+                       ELSE continuation_state END,
+                   updated_at = ?
+               WHERE id = ? AND owner_session_id = ?
+                 AND continuation_state != 'claimed'""",
+            (now, run_id, session_id),
+        )
+        return (result.rowcount or 0) == 1
+
+    async def claim_workflow_run_continuation(self, run_id: str):
+        now = utc_now_iso()
+        result = await self._write(
+            """UPDATE workflow_runs
+               SET continuation_state = 'claimed', continuation_claimed_at = ?,
+                   updated_at = ?
+               WHERE id = ? AND continuation_state = 'pending'""",
+            (now, now, run_id),
+        )
+        return (result.rowcount or 0) == 1, await self.get_workflow_run(run_id)
+
+    async def settle_workflow_run_continuation(
+        self, run_id: str, *, success: bool, error: str | None = None,
+    ) -> bool:
+        now = utc_now_iso()
+        result = await self._write(
+            """UPDATE workflow_runs
+               SET continuation_state = ?, continuation_completed_at = ?,
+                   continuation_error = ?, updated_at = ?
+               WHERE id = ? AND continuation_state = 'claimed'""",
+            (
+                "completed" if success else "failed", now,
+                None if success else (error or "continuation failed")[:1000],
+                now, run_id,
+            ),
+        )
+        return (result.rowcount or 0) == 1
+
+    async def list_pending_workflow_run_continuations(self) -> list[dict]:
+        async with self.db.execute(
+            """SELECT * FROM workflow_runs WHERE continuation_state = 'pending'
+               ORDER BY finished_at ASC, id ASC"""
+        ) as cursor:
+            return [_parse_run(dict(row)) async for row in cursor]
+
+    async def fail_claimed_workflow_run_continuations_on_restart(self) -> int:
+        now = utc_now_iso()
+        result = await self._write(
+            """UPDATE workflow_runs
+               SET continuation_state = 'failed', continuation_completed_at = ?,
+                   continuation_error = 'daemon restarted after continuation claim',
+                   updated_at = ?
+               WHERE continuation_state = 'claimed'""",
+            (now, now),
+        )
+        return int(result.rowcount or 0)

@@ -67,6 +67,7 @@ class ExecutionService:
         self._continuations: dict[str, asyncio.Task[Any]] = {}
         self._stopping = False
         self._continuations_ready = False
+        self._terminal_changed = asyncio.Condition()
 
     async def initialize(self, *, dispatch_continuations: bool = True) -> None:
         """Reconcile active rows and recover only unclaimed outbox items."""
@@ -183,6 +184,7 @@ class ExecutionService:
     async def start(
         self, *, session_id: str, plan: CompiledExecutionPlan,
         completion_target: Mapping[str, str] | None = None,
+        auto_continue: bool = True,
     ) -> Mapping[str, Any]:
         session = await self.db.get_session(session_id)
         if (
@@ -196,6 +198,7 @@ class ExecutionService:
             plan=serialized,
             profile_snapshot={**plan.profile.describe(), "source": plan.profile.source},
             completion_target=completion_target,
+            auto_continue=auto_continue,
         )
 
     async def _start_serialized(
@@ -205,6 +208,7 @@ class ExecutionService:
         plan: Mapping[str, Any],
         profile_snapshot: Mapping[str, Any],
         completion_target: Mapping[str, str] | None = None,
+        auto_continue: bool = True,
     ) -> Mapping[str, Any]:
         execution_id = f"exec-{uuid.uuid4().hex[:12]}"
         plan_data = dict(plan)
@@ -224,6 +228,7 @@ class ExecutionService:
             resource_requests=requests,
             completion_target_type=str((completion_target or {}).get("type", "session")),
             completion_target_id=(completion_target or {}).get("id"),
+            auto_continue=auto_continue,
         )
         await self._broadcast(execution_id)
         self._spawn_runner(execution_id)
@@ -531,6 +536,8 @@ class ExecutionService:
         row = await self.db.get_execution(execution_id)
         if row is None:
             return
+        async with self._terminal_changed:
+            self._terminal_changed.notify_all()
         public = public_execution(self._decorate(row))
         await broadcaster.broadcast(row["session_id"], {
             "type": "execution_update",
@@ -572,6 +579,40 @@ class ExecutionService:
     async def get_execution(self, *, execution_id: str):
         row = await self.db.get_execution(execution_id)
         return self._decorate(row) if row else None
+
+    async def join_execution(self, *, execution_id: str, session_id: str):
+        row = await self.db.get_execution(execution_id)
+        if row is None or row.get("session_id") != session_id:
+            raise KeyError(execution_id)
+        if not await self.db.suppress_execution_continuation(execution_id):
+            current = await self.db.get_execution(execution_id)
+            if current and current.get("continuation_state") == "claimed":
+                raise ValueError("execution completion is already being delivered")
+        task = self._continuations.get(execution_id)
+        if task is not None:
+            task.cancel()
+        while True:
+            async with self._terminal_changed:
+                row = await self.db.get_execution(execution_id)
+                if row is None:
+                    raise KeyError(execution_id)
+                if row["status"] not in ACTIVE_EXECUTION_STATUSES:
+                    return self._decorate(row)
+                await self._terminal_changed.wait()
+
+    async def forget_execution(self, *, execution_id: str, session_id: str):
+        row = await self.db.get_execution(execution_id)
+        if row is None or row.get("session_id") != session_id:
+            raise KeyError(execution_id)
+        if not await self.db.suppress_execution_continuation(execution_id):
+            raise ValueError("execution completion is already being delivered")
+        task = self._continuations.get(execution_id)
+        if task is not None:
+            task.cancel()
+        current = await self.db.get_execution(execution_id)
+        assert current is not None
+        await self._broadcast(execution_id)
+        return self._decorate(current)
 
     async def tail_logs(self, *, execution_id: str, limit: int, before: int | None):
         if await self.db.get_execution(execution_id) is None:
