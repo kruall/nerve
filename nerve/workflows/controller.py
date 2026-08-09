@@ -34,6 +34,11 @@ class WorkflowPresetService:
         row = await self.db.create_preset_workflow(workflow_id, session_id=session_id, plan=snapshot, preset_hash=plan.preset_hash, spec_hash=_hash(snapshot))
         self._schedule(workflow_id); await self._broadcast(row); return row
 
+    async def _changed(self, workflow_id: str) -> None:
+        """Publish a redacted workflow snapshot after every durable transition."""
+        row = await self.db.get_preset_workflow(workflow_id)
+        if row: await self._broadcast(row)
+
     def _schedule(self, workflow_id: str) -> None:
         if self._stopping or workflow_id in self._tasks: return
         task = asyncio.create_task(self._drive(workflow_id)); self._tasks[workflow_id] = task
@@ -49,6 +54,7 @@ class WorkflowPresetService:
                 await self.db.transition_stage_run(stage["id"], to_status="cancelling")
                 if stage.get("child_type") == "execution": await self.executions.cancel_execution(execution_id=stage["child_id"], requested_by="workflow", reason=reason)
                 elif stage.get("child_type") == "agent" and self.agent_runs: await self.agent_runs.kill_run(stage["child_id"], reason=reason, killed_by="workflow")
+            await self._changed(workflow["id"])
         return changed
 
     async def _drive(self, workflow_id: str) -> None:
@@ -57,7 +63,7 @@ class WorkflowPresetService:
             if not workflow or workflow["status"] not in ("queued", "running", "cancelling"): return
             if workflow["status"] == "cancelling":
                 await self._terminal(workflow, "cancelled", {"outcome":"cancelled"}); return
-            if workflow["status"] == "queued": await self.db.transition_preset_workflow(workflow_id, to_status="running", expect=("queued",)); workflow = await self.db.get_preset_workflow(workflow_id)
+            if workflow["status"] == "queued": await self.db.transition_preset_workflow(workflow_id, to_status="running", expect=("queued",)); await self._changed(workflow_id); workflow = await self.db.get_preset_workflow(workflow_id)
             stages = await self.db.list_stage_runs(workflow_id)
             active = next((s for s in stages if s["status"] in ACTIVE_STAGE_RUNS), None)
             if active:
@@ -71,7 +77,7 @@ class WorkflowPresetService:
             await self._dispatch(workflow, next_stage, done)
 
     async def _dispatch(self, workflow: Mapping[str, Any], stage: Mapping[str, Any], done: Mapping[str, Mapping[str, Any]]) -> None:
-        sid=f"wfs-{uuid.uuid4().hex[:12]}"; await self.db.create_stage_run(sid, workflow_id=workflow["id"], stage_id=stage["id"], runner=stage["runner"], spec=stage, spec_hash=_hash(stage)); await self.db.transition_stage_run(sid, to_status="starting", expect=("queued",))
+        sid=f"wfs-{uuid.uuid4().hex[:12]}"; await self.db.create_stage_run(sid, workflow_id=workflow["id"], stage_id=stage["id"], runner=stage["runner"], spec=stage, spec_hash=_hash(stage)); await self.db.transition_stage_run(sid, to_status="starting", expect=("queued",)); await self._changed(workflow["id"])
         artifacts={k:v.get("artifact") for k,v in done.items() if v.get("artifact") is not None}
         try:
             if stage["runner"] == "execution":
@@ -85,6 +91,7 @@ class WorkflowPresetService:
                 resolved=await resolver.resolve(stage=spec,workflow={"id":workflow["id"]},task_contract=workflow["plan"]["inputs"],prompt=str(workflow["plan"]["inputs"].get("prompt", stage["id"])),artifacts=artifacts,budget_usd=float(workflow["plan"]["preset"]["budget_usd"])/len(workflow["plan"]["preset"]["stages"]))
                 child=await self.agent_runs.start_agent_stage(resolved); await self.db.transition_stage_run(sid,to_status="running",expect=("starting",),child_type="agent",child_id=child["id"])
         except Exception as e: await self.db.transition_stage_run(sid,to_status="failed",expect=("starting",),result={"error":type(e).__name__})
+        finally: await self._changed(workflow["id"])
 
     async def _reconcile_child(self, stage: Mapping[str, Any]) -> bool:
         child = await (self.executions.get_execution(execution_id=stage["child_id"]) if stage.get("child_type")=="execution" else self.agent_runs.get_run(stage["child_id"]))
@@ -95,7 +102,7 @@ class WorkflowPresetService:
         if mapping[status]=="succeeded" and stage["runner"]=="agent":
             try: artifact=validate_artifact(str(result.get("response") or result.get("text") or "{}"), stage["spec"].get("outputs",{}))
             except StageArtifactError as e: mapping[status]="failed"; result={"error":str(e)}
-        await self.db.transition_stage_run(stage["id"],to_status=mapping[status],expect=("running","cancelling"),result=result,artifact=artifact); return True
+        await self.db.transition_stage_run(stage["id"],to_status=mapping[status],expect=("running","cancelling"),result=result,artifact=artifact); await self._changed(stage["workflow_id"]); return True
 
     async def _terminal(self, workflow: Mapping[str, Any], status: str, result: Mapping[str, Any]) -> None:
         if not await self.db.transition_preset_workflow(workflow["id"],to_status=status,result=result): return
@@ -116,4 +123,7 @@ class WorkflowPresetService:
         await self.db._write("UPDATE workflow_completion_outbox SET state='completed',completed_at=?,updated_at=? WHERE workflow_id=?",(now,now,workflow["id"]))
 
     async def _broadcast(self, workflow: Mapping[str, Any]) -> None:
-        await broadcaster.broadcast(workflow["observer_session_id"], {"type":"workflow_update","workflow":dict(workflow)})
+        # Live events are an invalidation signal only; never put the pinned
+        # plan (which can contain prompts/arguments) on the websocket.
+        safe = {key: workflow.get(key) for key in ("id", "observer_session_id", "preset_hash", "status", "revision", "created_at", "started_at", "finished_at", "updated_at")}
+        await broadcaster.broadcast(workflow["observer_session_id"], {"type":"workflow_update","workflow":safe})

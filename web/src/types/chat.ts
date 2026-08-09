@@ -117,6 +117,8 @@ export interface Session {
   cwd?: string;
   // Real-time running status (set by backend + WS updates)
   is_running?: boolean;
+  // Preset workflows can outlive an individual live agent turn.
+  active_workflow_count?: number;
   // Paused mid-turn waiting for user input (AskUserQuestion / plan mode).
   // Drives the sidebar "waiting" indicator. Set by backend + WS updates.
   awaiting_input?: boolean;

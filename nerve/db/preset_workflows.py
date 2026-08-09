@@ -49,6 +49,11 @@ class PresetWorkflowStore:
         async with self.db.execute(f"SELECT * FROM preset_workflows WHERE status IN ({marks}) ORDER BY created_at", ACTIVE_PRESET_WORKFLOWS) as c:
             return [_row(row) async for row in c]  # type: ignore[misc]
 
+    async def active_preset_workflow_count(self, session_id: str) -> int:
+        marks = ",".join("?" for _ in ACTIVE_PRESET_WORKFLOWS)
+        async with self.db.execute(f"SELECT COUNT(*) FROM preset_workflows WHERE observer_session_id = ? AND status IN ({marks})", (session_id, *ACTIVE_PRESET_WORKFLOWS)) as c:
+            return int((await c.fetchone())[0])
+
     async def transition_preset_workflow(self, workflow_id: str, *, to_status: str, expect: tuple[str, ...] = ACTIVE_PRESET_WORKFLOWS, result: Mapping[str, Any] | None = None) -> bool:
         if to_status not in (*ACTIVE_PRESET_WORKFLOWS, *TERMINAL_PRESET_WORKFLOWS): raise ValueError("unknown workflow status")
         now = utc_now_iso(); marks = ",".join("?" for _ in expect)

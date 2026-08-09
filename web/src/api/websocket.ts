@@ -13,7 +13,7 @@ export type WSMessage =
   | { type: 'error'; session_id: string; error: string }
   | { type: 'session_switched'; session_id: string }
   | { type: 'session_updated'; session_id: string; title: string }
-  | { type: 'session_status'; session_id: string; is_running: boolean; status?: string; buffered_events?: WSMessage[] }
+  | { type: 'session_status'; session_id: string; is_running: boolean; status?: string; active_workflow_count?: number; buffered_events?: WSMessage[] }
   | { type: 'session_forked'; source_id: string; fork_id: string; title: string }
   | { type: 'session_resumed'; session_id: string }
   | { type: 'session_archived'; session_id: string }
@@ -38,6 +38,7 @@ export type WSMessage =
   | { type: 'background_tasks_update'; session_id: string; tasks: { task_id: string; label: string; tool: string; status: 'running' | 'done' | 'failed' | 'timeout' }[] }
   | { type: 'workflow_progress'; session_id: string; tool_use_id: string; workflow: WorkflowSnapshot }
   | { type: 'workflow_run_update'; session_id: string | null; run: WorkflowRun }
+  | { type: 'workflow_update'; session_id: string; workflow: { id: string; status?: string } }
   | { type: 'review_loop_update'; session_id: string | null; loop: ReviewLoop; message?: { role: string; content: string; channel?: string; created_at?: string } }
   // Global (session_id is always null): a task row changed anywhere — the
   // API, another tab, or the agent in an unrelated session. Deliberately
