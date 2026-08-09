@@ -308,6 +308,13 @@ class SshExecutionBackend:
                 for entry in tail.get("entries", []): await emit(str(entry.get("stream", "stdout")), str(entry.get("text", "")))
                 status = await self.supervisor.status(connection, job_id, token, root)
                 if status.get("state") in {"succeeded", "failed", "cancelled", "finished"}:
+                    # The command may write its last bytes after the preceding
+                    # tail RPC and publish terminal state before the next loop.
+                    # Drain once more so short jobs and final diagnostics are
+                    # not lost.
+                    tail = await self.supervisor.tail(connection, job_id, token, cursor, root)
+                    for entry in tail.get("entries", []):
+                        await emit(str(entry.get("stream", "stdout")), str(entry.get("text", "")))
                     return BackendResult(status.get("exit_code"), summary=str(status.get("summary", "remote job finished")), error=status.get("error"))
                 await asyncio.sleep(self.poll_seconds)
         finally:

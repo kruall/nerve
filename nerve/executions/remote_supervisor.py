@@ -160,7 +160,14 @@ def _monitor(payload_path: str) -> None:
             if time.monotonic() >= deadline:
                 raise RuntimeError("monitor initial state was not published")
             time.sleep(.01)
-        proc = subprocess.Popen(argv, cwd=str(cwd), env=dict(environment), stdin=subprocess.DEVNULL, stdout=out, stderr=err)
+        child_environment = dict(environment)
+        # Commands run with an explicit, intentionally small environment.  Keep
+        # the non-secret remote account identity available: tools such as ya
+        # use getpass.getuser(), and some fleet UIDs have no passwd entry.
+        for name in ("USER", "LOGNAME", "HOME", "PATH"):
+            if name not in child_environment and name in os.environ:
+                child_environment[name] = os.environ[name]
+        proc = subprocess.Popen(argv, cwd=str(cwd), env=child_environment, stdin=subprocess.DEVNULL, stdout=out, stderr=err)
         exit_code = proc.wait()
         summary = "succeeded" if exit_code == 0 else "failed"
         release_host_lock()

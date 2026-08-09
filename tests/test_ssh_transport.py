@@ -135,6 +135,25 @@ def test_remote_supervisor_monitor_records_success_and_failure_exit_codes(tmp_pa
         assert status["exit_code"] == expected_exit_code
 
 
+def test_remote_supervisor_preserves_remote_account_identity(tmp_path, monkeypatch):
+    monkeypatch.setenv("USER", "builder")
+    monkeypatch.setenv("LOGNAME", "builder")
+    started = remote_supervisor._start({
+        "root": str(tmp_path), "execution_id": "exec-env", "fencing_token": 7,
+        "argv": [sys.executable, "-c", "import os; print(os.environ['USER'], os.environ['LOGNAME'])"],
+        "cwd": "execution_dir", "environment": {},
+    })
+    request = {"root": str(tmp_path), "job_id": started["job_id"], "fencing_token": 7}
+    for _ in range(1000):
+        status = remote_supervisor._status(request)
+        if status["state"] != "running":
+            break
+        time.sleep(.01)
+    assert status["state"] == "succeeded"
+    tail = remote_supervisor._tail({**request, "cursor": 0})
+    assert tail["entries"] == [{"stream": "stdout", "text": "builder builder\n"}]
+
+
 def test_remote_supervisor_status_preserves_monitor_terminal_state(tmp_path):
     started = remote_supervisor._start({
         "root": str(tmp_path), "execution_id": "exec-race", "fencing_token": 7,
@@ -202,6 +221,46 @@ async def test_ssh_backend_treats_legacy_finished_state_as_terminal(tmp_path):
     )
     assert result.exit_code is None
     assert result.summary == "legacy finished"
+
+
+@pytest.mark.asyncio
+async def test_ssh_backend_drains_logs_after_observing_terminal_state(tmp_path):
+    known = tmp_path / "known_hosts"; known.write_text("worker ssh-ed25519 AAAA\n")
+    catalog = SshConnectionCatalog({"ssh_connections": {"worker": {
+        "host": "127.0.0.1", "user": "root", "known_hosts": str(known), "remote_roots": [str(tmp_path)],
+    }}})
+
+    class Supervisor:
+        tails = 0
+        async def start(self, connection, request): return {"job_id": "job-fast", "process_group": 1, "fencing_token": 7}
+        async def status(self, connection, job_id, fencing_token, root): return {"state": "failed", "exit_code": 3, "summary": "failed"}
+        async def tail(self, connection, job_id, fencing_token, cursor, root):
+            self.tails += 1
+            return {"entries": [] if self.tails == 1 else [{"stream": "stderr", "text": "final error\n"}], "cursor": cursor}
+
+    supervisor = Supervisor()
+    backend = SshExecutionBackend(
+        inventory=type("inventory", (), {"hosts": {"1": {"connection_ref": "worker"}}})(),
+        connections=catalog, supervisor=supervisor,
+    )
+    plan = {
+        "steps": [{"transport": "resource", "resource_slot": "slot", "executable": "/bin/false", "argv": []}],
+        "selected_leases": [{"slot": "slot", "host_id": "1", "fencing_token": 7, "id": "lease-a"}],
+        "arguments": {}, "remote_root": str(tmp_path),
+    }
+    emitted = []
+    async def emit(stream, value):
+        emitted.append((stream, value))
+
+    async def started(_payload):
+        return None
+
+    result = await backend.run(
+        execution_id="exec-fast", plan=plan, workspace=tmp_path, execution_dir=tmp_path,
+        emit=emit, started=started,
+    )
+    assert result.exit_code == 3
+    assert emitted == [("stderr", "final error\n")]
 
 
 @pytest.mark.asyncio
