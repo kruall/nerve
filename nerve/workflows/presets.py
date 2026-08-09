@@ -100,11 +100,13 @@ class WorkflowPreset:
     preset_hash: str = ""
 
     def summary(self) -> dict:
-        return {"name": self.name, "version": self.version, "preset_hash": self.preset_hash,
-                "title": self.title, "description": self.description, "stages": len(self.stages)}
+        """Safe discovery fields only; details remain behind ``describe``."""
+        return {"name": self.name, "title": self.title,
+                "description": self.description, "stages": len(self.stages)}
 
     def describe(self) -> dict:
-        return {**self.summary(), "inputs": dict(self.inputs), "budget_usd": self.budget_usd,
+        return {**self.summary(), "version": self.version, "preset_hash": self.preset_hash,
+                "inputs": dict(self.inputs), "budget_usd": self.budget_usd,
                 "timeout_seconds": self.timeout_seconds, "terminal_policy": self.terminal_policy,
                 "stages": [{"id": s.id, "depends_on": list(s.depends_on), "runner": s.runner,
                             "inputs": dict(s.input_schema), "outputs": dict(s.output_schema),
@@ -116,7 +118,9 @@ class WorkflowCatalogSnapshot:
     generation: int
     presets: Mapping[str, WorkflowPreset]
     catalog_hash: str
-    def summaries(self): return [p.summary() for p in self.presets.values()]
+    def summaries(self):
+        """Stable, safe level-one discovery summaries."""
+        return [self.presets[name].summary() for name in sorted(self.presets)]
 
 
 @dataclass(frozen=True)

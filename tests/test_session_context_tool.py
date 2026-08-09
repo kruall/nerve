@@ -9,6 +9,7 @@ covered by ``test_memu_bridge.py``.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -17,7 +18,7 @@ from nerve.agent.tools.handlers.memory import session_context_handler
 from nerve.agent.tools.registry import ToolContext
 
 
-def _ctx(*, memory_bridge=None, skill_manager=None, db=None, workspace=None):
+def _ctx(*, memory_bridge=None, skill_manager=None, db=None, workspace=None, engine=None):
     return ToolContext(
         session_id="test-session-123",
         workspace=workspace or Path("/tmp/ws"),
@@ -25,6 +26,7 @@ def _ctx(*, memory_bridge=None, skill_manager=None, db=None, workspace=None):
         memory_bridge=memory_bridge,
         skill_manager=skill_manager,
         config=None,
+        engine=engine,
     )
 
 
@@ -98,3 +100,31 @@ async def test_include_skills_false_omits_skills() -> None:
     })
     text = result.content[0]["text"]
     assert "Active Skills" not in text
+
+
+@pytest.mark.asyncio
+async def test_includes_safe_workflow_preset_context_when_capable() -> None:
+    catalog = MagicMock()
+    catalog.snapshot.summaries.return_value = [
+        {"name": "discover", "title": "Discovery", "description": "Research safely", "stages": 2},
+    ]
+    registry = MagicMock()
+    registry.list.return_value = [
+        SimpleNamespace(name=name) for name in (
+            "workflow_preset_list", "workflow_preset_describe", "workflow_preset_validate",
+        )
+    ]
+    engine = SimpleNamespace(workflow_preset_catalog=catalog, workflow_preset_service=None, registry=registry)
+    result = await session_context_handler(_ctx(engine=engine), {"topic": "anything"})
+    text = result.content[0]["text"]
+    assert "Available Workflow Presets" in text
+    assert "**discover**" in text
+    assert "Validate its inputs" in text
+    assert "Starting a preset" not in text
+
+
+@pytest.mark.asyncio
+async def test_missing_workflow_catalog_is_silently_omitted() -> None:
+    engine = SimpleNamespace(workflow_preset_catalog=None, registry=MagicMock())
+    result = await session_context_handler(_ctx(engine=engine), {"topic": "anything"})
+    assert "Available Workflow Presets" not in result.content[0]["text"]

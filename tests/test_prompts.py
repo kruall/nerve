@@ -5,6 +5,7 @@ from pathlib import Path
 
 from nerve.agent import prompts
 from nerve.agent.prompts import (
+    format_workflow_preset_section,
     _format_skills_list,
     _format_tool_list,
     build_system_prompt,
@@ -49,3 +50,46 @@ def test_build_system_prompt_smoke(tmp_path: Path):
     prompt = build_system_prompt(workspace=tmp_path, session_id="t1", source="web")
     assert "# Session Context" in prompt
     assert "mcp__nerve__" in prompt, "prompt must advertise tools with mcp__nerve__ prefix"
+
+
+def test_workflow_preset_section_is_safe_sorted_and_optional() -> None:
+    summaries = [
+        {"name": "zeta", "title": "Zeta", "description": "z" * 300,
+         "stages": 2, "preset_hash": "must not leak", "inputs": {"secret": True}},
+        {"name": "alpha", "title": "Alpha", "description": "safe", "stages": 1,
+         "stages_prompt": "must not leak"},
+    ]
+    tools = {"workflow_preset_list", "workflow_preset_describe", "workflow_preset_validate"}
+    one = format_workflow_preset_section(summaries, tools)
+    two = format_workflow_preset_section(list(reversed(summaries)), tools)
+    assert one == two
+    assert one is not None
+    assert one.index("**alpha**") < one.index("**zeta**")
+    assert "optional execution strategies" in one
+    assert "substantial, separable autonomous work" in one
+    assert "small, interactive, tightly coupled, or unsupported" in one
+    assert "workflow_preset_describe" in one
+    assert "Validate its inputs" in one
+    assert "Starting a preset" not in one
+    assert "must not leak" not in one
+    assert len(next(line for line in one.splitlines() if "**zeta**" in line)) < 300
+
+
+def test_workflow_preset_section_requires_discovery_capability() -> None:
+    summary = [{"name": "demo", "title": "Demo", "description": "", "stages": 1}]
+    assert format_workflow_preset_section(summary, {"workflow_preset_list"}) is None
+    assert format_workflow_preset_section(summary, set()) is None
+
+
+def test_build_prompt_includes_workflow_section_only_for_capable_agent(tmp_path: Path) -> None:
+    summary = [{"name": "demo", "title": "Demo", "description": "", "stages": 1}]
+    capable = build_system_prompt(
+        workspace=tmp_path, workflow_preset_summaries=summary,
+        workflow_tools={"workflow_preset_list", "workflow_preset_describe"},
+    )
+    excluded = build_system_prompt(
+        workspace=tmp_path, workflow_preset_summaries=summary,
+        workflow_tools={"workflow_preset_list"},
+    )
+    assert "Available Workflow Presets" in capable
+    assert "Available Workflow Presets" not in excluded

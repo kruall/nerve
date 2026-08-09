@@ -20,6 +20,10 @@ _skill_manager: Any = None
 # importing ``prompts`` doesn't force handlers' optional imports to run.
 _PROMPT_TOOL_REGISTRY = None
 
+_WORKFLOW_DISCOVERY_TOOLS = frozenset({"workflow_preset_list", "workflow_preset_describe"})
+_WORKFLOW_OPTIONAL_TOOLS = frozenset({"workflow_preset_validate", "workflow_preset_start"})
+_WORKFLOW_DESCRIPTION_LIMIT = 200
+
 
 def _get_prompt_tool_registry():
     global _PROMPT_TOOL_REGISTRY
@@ -103,6 +107,59 @@ def _format_skills_list(skill_summaries: list[dict] | None = None) -> str | None
     return "\n".join(lines)
 
 
+def workflow_preset_tool_capabilities(
+    available_tools: "set[str] | None", excluded_tools: "set[str] | None" = None,
+) -> set[str]:
+    """Return workflow-preset operations actually reachable by this agent."""
+    if available_tools is None:
+        return set()
+    return (set(available_tools) - (excluded_tools or set())) & (
+        _WORKFLOW_DISCOVERY_TOOLS | _WORKFLOW_OPTIONAL_TOOLS
+    )
+
+
+def format_workflow_preset_section(
+    preset_summaries: list[dict] | None, workflow_tools: "set[str] | None",
+) -> str | None:
+    """Render deterministic, safe preset discovery context.
+
+    Inputs are resolved by the caller; this helper deliberately has no access
+    to mutable engine configuration or catalog state.
+    """
+    tools = set(workflow_tools or ())
+    if not preset_summaries or not _WORKFLOW_DISCOVERY_TOOLS <= tools:
+        return None
+
+    normalized: list[tuple[str, str, str, int]] = []
+    for raw in preset_summaries:
+        try:
+            name = str(raw["name"])
+            title = str(raw["title"])
+            description = str(raw.get("description") or "")
+            stages = int(raw["stages"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not name or stages < 0:
+            continue
+        description = description[:_WORKFLOW_DESCRIPTION_LIMIT].rstrip()
+        normalized.append((name, title, description, stages))
+    if not normalized:
+        return None
+
+    lines = ["# Available Workflow Presets", "",
+             "Reviewed presets are optional execution strategies; choose one only when it fits the work.", ""]
+    for name, title, description, stages in sorted(normalized, key=lambda item: item[0]):
+        suffix = f" — {description}" if description else ""
+        lines.append(f"- **{name}** — {title} ({stages} stages){suffix}")
+    lines.extend(["", "Consider a preset before substantial, separable autonomous work. Use direct tools for small, interactive, tightly coupled, or unsupported work.", "Inspect a candidate with `mcp__nerve__workflow_preset_describe` before choosing."])
+    if "workflow_preset_validate" in tools:
+        lines.append("Validate its inputs when uncertainty matters.")
+    if "workflow_preset_start" in tools:
+        lines.append("Starting a preset remains your choice; it does not replace observer follow-up.")
+    lines.append("The observer remains responsible for review, integration, and task lifecycle not supplied by the preset.")
+    return "\n".join(lines)
+
+
 def build_system_prompt(
     workspace: Path,
     session_id: str = "",
@@ -111,6 +168,8 @@ def build_system_prompt(
     timezone_name: str = "America/New_York",
     skill_summaries: list[dict] | None = None,
     excluded_tools: "set[str] | None" = None,
+    workflow_preset_summaries: list[dict] | None = None,
+    workflow_tools: "set[str] | None" = None,
 ) -> str:
     """Build the full system prompt for the agent.
 
@@ -161,6 +220,10 @@ You have access to the following custom tools:
     skills_section = _format_skills_list(skill_summaries)
     if skills_section:
         parts.append(skills_section)
+
+    workflow_section = format_workflow_preset_section(workflow_preset_summaries, workflow_tools)
+    if workflow_section:
+        parts.append(workflow_section)
 
     # Recalled memories from memU
     if recalled_memories:

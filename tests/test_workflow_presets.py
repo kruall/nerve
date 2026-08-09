@@ -72,3 +72,17 @@ def test_agent_stage_accepts_pinned_prompt(tmp_path):
     c = WorkflowPresetCatalog(tmp_path, _execution(tmp_path))
     _write(tmp_path, value)
     assert c.reload().presets["verify.change"].stages[0].spec["prompt"] == "Follow this reviewed procedure."
+
+
+def test_summaries_are_safe_and_sorted_while_describe_keeps_details(tmp_path):
+    c = WorkflowPresetCatalog(tmp_path, _execution(tmp_path))
+    first = _preset(name="zeta", title="Zeta")
+    _write(tmp_path, first)
+    second = _preset(name="alpha", title="Alpha")
+    (tmp_path / "config/workflows/presets/second.yaml").write_text(yaml.safe_dump(second, sort_keys=False))
+    snapshot = c.reload()
+    summaries = snapshot.summaries()
+    assert [item["name"] for item in summaries] == ["alpha", "zeta"]
+    assert set(summaries[0]) == {"name", "title", "description", "stages"}
+    described = c.describe("alpha")
+    assert "inputs" in described and "preset_hash" in described

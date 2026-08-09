@@ -47,6 +47,7 @@ dynamic context that Nerve-owned sessions receive automatically:
 
 - Recalled memories from memU, biased by the topic you pass
 - A summary of currently active skills
+- Available workflow-preset strategies when that MCP capability is served
 - Session metadata (id, source, current time)
 
 Skip this and you'll be working blind: the static bundle below is the

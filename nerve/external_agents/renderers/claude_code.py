@@ -34,6 +34,7 @@ Before answering anything in a fresh session, call the Nerve MCP tool
 
 - Recalled memories from memU, ranked against the topic
 - Currently active skills
+- Available workflow-preset strategies when that MCP capability is served
 - Session metadata (id, source, current time)
 
 Nerve-owned sessions receive this automatically as part of their

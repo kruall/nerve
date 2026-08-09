@@ -48,6 +48,7 @@ from nerve.agent.interactive import (
 )
 from nerve.agent.prompts import (
     build_system_prompt,
+    workflow_preset_tool_capabilities,
     current_time_str,
     set_skill_manager,
 )
@@ -514,6 +515,14 @@ class AgentEngine:
             )
         except Exception as e:
             logger.warning("Failed to get skill summaries: %s", e)
+            return None
+
+    def _collect_workflow_preset_summaries(self) -> list[dict] | None:
+        """Safe, stable level-one summaries from the active catalog snapshot."""
+        try:
+            return self.workflow_preset_catalog.snapshot.summaries() or None
+        except Exception as e:
+            logger.warning("Failed to get workflow preset summaries: %s", e)
             return None
 
     async def initialize(self) -> None:
@@ -1353,6 +1362,12 @@ class AgentEngine:
                     recalled_memories=recalled_memories or None,
                     skill_summaries=self._collect_skill_summaries(),
                     excluded_tools=backend.excluded_tools(),
+                    workflow_preset_summaries=self._collect_workflow_preset_summaries(),
+                    workflow_tools=(
+                        workflow_preset_tool_capabilities(
+                            {spec.name for spec in self.registry.list()}, backend.excluded_tools(),
+                        ) - ({"workflow_preset_start"} if self.workflow_preset_service is None else set())
+                    ),
                 )
 
             # Observer sessions of a review loop get a context block so the
