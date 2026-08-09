@@ -242,7 +242,7 @@ class WorkflowRunService:
                 raise WorkflowRunError(
                     f"spec.sandbox must be one of {_SANDBOX_MODES}, got {sandbox!r}"
                 )
-            if engine_kind != ENGINE_CODEX:
+            if engine_kind not in {ENGINE_CODEX, ENGINE_CODEX_STAGE}:
                 # Claude sessions have no sandbox knob — drop silently would
                 # hide a config mistake; fail loud instead.
                 raise WorkflowRunError(
@@ -322,6 +322,7 @@ class WorkflowRunService:
                 "model": stage.model,
                 "effort": stage.reasoning_effort,
                 "sandbox": stage.sandbox,
+                "cwd": stage.cwd,
                 "stage_context": stage.context.journal(),
             },
             stage.budget_usd,

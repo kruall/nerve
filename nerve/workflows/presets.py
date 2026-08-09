@@ -153,7 +153,7 @@ class WorkflowPresetCatalog:
         spec_key = runner
         if set(data) & {"agent", "execution"} != {spec_key}: raise WorkflowPresetError(f"stages[{index}] must declare only its {runner} specification")
         spec = _obj(data.get(spec_key, {}), f"stages[{index}].{spec_key}")
-        allowed = ({"model", "reasoning_effort", "sandbox", "skills", "mcp"} if runner == "agent" else {"kind", "arguments", "resources"})
+        allowed = ({"model", "reasoning_effort", "sandbox", "skills", "mcp", "prompt"} if runner == "agent" else {"kind", "arguments", "resources"})
         _fields(spec, f"stages[{index}].{spec_key}", allowed, {"model", "sandbox", "mcp"} if runner == "agent" else {"kind"})
         if runner == "agent":
             if not isinstance(spec["model"], str) or not spec["model"]: raise WorkflowPresetError(f"stages[{index}].agent.model must be a non-empty string")
@@ -166,6 +166,9 @@ class WorkflowPresetCatalog:
             effort = spec.get("reasoning_effort", "")
             if effort and (not isinstance(effort, str) or not effort.strip()):
                 raise WorkflowPresetError(f"stages[{index}].agent.reasoning_effort must be a string")
+            prompt = spec.get("prompt", "")
+            if prompt and (not isinstance(prompt, str) or not prompt.strip()):
+                raise WorkflowPresetError(f"stages[{index}].agent.prompt must be a non-empty string")
             mcp = _obj(spec["mcp"], f"stages[{index}].agent.mcp")
             _fields(mcp, f"stages[{index}].agent.mcp", {"allow"}, {"allow"})
             if not isinstance(mcp["allow"], list) or not all(isinstance(x, str) and "." in x for x in mcp["allow"]):

@@ -141,6 +141,7 @@ class AgentStageSpec:
     model: str
     reasoning_effort: str
     sandbox: str
+    cwd: str
     budget_usd: float
     context: StageContext
 
@@ -158,7 +159,7 @@ class AgentStageResolver:
     async def resolve(self, *, stage: WorkflowStage, workflow: Mapping[str, Any],
                       task_contract: Mapping[str, Any], prompt: str,
                       artifacts: Mapping[str, Any], budget_usd: float,
-                      repository_instructions: str = "") -> AgentStageSpec:
+                      repository_instructions: str = "", cwd: str = "") -> AgentStageSpec:
         if stage.runner != "agent":
             raise AgentStageResolutionError("stage is not an agent stage")
         raw = stage.spec
@@ -220,4 +221,4 @@ class AgentStageResolver:
             context_without_hash.capabilities, context_without_hash.output_schema, digest,
         )
         return AgentStageSpec(stage.id, model, str(raw.get("reasoning_effort") or ""), sandbox,
-                              float(budget_usd), context)
+                              str(cwd or ""), float(budget_usd), context)

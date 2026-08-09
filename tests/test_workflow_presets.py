@@ -35,3 +35,10 @@ def test_hash_is_canonical_across_yaml_key_order(tmp_path):
     c=WorkflowPresetCatalog(tmp_path,_execution(tmp_path)); path=_write(tmp_path,_preset()); one=c.reload().presets["verify.change"].preset_hash
     path.write_text(yaml.safe_dump(_preset(),sort_keys=True)); two=c.reload().presets["verify.change"].preset_hash
     assert one == two
+
+def test_agent_stage_accepts_pinned_prompt(tmp_path):
+    value = _preset()
+    value["stages"][0]["agent"]["prompt"] = "Follow this reviewed procedure."
+    c = WorkflowPresetCatalog(tmp_path, _execution(tmp_path))
+    _write(tmp_path, value)
+    assert c.reload().presets["verify.change"].stages[0].spec["prompt"] == "Follow this reviewed procedure."
