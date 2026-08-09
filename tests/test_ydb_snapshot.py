@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import nerve.executions.ydb as ydb
 from nerve.executions.remote_supervisor import _sync
 from nerve.executions.ydb import YdbWorktreeError, snapshot, validate_worktree
 
@@ -50,6 +51,30 @@ def test_snapshot_pack_is_delta_only_not_repository_history(tmp_path):
     _git(cache, "index-pack", "--stdin", "--fix-thin", input=pack)
     commits = _git(cache, "rev-list", result["snapshot_id"], "--not", result["head"]).stdout.splitlines()
     assert commits == [result["snapshot_id"].encode()]
+
+
+def test_clean_snapshot_skips_full_temporary_index_refresh(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    calls = []
+    real_git = ydb._git
+
+    def recording_git(worktree, *argv, **kwargs):
+        calls.append(argv)
+        return real_git(worktree, *argv, **kwargs)
+
+    monkeypatch.setattr(ydb, "_git", recording_git)
+    result = snapshot(repo)
+    assert result["pack"]
+    assert ("add", "-A") not in calls
+
+
+def test_snapshot_uses_common_object_store_for_linked_worktree(tmp_path):
+    repo = _repo(tmp_path)
+    linked = tmp_path / "linked"
+    _git(repo, "worktree", "add", "-b", "linked-test", str(linked))
+    result = snapshot(linked)
+    assert result["head"] == _git(linked, "rev-parse", "HEAD").stdout.decode().strip()
+    assert result["pack"]
 
 
 def test_remote_materializes_snapshot_from_preseeded_cache_and_preserves_ignored(tmp_path):

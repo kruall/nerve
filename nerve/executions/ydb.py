@@ -47,8 +47,11 @@ def snapshot(worktree: Path) -> dict[str, str | bytes]:
     object directory.  The real index, refs and worktree are read only.
     """
     head = _git(worktree, "rev-parse", "HEAD").decode().strip()
-    git_dir = _git(worktree, "rev-parse", "--git-dir").decode().strip()
-    object_dir = (worktree / git_dir / "objects").resolve()
+    common_dir = _git(worktree, "rev-parse", "--git-common-dir").decode().strip()
+    object_dir = (worktree / common_dir / "objects").resolve()
+    clean = not _git(
+        worktree, "status", "--porcelain=v1", "-z", "--untracked-files=normal"
+    )
     with tempfile.TemporaryDirectory(prefix="nerve-ydb-") as temporary:
         temp = Path(temporary)
         temp_objects = temp / "objects"; temp_objects.mkdir()
@@ -63,11 +66,16 @@ def snapshot(worktree: Path) -> dict[str, str | bytes]:
             "GIT_AUTHOR_DATE": "1970-01-01T00:00:00Z",
             "GIT_COMMITTER_DATE": "1970-01-01T00:00:00Z",
         }
-        _git(worktree, "read-tree", head, env=env)
-        # -A includes tracked modifications/deletions and untracked files while
-        # respecting .gitignore, but writes only the temporary index above.
-        _git(worktree, "add", "-A", env=env)
-        tree = _git(worktree, "write-tree", env=env).decode().strip()
+        if clean:
+            # Avoid a full temporary-index refresh over the very large YDB
+            # checkout when HEAD already describes the requested snapshot.
+            tree = _git(worktree, "rev-parse", "HEAD^{tree}").decode().strip()
+        else:
+            _git(worktree, "read-tree", head, env=env)
+            # -A includes tracked modifications/deletions and untracked files
+            # while respecting .gitignore, but writes only the temporary index.
+            _git(worktree, "add", "-A", env=env)
+            tree = _git(worktree, "write-tree", env=env).decode().strip()
         commit = _git(worktree, "commit-tree", tree, "-p", head,
                       input=b"Nerve YDB snapshot\n", env=env).decode().strip()
         pack = _git(worktree, "pack-objects", "--thin", "--stdout", "--revs",
