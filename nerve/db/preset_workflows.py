@@ -36,6 +36,14 @@ class PresetWorkflowStore:
         async with self.db.execute("SELECT * FROM preset_workflows WHERE id = ?", (workflow_id,)) as c:
             return _row(await c.fetchone())
 
+    async def list_preset_workflows(self, *, limit: int = 100) -> list[dict]:
+        async with self.db.execute("SELECT * FROM preset_workflows ORDER BY created_at DESC LIMIT ?", (limit,)) as c:
+            return [_row(row) async for row in c]  # type: ignore[misc]
+
+    async def count_preset_workflows(self) -> int:
+        async with self.db.execute("SELECT COUNT(*) FROM preset_workflows") as c:
+            return int((await c.fetchone())[0])
+
     async def active_preset_workflows(self) -> list[dict]:
         marks = ",".join("?" for _ in ACTIVE_PRESET_WORKFLOWS)
         async with self.db.execute(f"SELECT * FROM preset_workflows WHERE status IN ({marks}) ORDER BY created_at", ACTIVE_PRESET_WORKFLOWS) as c:

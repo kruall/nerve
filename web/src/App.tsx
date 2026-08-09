@@ -26,6 +26,7 @@ import { SkillDetailPage } from './pages/SkillDetailPage';
 import { McpServersPage } from './pages/McpServersPage';
 import { UltracodePage } from './pages/UltracodePage';
 import { WorkflowRunsPage } from './pages/WorkflowRunsPage';
+import { PresetWorkflowsPage } from './pages/PresetWorkflowsPage';
 import { McpServerDetailPage } from './pages/McpServerDetailPage';
 import { NotificationsPage } from './pages/NotificationsPage';
 import { NotificationToast } from './components/Notifications/NotificationToast';
@@ -78,6 +79,7 @@ function App() {
           <Route path="/skills/:skillId" element={<SkillDetailPage />} />
           <Route path="/ultracode" element={<UltracodePage />} />
           <Route path="/workflow-runs" element={<WorkflowRunsPage />} />
+          <Route path="/workflows" element={<PresetWorkflowsPage />} />
           <Route path="/mcp" element={<McpServersPage />} />
           <Route path="/mcp/:serverName" element={<McpServerDetailPage />} />
           <Route path="/notifications" element={<NotificationsPage />} />

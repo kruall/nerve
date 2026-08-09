@@ -21,6 +21,7 @@ export const NAV_ITEMS: NavItem[] = [
   { path: '/mcp', icon: Plug, label: 'MCP' },
   { path: '/ultracode', icon: Workflow, label: 'Ultra', feature: 'ultracode' },
   { path: '/workflow-runs', icon: Rocket, label: 'Runs' },
+  { path: '/workflows', icon: Workflow, label: 'Flows' },
   { path: '/sources', icon: Inbox, label: 'Sources' },
   { path: '/cron', icon: Clock, label: 'Cron' },
   { path: '/memory', icon: Brain, label: 'Memory' },

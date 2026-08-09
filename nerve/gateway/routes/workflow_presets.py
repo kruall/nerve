@@ -26,3 +26,38 @@ async def start_workflow_preset(name: str, body: Any=Body(default={}), user: dic
     plan=_compile(name,body); service=getattr(get_deps().engine,"workflow_preset_service",None)
     if service is None: raise HTTPException(503,"workflow preset controller is not installed")
     return {"plan":plan.as_dict(),"workflow":await service.start(session_id="system",plan=plan)}
+
+def _service():
+    service = getattr(get_deps().engine, "workflow_preset_service", None)
+    if service is None: raise HTTPException(503, "workflow preset controller is not installed")
+    return service
+
+async def _public(row: dict) -> dict:
+    """Deliberately omit input prompts, raw stage specs and artifacts from list views."""
+    service = _service(); stages = await service.db.list_stage_runs(row["id"])
+    plan = row.get("plan") or {}; preset = plan.get("preset") or {}
+    return {"id": row["id"], "owner_session_id": row["observer_session_id"],
+      "preset": {k: preset.get(k) for k in ("name", "version", "preset_hash", "title", "description", "budget_usd")},
+      "preset_hash": row.get("preset_hash"), "status": row["status"], "result": row.get("result"),
+      "created_at": row["created_at"], "started_at": row.get("started_at"), "finished_at": row.get("finished_at"), "updated_at": row["updated_at"],
+      "stages": [{"id": s["id"], "stage_id": s["stage_id"], "runner": s["runner"], "status": s["status"], "child_type": s.get("child_type"), "child_id": s.get("child_id"), "created_at": s["created_at"], "started_at": s.get("started_at"), "finished_at": s.get("finished_at"),
+        "summary": (s.get("result") or {}).get("summary") or (s.get("result") or {}).get("outcome")} for s in stages]}
+
+@router.get("/api/preset-workflows")
+async def list_preset_workflows(user: dict = Depends(require_auth)):
+    service = _service(); rows = await service.db.list_preset_workflows()
+    return {"workflows": [await _public(row) for row in rows], "total": await service.db.count_preset_workflows()}
+
+@router.get("/api/preset-workflows/{workflow_id}")
+async def get_preset_workflow(workflow_id: str, user: dict = Depends(require_auth)):
+    row = await _service().db.get_preset_workflow(workflow_id)
+    if row is None: raise HTTPException(404, "workflow not found")
+    return await _public(row)
+
+@router.post("/api/preset-workflows/{workflow_id}/cancel")
+async def cancel_preset_workflow(workflow_id: str, user: dict = Depends(require_auth)):
+    service = _service(); row = await service.db.get_preset_workflow(workflow_id)
+    if row is None: raise HTTPException(404, "workflow not found")
+    await service.cancel_session(row["observer_session_id"], reason="Cancelled from web UI")
+    row = await service.db.get_preset_workflow(workflow_id)
+    return await _public(row)

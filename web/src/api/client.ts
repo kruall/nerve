@@ -233,6 +233,11 @@ export interface WorkflowRunJournal {
   result: string;
 }
 
+export interface WorkflowPresetSummary { name: string; version: string; preset_hash: string; title: string; description: string; stages: number }
+export interface WorkflowPreset extends Omit<WorkflowPresetSummary, 'stages'> { inputs: Record<string, { type?: string; title?: string; description?: string; default?: unknown }>; budget_usd: number; timeout_seconds: number; terminal_policy: string; stages: Array<{ id: string; depends_on: string[]; runner: 'agent' | 'execution'; timeout_seconds: number; spec: Record<string, unknown> }> }
+export interface PresetWorkflowStage { id: string; stage_id: string; runner: 'agent' | 'execution'; status: string; child_type?: string | null; child_id?: string | null; created_at: string; started_at?: string | null; finished_at?: string | null; summary?: string | null }
+export interface PresetWorkflow { id: string; owner_session_id: string; preset: Pick<WorkflowPreset, 'name' | 'version' | 'preset_hash' | 'title' | 'description' | 'budget_usd'>; preset_hash: string; status: string; result?: Record<string, unknown> | null; created_at: string; started_at?: string | null; finished_at?: string | null; updated_at: string; stages: PresetWorkflowStage[] }
+
 let authToken: string | null = localStorage.getItem('nerve_token');
 
 export function setToken(token: string) {
@@ -778,6 +783,13 @@ export const api = {
     }),
   getWorkflowRunJournal: (id: string) =>
     request<WorkflowRunJournal>(`/workflow-runs/${encodeURIComponent(id)}/journal`),
+
+  listWorkflowPresets: () => request<{ generation: number; presets: WorkflowPresetSummary[] }>('/workflow-presets'),
+  getWorkflowPreset: (name: string) => request<WorkflowPreset>(`/workflow-presets/${encodeURIComponent(name)}`),
+  validateWorkflowPreset: (name: string, inputs: Record<string, unknown>) => request<{ valid: boolean }> (`/workflow-presets/${encodeURIComponent(name)}/validate`, { method: 'POST', body: JSON.stringify({ inputs }) }),
+  startWorkflowPreset: (name: string, inputs: Record<string, unknown>) => request<{ workflow: PresetWorkflow }>(`/workflow-presets/${encodeURIComponent(name)}/start`, { method: 'POST', body: JSON.stringify({ inputs }) }),
+  listPresetWorkflows: () => request<{ workflows: PresetWorkflow[]; total: number }>('/preset-workflows'),
+  cancelPresetWorkflow: (id: string) => request<PresetWorkflow>(`/preset-workflows/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
 
   // Files
   uploadFiles: async (files: File[], sessionId: string): Promise<{ files: Array<{ id: string; filename: string; media_type: string; file_type: string; size: number }> }> => {
