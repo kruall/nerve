@@ -146,6 +146,11 @@ class ExecutionService:
         release = getattr(self.resource_manager, "release_session_reservation", None)
         if not callable(release):
             raise ValueError("YDB host release is unavailable")
+        active = await self.db.list_session_executions(
+            session_id, include_terminal=False, limit=1,
+        )
+        if active:
+            raise ValueError("YDB host cannot be released while an execution is active")
         return await release(session_id=session_id, remote_quiescence_confirmed=True,
                              reason="owner explicitly released YDB session host")
 

@@ -125,6 +125,29 @@ def test_session_reservation_lease_is_bound_to_compiled_resource_slot():
 
 
 @pytest.mark.asyncio
+async def test_ydb_host_release_refuses_active_execution(db, owner, tmp_path):
+    await db.create_execution(
+        "exec-active",
+        session_id=owner,
+        kind="ydb_make",
+        profile_version="1",
+        profile_hash="hash",
+        profile_snapshot={},
+        plan={},
+        resource_requests=[],
+    )
+    manager = SimpleNamespace(release_session_reservation=AsyncMock(return_value=True))
+    service = ExecutionService(
+        db=db, engine=_engine(), workspace=tmp_path, catalog=SimpleNamespace(),
+        resource_manager=manager,
+    )
+
+    with pytest.raises(ValueError, match="execution is active"):
+        await service.release_ydb_host(session_id=owner)
+    manager.release_session_reservation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_start_completes_and_resumes_same_session_once(db, owner, tmp_path, broadcast_stub):
     backend = ControlledBackend()
     engine = _engine()

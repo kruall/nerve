@@ -151,11 +151,7 @@ class LeaseService:
         if reservation is None or reservation["state"] != "active":
             return False
         lock = self._session_locks.setdefault(session_id, asyncio.Lock())
-        uncertain = (
-            lock.locked()
-            or self._is_recovered_session_reservation(reservation)
-            or not remote_quiescence_confirmed
-        )
+        uncertain = lock.locked() or not remote_quiescence_confirmed
         lease = await self.db.get_resource_lease(reservation["lease_id"])
         if lease is not None:
             if uncertain:
@@ -168,8 +164,13 @@ class LeaseService:
 
     async def cleanup_session_reservation(self, session_id: str) -> bool:
         """Lifecycle hook: when quiescence is known, release; otherwise quarantine."""
+        reservation = await self.db.get_session_resource_reservation(session_id)
+        confirmed = (
+            reservation is not None
+            and not self._is_recovered_session_reservation(reservation)
+        )
         return await self.release_session_reservation(
-            session_id=session_id, remote_quiescence_confirmed=True,
+            session_id=session_id, remote_quiescence_confirmed=confirmed,
             reason="session lifecycle ended before remote quiescence was confirmed",
         )
 

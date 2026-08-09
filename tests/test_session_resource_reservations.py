@@ -100,6 +100,28 @@ async def test_session_resource_reservation_cleanup_after_recovery_quarantines(d
 
 
 @pytest.mark.asyncio
+async def test_explicit_confirmed_release_after_recovery_does_not_quarantine(db, tmp_path):
+    first = await _service(db)
+    await db.create_session("session-a")
+    await first.reserve_for_session(
+        session_id="session-a", pool="builders", worktree=tmp_path,
+    )
+    recovered = await _service(db)
+    await asyncio.sleep(0)
+
+    assert await recovered.release_session_reservation(
+        session_id="session-a",
+        remote_quiescence_confirmed=True,
+        reason="owner explicitly released idle host",
+    )
+    assert (await db.get_resource_host("builder-1"))["quarantined"] == 0
+    reservation = await db.get_session_resource_reservation("session-a")
+    assert reservation is not None and reservation["state"] == "released"
+    lease = await db.get_resource_lease(reservation["lease_id"])
+    assert lease is not None and lease["state"] == "released"
+
+
+@pytest.mark.asyncio
 async def test_session_reservation_can_reacquire_after_explicit_release(db, tmp_path):
     service = await _service(db)
     await db.create_session("session-a")
