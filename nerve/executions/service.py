@@ -39,6 +39,20 @@ def _duration_ms(row: Mapping[str, Any]) -> int | None:
     end = row.get("finished_at")
     if not start or not end:
         return None
+
+
+def _bind_session_reservation_slot(
+    plan: Mapping[str, Any], reservation: Mapping[str, Any], lease: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Attach the one compiled resource slot represented by a pinned lease."""
+    pool = str(reservation.get("pool") or "")
+    slots = [
+        str(slot) for slot, selected_pool in dict(plan.get("resources", {})).items()
+        if str(selected_pool) == pool
+    ]
+    if len(slots) != 1:
+        raise ValueError("session reservation must map to exactly one resource slot")
+    return {**lease, "slot": slots[0]}
     try:
         return max(0, int((datetime.fromisoformat(str(end)) - datetime.fromisoformat(str(start))).total_seconds() * 1000))
     except (TypeError, ValueError):
@@ -322,7 +336,10 @@ class ExecutionService:
             reservation = row["plan"].get("session_reservation")
             if reservation:
                 async with self.resource_manager.use_session_reservation(session_id=row["session_id"], pool=str(reservation["pool"]), worktree=str(reservation["worktree"])) as held:
-                    await self._run_with_leases(execution_id, row, [held["lease"]], held)
+                    lease = _bind_session_reservation_slot(
+                        row["plan"], reservation, held["lease"],
+                    )
+                    await self._run_with_leases(execution_id, row, [lease], held)
                 return
             leases = await self.resource_manager.acquire(execution_id=execution_id, session_id=row["session_id"], requests=row.get("resource_requests") or [])
             await self._run_with_leases(execution_id, row, leases, None)

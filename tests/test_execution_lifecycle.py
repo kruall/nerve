@@ -11,7 +11,7 @@ import pytest_asyncio
 
 from nerve.executions.backend import BackendRecovery, BackendResult, LocalExecutionBackend
 from nerve.executions.public import public_execution
-from nerve.executions.service import ExecutionService
+from nerve.executions.service import ExecutionService, _bind_session_reservation_slot
 
 
 class StubProfile:
@@ -106,6 +106,22 @@ def broadcast_stub(monkeypatch):
 
 def _engine():
     return SimpleNamespace(run=AsyncMock(return_value="continued"), is_session_running=lambda _sid: False)
+
+
+def test_session_reservation_lease_is_bound_to_compiled_resource_slot():
+    lease = _bind_session_reservation_slot(
+        {"resources": {"session": "ydb-builders"}},
+        {"pool": "ydb-builders"},
+        {"id": "lease-1", "fencing_token": 7},
+    )
+    assert lease == {"id": "lease-1", "fencing_token": 7, "slot": "session"}
+
+    with pytest.raises(ValueError, match="exactly one"):
+        _bind_session_reservation_slot(
+            {"resources": {"first": "ydb-builders", "second": "ydb-builders"}},
+            {"pool": "ydb-builders"},
+            {"id": "lease-1"},
+        )
 
 
 @pytest.mark.asyncio
