@@ -1,8 +1,11 @@
-"""Small remote half of the SSH execution protocol.
+#!/usr/bin/env python3
+"""Standalone, stdlib-only remote half of the SSH execution protocol.
 
-Install the same Nerve package on a worker and expose it only through the
-fixed ``nerve remote-supervisor rpc`` SSH forced command.  State is durable
-under the caller-approved root; every operation checks its fencing token.
+This file is deliberately installable as ``nerve-remote-supervisor`` on a
+worker; it does not import Nerve or require a Nerve installation there.  Its
+only interface is one framed request on stdin and one framed response on
+stdout.  State is durable under the caller-approved root; every operation
+checks its fencing token.
 """
 from __future__ import annotations
 
@@ -15,8 +18,52 @@ import subprocess
 import sys
 import time
 import shutil
+import struct
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
+
+
+_MAGIC = b"NRS1"
+_VERSION = 1
+_MAX_HEADER = 64 * 1024
+_MAX_PACK = 512 * 1024 * 1024
+
+
+def _decode_frame(raw: bytes) -> tuple[dict[str, Any], bytes]:
+    """Parse exactly one bounded binary-safe request frame."""
+    if len(raw) < 16 or raw[:4] != _MAGIC:
+        raise ValueError("invalid frame magic or truncated frame")
+    header_size = struct.unpack(">I", raw[4:8])[0]
+    if header_size > _MAX_HEADER or len(raw) < 16 + header_size:
+        raise ValueError("oversized or truncated frame header")
+    pack_size = struct.unpack(">Q", raw[8 + header_size:16 + header_size])[0]
+    if pack_size > _MAX_PACK or len(raw) != 16 + header_size + pack_size:
+        raise ValueError("oversized, truncated, or trailing frame data")
+    try:
+        request = json.loads(raw[8:8 + header_size].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid frame JSON header") from exc
+    if not isinstance(request, dict) or request.get("version") != _VERSION:
+        raise ValueError("unsupported frame version")
+    operation = request.get("operation")
+    if operation not in {"start", "sync", "status", "cancel", "tail", "files"}:
+        raise ValueError("invalid frame operation")
+    if pack_size and operation != "sync":
+        raise ValueError("binary pack is only permitted for sync")
+    return request, raw[16 + header_size:]
+
+
+def _encode_frame(response: Mapping[str, Any]) -> bytes:
+    header = json.dumps(
+        {"version": _VERSION, **response},
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    if len(header) > _MAX_HEADER:
+        # This should be impossible for the deliberately bounded operations,
+        # but keep the protocol safe if a future response grows unexpectedly.
+        header = b'{"ok":false,"error":"response exceeds frame limit"}'
+    return _MAGIC + struct.pack(">I", len(header)) + header + struct.pack(">Q", 0)
 
 
 def _safe_root(value: str) -> Path:
@@ -92,7 +139,7 @@ def _start(request: Mapping[str, Any]) -> dict[str, Any]:
     return {"ok": True, **state}
 
 
-def _sync(request: Mapping[str, Any]) -> dict[str, Any]:
+def _sync(request: Mapping[str, Any], pack: bytes) -> dict[str, Any]:
     """Atomically build a session checkout from a cached base and thin pack."""
     root = _safe_root(str(request["root"])); root.mkdir(parents=True, exist_ok=True)
     session = str(request.get("session_id") or "")
@@ -105,11 +152,8 @@ def _sync(request: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("invalid snapshot")
     if len(head) not in {40, 64} or any(c not in "0123456789abcdef" for c in head):
         raise ValueError("invalid snapshot base")
-    try:
-        import base64
-        pack = base64.b64decode(str(snapshot["pack_b64"]), validate=True)
-    except (KeyError, ValueError) as exc:
-        raise ValueError("invalid sync payload") from exc
+    if not isinstance(pack, bytes) or len(pack) > _MAX_PACK:
+        raise ValueError("invalid sync pack")
     safe_session = hashlib.sha256(session.encode()).hexdigest()[:24]
     token = int(request["fencing_token"])
     fences = root / ".nerve-ydb-fences"; fences.mkdir(parents=True, exist_ok=True)
@@ -270,10 +314,20 @@ def _files(request: Mapping[str, Any]) -> dict[str, Any]:
 
 def rpc() -> None:
     try:
-        request = json.loads(sys.stdin.buffer.readline()); operation = request.pop("operation")
-        result = {"start": _start, "sync": _sync, "status": _status, "cancel": _cancel, "tail": _tail, "files": _files}[operation](request)
+        request, pack = _decode_frame(sys.stdin.buffer.read())
+        operation = request.pop("operation")
+        request.pop("version")
+        handlers = {"start": _start, "status": _status, "cancel": _cancel, "tail": _tail, "files": _files}
+        result = _sync(request, pack) if operation == "sync" else handlers[operation](request)
     except Exception as exc:
         # Keep errors useful to the control plane without turning this fixed
         # protocol into an unbounded remote stderr channel.
         result = {"ok": False, "error": (type(exc).__name__ + ": " + str(exc))[:300]}
-    sys.stdout.write(json.dumps(result, separators=(",", ":")) + "\n")
+    # stdout is protocol-only: diagnostics and child output stay on stderr or
+    # their per-job log files, never mixed with a machine-readable response.
+    sys.stdout.buffer.write(_encode_frame(result))
+    sys.stdout.buffer.flush()
+
+
+if __name__ == "__main__":
+    rpc()

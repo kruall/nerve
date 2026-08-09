@@ -279,6 +279,9 @@ memory:
 #   #     known_hosts: /etc/nerve/ssh_known_hosts
 #   #     remote_roots: [/srv/nerve]
 #   #     allowed_cidrs: [192.0.2.0/24]
+#   #     # Installed from nerve/executions/remote_supervisor.py; this is a
+#   #     # reviewed fixed absolute path, never an execution argument.
+#   #     supervisor_path: /usr/local/libexec/nerve-remote-supervisor
 #   hosts:
 #     - id: builder-a
 #       connection_ref: lab-ssh

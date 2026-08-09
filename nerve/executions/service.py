@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import contextlib
 import logging
+import os
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import datetime
@@ -78,6 +80,28 @@ class ExecutionService:
             raise ValueError("invalid YDB operation")
         top = validate_worktree(worktree, self.ydb_worktree_root)
         snap = ydb_snapshot(top)
+        pack = snap.pop("pack")
+        if not isinstance(pack, bytes):
+            raise ValueError("YDB snapshot did not produce a binary pack")
+        packs = self.execution_root / "ydb-packs"
+        packs.mkdir(parents=True, exist_ok=True)
+        pack_path = packs / (
+            str(snap["snapshot_id"]) + "-" + uuid.uuid4().hex + ".pack"
+        )
+        # This control-plane-local file is not a request field sent to the
+        # worker.  Keeping the binary outside SQLite avoids JSON/base64 growth
+        # and makes a queued execution recoverable after a daemon restart.
+        fd = os.open(pack_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(pack)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                pack_path.unlink()
+            raise
+        snap["pack_path"] = str(pack_path)
+        snap["pack_length"] = len(pack)
+        snap["pack_sha256"] = hashlib.sha256(pack).hexdigest()
         test = kind == "ydb_test"
         argv = ["make", "--build", "relwithdebinfo"] + (["-tA"] if test else []) + list(args)
         plan = {"kind": kind, "profile_version": "1", "profile_hash": "built-in-ydb-v1",
@@ -88,8 +112,13 @@ class ExecutionService:
                 "result": {"success_exit_codes": [0], "required_output": (["GOOD", "Ok"] if test else []),
                            "forbidden_output": (["FAIL", "FAILED", "ERROR", "BAD"] if test else [])},
                 "timeout_seconds": 86400, "cancellation": {"mode": "interrupt", "grace_seconds": 10, "run_cleanup": False}}
-        return await self._start_serialized(session_id=session_id, plan=plan,
-            profile_snapshot={"kind": kind, "title": kind, "source": "built-in reviewed YDB operation"}, auto_continue=auto_continue)
+        try:
+            return await self._start_serialized(session_id=session_id, plan=plan,
+                profile_snapshot={"kind": kind, "title": kind, "source": "built-in reviewed YDB operation"}, auto_continue=auto_continue)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                pack_path.unlink()
+            raise
 
     async def inspect_ydb_files(self, *, session_id: str, operation: str, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
         inspect = getattr(self.backend, "inspect_ydb_files", None)

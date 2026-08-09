@@ -1,7 +1,6 @@
 """Pinned, shell-free YDB worktree snapshots for the reviewed builder pool."""
 from __future__ import annotations
 
-import base64
 import os
 import subprocess
 import tempfile
@@ -41,7 +40,7 @@ def validate_worktree(value: str, allowed_root: Path | None) -> Path:
     return top
 
 
-def snapshot(worktree: Path) -> dict[str, str]:
+def snapshot(worktree: Path) -> dict[str, str | bytes]:
     """Create a deterministic, unreferenced commit and a thin delta pack.
 
     All objects and the index used to construct the commit live in a temporary
@@ -73,5 +72,6 @@ def snapshot(worktree: Path) -> dict[str, str]:
                       input=b"Nerve YDB snapshot\n", env=env).decode().strip()
         pack = _git(worktree, "pack-objects", "--thin", "--stdout", "--revs",
                     input=(commit + "\n^" + head + "\n").encode(), env=env)
-    return {"head": head, "snapshot_id": commit,
-            "pack_b64": base64.b64encode(pack).decode()}
+    # The pack deliberately remains bytes.  The caller persists it outside the
+    # JSON execution plan and sends it in the SSH binary frame.
+    return {"head": head, "snapshot_id": commit, "pack": pack}

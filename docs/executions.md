@@ -250,9 +250,19 @@ retired and scheduling resumes.
 For a resource command Nerve resolves only the selected host's named
 `connection_ref` through `resources.ssh_connections`. Each connection has a
 dedicated `known_hosts` file, strict host-key verification, optional CIDRs and
-one or more allowed remote roots. SSH always invokes the fixed
-`nerve remote-supervisor rpc` argv; the structured request is JSON on stdin,
-never remote shell text. The worker stores a fenced job record and holds a
+one or more allowed remote roots. SSH starts one short-lived process per
+operation and invokes only the configured absolute `supervisor_path` (default
+`/usr/local/libexec/nerve-remote-supervisor`); it never opens a daemon port or
+passes remote shell text.
+
+Install the standalone, stdlib-only worker artifact without installing Nerve:
+copy `nerve/executions/remote_supervisor.py` from the reviewed release to that
+path and mark it executable. The transport sends exactly one `NRS1` frame on
+stdin: four-byte magic, 32-bit bounded JSON-header length, UTF-8 JSON header
+with `version: 1`, 64-bit raw-pack length, then raw pack bytes. Only `sync`
+accepts a pack. The worker requires exact EOF after the declared payload and
+writes exactly one framed response to stdout; diagnostics and job output never
+share stdout. The worker stores a fenced job record and holds a
 host-level `flock` while the process group exists. A cancellation reply is
 accepted only when the worker reports that process group quiescent. Transport
 ambiguity therefore quarantines the lease rather than releasing the host.

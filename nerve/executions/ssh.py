@@ -13,6 +13,7 @@ import ipaddress
 import json
 import os
 import shutil
+import struct
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -37,6 +38,7 @@ class SshConnection:
     identity_file: Path | None = None
     connect_timeout_seconds: int = 15
     environment_allowlist: tuple[str, ...] = ()
+    supervisor_path: str = "/usr/local/libexec/nerve-remote-supervisor"
 
     def ssh_argv(self) -> list[str]:
         """Fixed, injection-free OpenSSH options for a named connection."""
@@ -74,7 +76,7 @@ class SshConnectionCatalog:
                 raise SshTransportError("SSH connection names and definitions must be mappings")
             if {str(field).lower() for field in value} & self._FORBIDDEN:
                 raise SshTransportError("SSH connection contains forbidden raw options")
-            allowed = {"host", "user", "port", "known_hosts", "allowed_cidrs", "remote_roots", "identity_file", "connect_timeout_seconds", "environment_allowlist"}
+            allowed = {"host", "user", "port", "known_hosts", "allowed_cidrs", "remote_roots", "identity_file", "connect_timeout_seconds", "environment_allowlist", "supervisor_path"}
             unknown = set(value) - allowed
             if unknown:
                 raise SshTransportError("unknown SSH connection fields: " + ", ".join(sorted(unknown)))
@@ -99,10 +101,16 @@ class SshConnectionCatalog:
             env = value.get("environment_allowlist", [])
             if not isinstance(env, list) or not all(isinstance(item, str) and item.isidentifier() for item in env):
                 raise SshTransportError("environment_allowlist contains an invalid name")
+            supervisor_path = value.get("supervisor_path", "/usr/local/libexec/nerve-remote-supervisor")
+            normalized_supervisor = PurePosixPath(supervisor_path).as_posix() if isinstance(supervisor_path, str) else ""
+            if (not isinstance(supervisor_path, str) or not supervisor_path.startswith("/")
+                    or supervisor_path.startswith("//") or ".." in PurePosixPath(supervisor_path).parts
+                    or supervisor_path != normalized_supervisor):
+                raise SshTransportError("supervisor_path must be a fixed absolute normalized path")
             self._connections[name] = SshConnection(name=name, host=host, user=user, port=port,
                 known_hosts=Path(known), allowed_cidrs=tuple(cidrs), remote_roots=normalized_roots,
                 identity_file=Path(value["identity_file"]) if value.get("identity_file") else None,
-                connect_timeout_seconds=int(value.get("connect_timeout_seconds", 15)), environment_allowlist=tuple(env))
+                connect_timeout_seconds=int(value.get("connect_timeout_seconds", 15)), environment_allowlist=tuple(env), supervisor_path=supervisor_path)
 
     def resolve(self, name: str) -> SshConnection:
         try:
@@ -124,14 +132,56 @@ class RemoteSupervisor(Protocol):
 
 
 class OpenSshSupervisor:
-    """JSON-lines client for a pre-installed, non-shell remote supervisor."""
+    """One-shot framed client for the fixed standalone remote supervisor."""
+    _MAGIC = b"NRS1"
+    _MAX_HEADER = 64 * 1024
+    _MAX_PACK = 512 * 1024 * 1024
+
+    @classmethod
+    def _frame(cls, request: Mapping[str, Any], pack: bytes = b"") -> bytes:
+        header = json.dumps(request, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        if len(header) > cls._MAX_HEADER or len(pack) > cls._MAX_PACK:
+            raise SshTransportError("SSH supervisor frame exceeds safety limit")
+        return cls._MAGIC + struct.pack(">I", len(header)) + header + struct.pack(">Q", len(pack)) + pack
+
+    @classmethod
+    def _response(cls, raw: bytes) -> Mapping[str, Any]:
+        if len(raw) < 16 or raw[:4] != cls._MAGIC:
+            raise SshTransportError("SSH supervisor returned an invalid frame")
+        size = struct.unpack(">I", raw[4:8])[0]
+        if size > cls._MAX_HEADER or len(raw) != 16 + size:
+            raise SshTransportError("SSH supervisor returned a truncated or oversized frame")
+        if struct.unpack(">Q", raw[8 + size:16 + size])[0] != 0:
+            raise SshTransportError("SSH supervisor returned unexpected binary data")
+        try:
+            response = json.loads(raw[8:8 + size].decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise SshTransportError("SSH supervisor returned invalid JSON") from exc
+        if not isinstance(response, Mapping):
+            raise SshTransportError("SSH supervisor returned a non-object response")
+        if response.get("version") != 1:
+            raise SshTransportError("SSH supervisor returned an unsupported frame version")
+        return response
+
     async def _rpc(self, connection: SshConnection, operation: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         if shutil.which("ssh") is None:
             raise SshTransportError("OpenSSH client is not installed")
-        request = json.dumps({"operation": operation, **payload}, separators=(",", ":")).encode() + b"\n"
-        # The remote argv is constant.  Payload is stdin JSON, never an SSH
-        # command argument and therefore cannot become shell syntax.
-        proc = await asyncio.create_subprocess_exec(*connection.ssh_argv(), "nerve", "remote-supervisor", "rpc",
+        request = dict(payload)
+        pack = b""
+        if operation == "sync":
+            snapshot = dict(request.get("snapshot", {})); path = snapshot.pop("pack_path", None)
+            expected = snapshot.pop("pack_sha256", None); length = snapshot.pop("pack_length", None)
+            if not isinstance(path, str) or not isinstance(expected, str) or not isinstance(length, int):
+                raise SshTransportError("YDB snapshot has no verified local pack")
+            try: pack = Path(path).read_bytes()
+            except OSError as exc: raise SshTransportError("YDB snapshot pack is unavailable") from exc
+            if len(pack) != length or hashlib.sha256(pack).hexdigest() != expected:
+                raise SshTransportError("YDB snapshot pack verification failed")
+            request["snapshot"] = snapshot
+        request = self._frame({"version": 1, "operation": operation, **request}, pack)
+        # The remote argv is a reviewed configured absolute path.  Payload is
+        # stdin only, never shell syntax or a remote command argument.
+        proc = await asyncio.create_subprocess_exec(*connection.ssh_argv(), connection.supervisor_path, "rpc",
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(request), connection.connect_timeout_seconds + 30)
@@ -141,10 +191,7 @@ class OpenSshSupervisor:
             raise SshTransportError("SSH supervisor is unreachable") from exc
         if proc.returncode != 0:
             raise SshTransportError("SSH supervisor request failed: " + stderr.decode(errors="replace")[-300:])
-        try:
-            response = json.loads(stdout.decode())
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise SshTransportError("SSH supervisor returned invalid JSON") from exc
+        response = self._response(stdout)
         if not isinstance(response, Mapping) or response.get("ok") is not True:
             detail = str(response.get("error", ""))[:300] if isinstance(response, Mapping) else ""
             raise SshTransportError("SSH supervisor rejected request" + (": " + detail if detail else ""))
@@ -226,7 +273,19 @@ class SshExecutionBackend:
         if isinstance(snapshot, Mapping) and not plan.get("_remote_existing_job"):
             request = {"execution_id": execution_id, "lease_id": next(x["id"] for x in plan["selected_leases"] if x.get("slot") == step.get("resource_slot")),
                        "fencing_token": token, "root": root, "session_id": str(plan.get("session_id", "")), "snapshot": dict(snapshot)}
-            reply = await self.supervisor.sync(connection, request)
+            pack_path = snapshot.get("pack_path")
+            try:
+                reply = await self.supervisor.sync(connection, request)
+            finally:
+                if isinstance(pack_path, str):
+                    try:
+                        Path(pack_path).unlink()
+                    except FileNotFoundError:
+                        pass
+                    except OSError as exc:
+                        raise SshTransportError(
+                            "could not remove the consumed YDB snapshot pack"
+                        ) from exc
             remote_workspace = _remote_path(str(reply.get("workspace") or ""), connection.remote_roots)
         existing = plan.get("_remote_existing_job")
         if existing:

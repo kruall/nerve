@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import subprocess
 from pathlib import Path
 
@@ -44,7 +43,8 @@ def test_snapshot_pack_is_delta_only_not_repository_history(tmp_path):
         _git(repo, "add", "history"); _git(repo, "commit", "-m", str(number))
     (repo / "tracked").write_text("changed")
     result = snapshot(repo)
-    pack = base64.b64decode(result["pack_b64"])
+    pack = result["pack"]
+    assert isinstance(pack, bytes)
     assert len(pack) < 2000
     cache = tmp_path / "cache"; _git(repo, "clone", "--bare", str(repo), str(cache))
     _git(cache, "index-pack", "--stdin", "--fix-thin", input=pack)
@@ -59,12 +59,14 @@ def test_remote_materializes_snapshot_from_preseeded_cache_and_preserves_ignored
     result = snapshot(repo); root = tmp_path / "remote"
     cache = root / ".nerve-ydb-object-cache"
     cache.parent.mkdir(); _git(repo, "clone", "--bare", str(repo), str(cache))
+    pack = result.pop("pack")
     request = {"root": str(root), "session_id": "session-1", "fencing_token": 1, "snapshot": result}
-    reply = _sync(request); tree = Path(reply["workspace"])
+    reply = _sync(request, pack); tree = Path(reply["workspace"])
     assert (tree / "tracked").read_text() == "changed" and (tree / "new").read_text() == "new"
     (tree / "cache").mkdir(); (tree / "cache" / "saved").write_text("keep")
     (repo / "new").unlink(); (repo / "tracked").write_text("again")
-    reply = _sync({**request, "fencing_token": 2, "snapshot": snapshot(repo)})
+    next_snapshot = snapshot(repo); next_pack = next_snapshot.pop("pack")
+    reply = _sync({**request, "fencing_token": 2, "snapshot": next_snapshot}, next_pack)
     tree = Path(reply["workspace"])
     assert not (tree / "new").exists() and (tree / "cache" / "saved").read_text() == "keep"
 
@@ -72,7 +74,7 @@ def test_remote_materializes_snapshot_from_preseeded_cache_and_preserves_ignored
 def test_remote_missing_base_cache_fails_without_full_history_fallback(tmp_path):
     repo = _repo(tmp_path); result = snapshot(repo); root = tmp_path / "remote"
     with pytest.raises(ValueError, match="object cache lacks requested base HEAD"):
-        _sync({"root": str(root), "session_id": "session-1", "fencing_token": 1, "snapshot": result})
+        _sync({"root": str(root), "session_id": "session-1", "fencing_token": 1, "snapshot": result}, result["pack"])
 
 
 def test_worktree_must_be_allowlisted_git_top_level(tmp_path):
