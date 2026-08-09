@@ -34,6 +34,10 @@ class WorkflowPresetService:
         self._tasks: dict[str, asyncio.Task] = {}; self._stopping = False
 
     async def initialize(self) -> None:
+        # A claimed row might already have reached the engine when the process
+        # died.  Never replay that ambiguous request; expose it as a durable
+        # delivery failure, while still replaying rows that were never claimed.
+        await self.db.fail_claimed_preset_workflow_completions_on_restart()
         for row in await self.db.active_preset_workflows(): self._schedule(row["id"])
         # A process can stop after the atomic terminal transition but before it
         # claims the outbox.  Resume delivery without ever re-running a stage.
@@ -182,16 +186,26 @@ class WorkflowPresetService:
         if status != "cancelled": await self._deliver_completion(terminal)
 
     async def _deliver_completion(self, workflow: Mapping[str, Any]) -> None:
-        now = __import__("nerve.utils.time",fromlist=["utc_now_iso"]).utc_now_iso()
-        # Claim is durable; an uncertain claimed row remains blocked rather than duplicate a turn.
-        claimed=await self.db._write("UPDATE workflow_completion_outbox SET state='claimed',claimed_at=?,updated_at=? WHERE workflow_id=? AND state='pending'",(now,now,workflow["id"]))
-        if not claimed.rowcount: return
-        try: await self.engine.run(session_id=workflow["observer_session_id"],user_message=f"Workflow {workflow['id']} finished with status: {workflow['status']}.",source="workflow",internal=True)
-        except Exception as e: await self.db._write("UPDATE workflow_completion_outbox SET state='failed',error=?,updated_at=? WHERE workflow_id=?",(type(e).__name__,now,workflow["id"])); return
-        await self.db._write("UPDATE workflow_completion_outbox SET state='completed',completed_at=?,updated_at=? WHERE workflow_id=?",(now,now,workflow["id"]))
+        if not await self.db.claim_preset_workflow_completion(workflow["id"]):
+            return
+        try:
+            await self.engine.run(session_id=workflow["observer_session_id"],user_message=f"Workflow {workflow['id']} finished with status: {workflow['status']}.",source="workflow",internal=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            await self.db.settle_preset_workflow_completion(
+                workflow["id"], success=False, error=type(error).__name__,
+            )
+            await self._changed(workflow["id"])
+            return
+        await self.db.settle_preset_workflow_completion(workflow["id"], success=True)
+        # Publish only after the durable outbox transition, so observers can
+        # use this event as an invalidation and read a consistent projection.
+        await self._changed(workflow["id"])
 
     async def _broadcast(self, workflow: Mapping[str, Any]) -> None:
         # Live events are an invalidation signal only; never put the pinned
         # plan (which can contain prompts/arguments) on the websocket.
         safe = {key: workflow.get(key) for key in ("id", "observer_session_id", "preset_hash", "status", "revision", "created_at", "started_at", "finished_at", "updated_at")}
+        safe["completion"] = await self.db.get_preset_workflow_completion(workflow["id"])
         await broadcaster.broadcast(workflow["observer_session_id"], {"type":"workflow_update","workflow":safe})

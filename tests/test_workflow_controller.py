@@ -64,12 +64,16 @@ async def test_execution_stage_only_resumes_observer_after_workflow_terminal(db)
     await _wait(lambda: _has_stage(db,workflow["id"]))
     assert engine.run.await_count == 0
     executions.child={"id":"exec-child","status":"succeeded","result":{"outcome":"succeeded"}}
-    await _wait(lambda: _done(db,workflow["id"]))
+    await _wait(lambda: _completion_done(db, workflow["id"]))
+    assert (await db.get_preset_workflow(workflow["id"]))["status"] == "succeeded"
     assert engine.run.await_count == 1
     await service.shutdown()
 
 async def _has_stage(db, workflow_id): return bool(await db.list_stage_runs(workflow_id))
 async def _done(db, workflow_id): return (await db.get_preset_workflow(workflow_id))["status"] == "succeeded"
+async def _completion_done(db, workflow_id):
+    completion = await db.get_preset_workflow_completion(workflow_id)
+    return completion if completion and completion["state"] in ("completed", "suppressed", "failed") else None
 
 @pytest.mark.asyncio
 async def test_cancelled_workflow_suppresses_final_continuation(db):
@@ -95,7 +99,9 @@ async def test_cancel_targets_only_the_requested_preset_workflow(db):
 async def test_codex_json_string_result_completes_stage_parent_and_outbox(db):
     engine, service = await _agent_stage(db)
     await service.initialize()
-    await _wait(lambda: _done(db, "w"))
+    # Workflow status is intentionally independent from observer delivery.
+    # Await the durable delivery condition required by this scenario.
+    await _wait(lambda: _completion_done(db, "w"))
     stage = await db.get_stage_run("stage")
     assert stage["status"] == "succeeded"
     assert stage["artifact"] == {"summary":"done"}
@@ -103,6 +109,64 @@ async def test_codex_json_string_result_completes_stage_parent_and_outbox(db):
         assert (await c.fetchone())[0] == "completed"
     assert engine.run.await_count == 1
     await service.shutdown()
+
+@pytest.mark.asyncio
+async def test_terminal_workflow_exposes_claimed_completion_until_observer_turn_finishes(db):
+    engine, service = await _agent_stage(db)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def continue_observer(**kwargs):
+        started.set()
+        await release.wait()
+
+    engine.run.side_effect = continue_observer
+    await service.initialize()
+    await started.wait()
+    assert (await db.get_preset_workflow("w"))["status"] == "succeeded"
+    assert (await db.get_preset_workflow_completion("w"))["state"] == "claimed"
+    release.set()
+    await _wait(lambda: _completion_done(db, "w"))
+    completion = await db.get_preset_workflow_completion("w")
+    assert completion["state"] == "completed"
+    await service.shutdown()
+
+@pytest.mark.asyncio
+async def test_completion_failure_and_restart_claim_are_durable_and_not_replayed(db):
+    engine, service = await _agent_stage(db)
+    engine.run.side_effect = RuntimeError("enqueue failed")
+    await service.initialize()
+    await _wait(lambda: _completion_done(db, "w"))
+    completion = await db.get_preset_workflow_completion("w")
+    assert completion["state"] == "failed"
+    assert completion["error"] == "RuntimeError"
+    assert engine.run.await_count == 1
+    await service.shutdown()
+
+    # A process dying after the claim is an ambiguous delivery.  Recovery
+    # records failure instead of issuing a second observer turn.
+    await db.create_preset_workflow("claimed", session_id="owner", plan={}, preset_hash="x", spec_hash="x")
+    assert await db.terminalize_preset_workflow("claimed", to_status="succeeded", result={})
+    assert await db.claim_preset_workflow_completion("claimed")
+    restarted = WorkflowPresetService(db=db, engine=engine, executions=_Executions(), agent_runs=_AgentRuns())
+    await restarted.initialize()
+    recovered = await db.get_preset_workflow_completion("claimed")
+    assert recovered["state"] == "failed"
+    assert recovered["error"] == "daemon restarted after completion claim"
+    assert engine.run.await_count == 1
+    await restarted.shutdown()
+
+@pytest.mark.asyncio
+async def test_duplicate_completion_wakeups_claim_only_one_observer_turn(db):
+    await db.create_session("owner", source="web", backend="codex", status="idle")
+    await db.create_preset_workflow("w", session_id="owner", plan={}, preset_hash="x", spec_hash="x")
+    assert await db.terminalize_preset_workflow("w", to_status="succeeded", result={})
+    workflow = await db.get_preset_workflow("w")
+    engine = SimpleNamespace(run=AsyncMock())
+    service = WorkflowPresetService(db=db, engine=engine, executions=_Executions(), agent_runs=None)
+    await asyncio.gather(service._deliver_completion(workflow), service._deliver_completion(workflow))
+    assert engine.run.await_count == 1
+    assert (await db.get_preset_workflow_completion("w"))["state"] == "completed"
 
 @pytest.mark.asyncio
 async def test_malformed_agent_artifact_fails_closed_and_continues_once(db):

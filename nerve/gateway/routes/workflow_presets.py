@@ -41,10 +41,11 @@ async def _public(row: dict) -> dict:
     """Deliberately omit input prompts, raw stage specs and artifacts from list views."""
     service = _service(); stages = await service.db.list_stage_runs(row["id"])
     plan = row.get("plan") or {}; preset = plan.get("preset") or {}
+    completion = await service.db.get_preset_workflow_completion(row["id"])
     return {"id": row["id"], "owner_session_id": row["observer_session_id"],
       "preset": {k: preset.get(k) for k in ("name", "version", "preset_hash", "title", "description", "budget_usd")},
       "preset_hash": row.get("preset_hash"), "status": row["status"], "result": row.get("result"), "available_actions": [], "spent_usd": None,
-      "created_at": row["created_at"], "started_at": row.get("started_at"), "finished_at": row.get("finished_at"), "updated_at": row["updated_at"],
+      "created_at": row["created_at"], "started_at": row.get("started_at"), "finished_at": row.get("finished_at"), "updated_at": row["updated_at"], "completion": completion,
       "stages": [{"id": s["id"], "stage_id": s["stage_id"], "runner": s["runner"], "status": s["status"], "child_type": s.get("child_type"), "child_id": s.get("child_id"), "created_at": s["created_at"], "started_at": s.get("started_at"), "finished_at": s.get("finished_at"),
         "runtime": ({"model": (s.get("spec") or {}).get("spec", {}).get("model"), "effort": (s.get("spec") or {}).get("spec", {}).get("reasoning_effort"), "sandbox": (s.get("spec") or {}).get("spec", {}).get("sandbox"), "capabilities": len((s.get("spec") or {}).get("spec", {}).get("mcp", {}).get("allow", []))} if s["runner"] == "agent" else {"kind": (s.get("spec") or {}).get("spec", {}).get("kind")}),
         "summary": (s.get("result") or {}).get("summary") or (s.get("result") or {}).get("outcome")} for s in stages]}

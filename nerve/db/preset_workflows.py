@@ -57,6 +57,56 @@ class PresetWorkflowStore:
               AND o.state = 'pending' ORDER BY w.finished_at""") as c:
             return [_row(row) async for row in c]  # type: ignore[misc]
 
+    async def get_preset_workflow_completion(self, workflow_id: str) -> dict[str, Any] | None:
+        """Return the durable observer-delivery state for one workflow."""
+        async with self.db.execute(
+            """SELECT state, claimed_at, completed_at, error, created_at, updated_at
+               FROM workflow_completion_outbox WHERE workflow_id = ?""",
+            (workflow_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return dict(row) if row is not None else None
+
+    async def claim_preset_workflow_completion(self, workflow_id: str) -> bool:
+        """Atomically claim a pending observer continuation."""
+        now = utc_now_iso()
+        outcome = await self._write(
+            """UPDATE workflow_completion_outbox
+               SET state = 'claimed', claimed_at = ?, updated_at = ?
+               WHERE workflow_id = ? AND state = 'pending'""",
+            (now, now, workflow_id),
+        )
+        return bool(outcome.rowcount)
+
+    async def settle_preset_workflow_completion(
+        self, workflow_id: str, *, success: bool, error: str | None = None,
+    ) -> bool:
+        """Persist the result before callers publish a completion event."""
+        now = utc_now_iso()
+        outcome = await self._write(
+            """UPDATE workflow_completion_outbox
+               SET state = ?, completed_at = ?, error = ?, updated_at = ?
+               WHERE workflow_id = ? AND state = 'claimed'""",
+            (
+                "completed" if success else "failed", now,
+                None if success else (error or "continuation failed")[:1000], now,
+                workflow_id,
+            ),
+        )
+        return bool(outcome.rowcount)
+
+    async def fail_claimed_preset_workflow_completions_on_restart(self) -> int:
+        """Record uncertain claims rather than risking a duplicate observer turn."""
+        now = utc_now_iso()
+        outcome = await self._write(
+            """UPDATE workflow_completion_outbox
+               SET state = 'failed', completed_at = ?,
+                   error = 'daemon restarted after completion claim', updated_at = ?
+               WHERE state = 'claimed'""",
+            (now, now),
+        )
+        return int(outcome.rowcount or 0)
+
     async def active_preset_workflow_count(self, session_id: str) -> int:
         marks = ",".join("?" for _ in ACTIVE_PRESET_WORKFLOWS)
         async with self.db.execute(f"SELECT COUNT(*) FROM preset_workflows WHERE observer_session_id = ? AND status IN ({marks})", (session_id, *ACTIVE_PRESET_WORKFLOWS)) as c:
