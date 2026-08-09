@@ -37,9 +37,22 @@ from nerve.db.usage import estimate_turn_cost
 from nerve.workflows.service import (
     ENGINE_CLAUDE,
     ENGINE_CODEX,
+    ENGINE_CODEX_STAGE,
     WorkflowRunError,
     WorkflowRunService,
 )
+
+
+def test_codex_stage_prompt_declares_sandboxed_native_tools(tmp_path):
+    service = WorkflowRunService(_make_config(tmp_path), MagicMock(), MagicMock())
+    prompt = service._build_prompt({
+        "id": "wfr-stage001", "title": "stage", "engine": ENGINE_CODEX_STAGE,
+        "budget_usd": 1.0,
+        "spec": {"prompt": "{}", "sandbox": "read-only"},
+    })
+    assert "Native Codex filesystem, search, and shell tools" in prompt
+    assert "under the read-only sandbox" in prompt
+    assert "For MCP calls, use only the capabilities declared" in prompt
 
 # --------------------------------------------------------------------------- #
 #  Helpers                                                                     #

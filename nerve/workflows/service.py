@@ -481,10 +481,16 @@ class WorkflowRunService:
             orchestrate = "- Do not orchestrate or start nested workflows."
         stage_rules = ""
         if run["engine"] == ENGINE_CODEX_STAGE:
+            sandbox = str(spec.get("sandbox") or "read-only")
             stage_rules = (
                 "- This is an isolated single-agent stage. Do not start workflows, "
                 "subagents, or capability-discovery tools.\n"
-                "- Use only the capabilities declared in STAGE_CONTEXT.\n"
+                f"- Native Codex filesystem, search, and shell tools are available "
+                f"under the {sandbox} sandbox. Use them directly when required by "
+                "the task; they are part of the stage runtime, not undeclared MCP "
+                "capabilities.\n"
+                "- For MCP calls, use only the capabilities declared in "
+                "STAGE_CONTEXT.\n"
                 "- Your final response must be the structured artifact required by "
                 "STAGE_CONTEXT.output_schema.\n"
             )
