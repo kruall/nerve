@@ -25,6 +25,7 @@ export function PresetWorkflowToolBlock({ block: _block, workflowId }: { block: 
   const [workflow, setWorkflow] = useState<PresetWorkflow | null>(null);
   const [missing, setMissing] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [acting, setActing] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -51,6 +52,15 @@ export function PresetWorkflowToolBlock({ block: _block, workflowId }: { block: 
     catch (e) { setError(e instanceof Error ? e.message : String(e)); }
     finally { setCancelling(false); }
   };
+  const action = async (id: string) => {
+    if (!workflow) return;
+    const item = workflow.available_actions.find(a => a.id === id);
+    if (!item || (item.confirmation_required && !window.confirm(`${item.label} preset workflow ${workflow.id}?`))) return;
+    setActing(id); setError(null);
+    try { setWorkflow(await api.executePresetWorkflowAction(workflow.id, id, item.workflow_revision, crypto.randomUUID(), true)); }
+    catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    finally { setActing(null); }
+  };
 
   if (missing) return <div className="my-1.5 border border-border rounded-lg bg-surface px-3 py-2 text-[12px] text-text-muted">Preset workflow <span className="font-mono">{workflowId}</span> is no longer available.</div>;
   if (!workflow) return <div className="my-1.5 border border-border rounded-lg bg-surface px-3 py-2 flex gap-2 items-center text-[13px] text-text-secondary"><Loader2 size={14} className="animate-spin text-text-muted"/> Preset workflow <span className="font-mono text-text-faint">{workflowId}</span></div>;
@@ -73,6 +83,7 @@ export function PresetWorkflowToolBlock({ block: _block, workflowId }: { block: 
     </div>
     {terminalError && <div className="px-3 pb-2 text-[11px] text-hue-red break-words">{terminalError}</div>}
     {terminalResult && <div className="px-3 pb-2 text-[11px] text-text-muted">Result: {terminalResult}</div>}
+    {!!workflow.available_actions.length && <div className="border-t border-border-subtle px-3 py-2 flex gap-2">{workflow.available_actions.map(item => <button key={item.id} type="button" title={item.description} onClick={() => void action(item.id)} disabled={acting !== null} className="inline-flex items-center gap-1 px-2 py-1 rounded border border-red-400/25 text-hue-red text-[11px] disabled:opacity-50 cursor-pointer">{acting === item.id && <Loader2 size={11} className="animate-spin"/>}{item.label}</button>)}</div>}
     {error && <div className="px-3 pb-2 text-[11px] text-hue-red break-words">{error}</div>}
     <div className="border-t border-border-subtle px-3 py-1.5 flex gap-3 text-[11px]"><Link to="/workflows" className="text-text-dim hover:text-text-secondary">Preset workflows</Link><Link to={`/chat/${workflow.owner_session_id}`} className="text-text-dim hover:text-text-secondary">Open session</Link></div>
   </div>;

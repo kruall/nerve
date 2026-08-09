@@ -4,7 +4,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import pytest
-from nerve.workflows.controller import WorkflowPresetService, _configured_models, _stage_prompt
+from nerve.workflows.controller import WorkflowPresetService, WorkflowActionError, _configured_models, _stage_prompt
 
 def test_stage_prompt_keeps_reviewed_instructions_before_user_task():
     stage = {"id": "develop", "spec": {"prompt": "Follow the checklist exactly."}}
@@ -169,13 +169,13 @@ async def test_duplicate_completion_wakeups_claim_only_one_observer_turn(db):
     assert (await db.get_preset_workflow_completion("w"))["state"] == "completed"
 
 @pytest.mark.asyncio
-async def test_malformed_agent_artifact_fails_closed_and_continues_once(db):
+async def test_malformed_agent_artifact_blocks_without_observer_continuation(db):
     engine, service = await _agent_stage(db, result="not json")
     await service.initialize()
     async with asyncio.timeout(2):
-        while (await db.get_preset_workflow("w"))["status"] != "failed": await asyncio.sleep(.01)
+        while (await db.get_preset_workflow("w"))["status"] != "blocked": await asyncio.sleep(.01)
     assert (await db.get_stage_run("stage"))["status"] == "failed"
-    assert engine.run.await_count == 1
+    assert engine.run.await_count == 0
     await service.shutdown()
 
 @pytest.mark.asyncio
@@ -226,3 +226,30 @@ async def test_cancellation_wins_controller_failure_race(db, monkeypatch):
     async with db.db.execute("SELECT state FROM workflow_completion_outbox WHERE workflow_id='w'") as c:
         assert (await c.fetchone())[0] == "suppressed"
     await service.shutdown()
+
+@pytest.mark.asyncio
+async def test_blocked_workflow_abandon_is_audited_idempotent_and_suppresses_completion(db):
+    await db.create_session("owner", source="web", backend="codex", status="idle")
+    service = WorkflowPresetService(db=db, engine=SimpleNamespace(run=AsyncMock()), executions=_Executions(), agent_runs=None)
+    await db.create_preset_workflow("w", session_id="owner", plan={}, preset_hash="x", spec_hash="x")
+    assert await db.transition_preset_workflow("w", to_status="blocked", expect=("queued",), result={"outcome":"blocked"})
+    blocked = await db.get_preset_workflow("w")
+    assert (await service.available_actions(blocked))[0]["id"] == "abandon"
+    result = await service.execute_action("w", action="abandon", revision=blocked["revision"], actor="user", reason="operator decision", idempotency_key="decision-key-1")
+    assert result["status"] == "cancelled"
+    duplicate = await service.execute_action("w", action="abandon", revision=blocked["revision"], actor="user", reason="ignored", idempotency_key="decision-key-1")
+    assert duplicate["status"] == "cancelled"
+    assert (await db.get_preset_workflow_completion("w"))["state"] == "suppressed"
+    async with db.db.execute("SELECT actor, action, reason, prior_revision FROM workflow_action_audit WHERE workflow_id='w'") as cursor:
+        assert tuple(await cursor.fetchone()) == ("user", "abandon", "operator decision", blocked["revision"])
+    with pytest.raises(WorkflowActionError, match="not_available"):
+        await service.execute_action("w", action="abandon", revision=blocked["revision"], actor="user", reason=None, idempotency_key="decision-key-2")
+
+@pytest.mark.asyncio
+async def test_workflow_action_rejects_stale_revision(db):
+    await db.create_session("owner", source="web", backend="codex", status="idle")
+    service = WorkflowPresetService(db=db, engine=SimpleNamespace(run=AsyncMock()), executions=_Executions(), agent_runs=None)
+    await db.create_preset_workflow("w", session_id="owner", plan={}, preset_hash="x", spec_hash="x")
+    assert await db.transition_preset_workflow("w", to_status="blocked", expect=("queued",))
+    with pytest.raises(WorkflowActionError, match="stale"):
+        await service.execute_action("w", action="abandon", revision=0, actor="user", reason=None, idempotency_key="decision-key-3")

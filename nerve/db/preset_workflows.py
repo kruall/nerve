@@ -149,6 +149,41 @@ class PresetWorkflowStore:
                 )
         return changed
 
+    async def abandon_preset_workflow(self, workflow_id: str, *, revision: int, actor: str,
+                                      reason: str | None, idempotency_key: str) -> str:
+        """CAS a blocked workflow to cancelled and append its decision audit.
+
+        Returns ``applied``, ``duplicate``, ``stale`` or ``not_available``.
+        The terminal transition and audit are one transaction, so a retry never
+        creates another observer continuation or another audit decision.
+        """
+        now = utc_now_iso()
+        async with self._atomic():
+            async with self.db.execute("SELECT 1 FROM workflow_action_audit WHERE workflow_id=? AND idempotency_key=?", (workflow_id, idempotency_key)) as cursor:
+                if await cursor.fetchone(): return "duplicate"
+            cursor = await self.db.execute(
+                """UPDATE preset_workflows SET status='cancelled', result=?, finished_at=?,
+                    updated_at=?, revision=revision+1 WHERE id=? AND status='blocked' AND revision=?""",
+                (json.dumps({"outcome":"abandoned"}), now, now, workflow_id, revision),
+            )
+            changed = bool(cursor.rowcount); await cursor.close()
+            if not changed:
+                async with self.db.execute("SELECT revision, status FROM preset_workflows WHERE id=?", (workflow_id,)) as cursor:
+                    current = await cursor.fetchone()
+                if current is None: return "not_available"
+                return "stale" if current["revision"] != revision else "not_available"
+            await self.db.execute("""INSERT INTO workflow_completion_outbox
+                (workflow_id,state,created_at,updated_at) VALUES (?, 'suppressed', ?, ?)""", (workflow_id, now, now))
+            await self.db.execute("""INSERT INTO workflow_action_audit
+                (workflow_id,actor,action,reason,idempotency_key,prior_revision,resulting_status,created_at)
+                VALUES (?, ?, 'abandon', ?, ?, ?, 'cancelled', ?)""",
+                (workflow_id, actor, (reason or None), idempotency_key, revision, now))
+        return "applied"
+
+    async def has_preset_workflow_action(self, workflow_id: str, idempotency_key: str) -> bool:
+        async with self.db.execute("SELECT 1 FROM workflow_action_audit WHERE workflow_id=? AND idempotency_key=?", (workflow_id, idempotency_key)) as cursor:
+            return bool(await cursor.fetchone())
+
     async def create_stage_run(self, stage_run_id: str, *, workflow_id: str, stage_id: str, runner: str, spec: Mapping[str, Any], spec_hash: str) -> dict:
         now = utc_now_iso()
         await self._write("""INSERT INTO workflow_stage_runs

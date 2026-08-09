@@ -90,6 +90,34 @@ class WorkflowPresetService:
         await self._changed(workflow_id)
         return True
 
+    async def available_actions(self, workflow: Mapping[str, Any]) -> list[dict[str, Any]]:
+        # Registry is deliberately fail-closed.  Retry needs attempt journaling
+        # and accept needs a separately pinned acceptance artifact; neither is
+        # inferred from a failed child result.
+        if workflow["status"] != "blocked": return []
+        return [{"id":"abandon", "label":"Abandon", "description":"Finish this stopped workflow without a completion continuation.",
+                 "workflow_revision":workflow["revision"], "reason":"controller stopped after a stage failure", "destructive":True,
+                 "confirmation_required":True}]
+
+    async def execute_action(self, workflow_id: str, *, action: str, revision: int,
+                             actor: str, reason: str | None, idempotency_key: str) -> dict:
+        workflow = await self.db.get_preset_workflow(workflow_id)
+        if workflow is None: raise WorkflowActionError("not_found")
+        # A client may retry after the first request committed.  Return the
+        # current projection before evaluating the now-terminal action matrix.
+        if await self.db.has_preset_workflow_action(workflow_id, idempotency_key):
+            return workflow
+        if action != "abandon" or not await self.available_actions(workflow):
+            raise WorkflowActionError("not_available")
+        result = await self.db.abandon_preset_workflow(workflow_id, revision=revision, actor=actor,
+                                                        reason=reason, idempotency_key=idempotency_key)
+        if result == "stale": raise WorkflowActionError("stale")
+        if result == "not_available": raise WorkflowActionError("not_available")
+        row = await self.db.get_preset_workflow(workflow_id)
+        assert row is not None
+        if result == "applied": await self._broadcast(row)
+        return row
+
     async def _drive(self, workflow_id: str) -> None:
         try:
             while not self._stopping:
@@ -107,7 +135,13 @@ class WorkflowPresetService:
                 preset = workflow["plan"]["preset"]; next_stage = next((s for s in preset["stages"] if s["id"] not in {x["stage_id"] for x in stages} and all(d in done for d in s.get("depends_on", []))), None)
                 if next_stage is None:
                     failed = next((s for s in stages if s["status"] in TERMINAL_STAGE_RUNS and s["status"] != "succeeded"), None)
-                    await self._terminal(workflow, "failed" if failed else "succeeded", {"outcome": "failed" if failed else "succeeded"}); return
+                    # A failed child stops the controller without issuing the
+                    # observer continuation.  Only registry actions may make a
+                    # further durable decision from this state.
+                    if failed:
+                        await self.db.transition_preset_workflow(workflow_id, to_status="blocked", expect=("running",), result={"outcome":"blocked", "error":"stage_failed"})
+                        await self._changed(workflow_id); return
+                    await self._terminal(workflow, "succeeded", {"outcome":"succeeded"}); return
                 await self._dispatch(workflow, next_stage, done)
         except asyncio.CancelledError:
             raise
@@ -209,3 +243,6 @@ class WorkflowPresetService:
         safe = {key: workflow.get(key) for key in ("id", "observer_session_id", "preset_hash", "status", "revision", "created_at", "started_at", "finished_at", "updated_at")}
         safe["completion"] = await self.db.get_preset_workflow_completion(workflow["id"])
         await broadcaster.broadcast(workflow["observer_session_id"], {"type":"workflow_update","workflow":safe})
+
+class WorkflowActionError(Exception):
+    pass

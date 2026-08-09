@@ -1,6 +1,8 @@
 """REST discovery/validation facade for reviewed workflow presets."""
 from typing import Any
 from fastapi import APIRouter, Body, Depends, HTTPException
+from pydantic import BaseModel, Field
+from nerve.workflows.controller import WorkflowActionError
 from nerve.gateway.auth import require_auth
 from nerve.gateway.routes._deps import get_deps
 from nerve.workflows.presets import WorkflowPresetValidationError
@@ -44,7 +46,7 @@ async def _public(row: dict) -> dict:
     completion = await service.db.get_preset_workflow_completion(row["id"])
     return {"id": row["id"], "owner_session_id": row["observer_session_id"],
       "preset": {k: preset.get(k) for k in ("name", "version", "preset_hash", "title", "description", "budget_usd")},
-      "preset_hash": row.get("preset_hash"), "status": row["status"], "result": row.get("result"), "available_actions": [], "spent_usd": None,
+      "preset_hash": row.get("preset_hash"), "status": row["status"], "result": row.get("result"), "available_actions": await service.available_actions(row), "spent_usd": None,
       "created_at": row["created_at"], "started_at": row.get("started_at"), "finished_at": row.get("finished_at"), "updated_at": row["updated_at"], "completion": completion,
       "stages": [{"id": s["id"], "stage_id": s["stage_id"], "runner": s["runner"], "status": s["status"], "child_type": s.get("child_type"), "child_id": s.get("child_id"), "created_at": s["created_at"], "started_at": s.get("started_at"), "finished_at": s.get("finished_at"),
         "runtime": ({"model": (s.get("spec") or {}).get("spec", {}).get("model"), "effort": (s.get("spec") or {}).get("spec", {}).get("reasoning_effort"), "sandbox": (s.get("spec") or {}).get("spec", {}).get("sandbox"), "capabilities": len((s.get("spec") or {}).get("spec", {}).get("mcp", {}).get("allow", []))} if s["runner"] == "agent" else {"kind": (s.get("spec") or {}).get("spec", {}).get("kind")}),
@@ -67,4 +69,25 @@ async def cancel_preset_workflow(workflow_id: str, user: dict = Depends(require_
     if row is None: raise HTTPException(404, "workflow not found")
     await service.cancel(workflow_id, reason="Cancelled from web UI")
     row = await service.db.get_preset_workflow(workflow_id)
+    return await _public(row)
+
+class WorkflowActionRequest(BaseModel):
+    revision: int = Field(ge=0)
+    idempotency_key: str = Field(min_length=8, max_length=200)
+    reason: str | None = Field(default=None, max_length=500)
+    confirmed: bool = False
+
+@router.post("/api/preset-workflows/{workflow_id}/actions/{action}")
+async def execute_preset_workflow_action(workflow_id: str, action: str, body: WorkflowActionRequest,
+                                         user: dict = Depends(require_auth)):
+    if action != "abandon": raise HTTPException(404, "workflow action not found")
+    if not body.confirmed: raise HTTPException(422, "confirmation is required")
+    service = _service()
+    try:
+        row = await service.execute_action(workflow_id, action=action, revision=body.revision,
+                                           actor=str(user.get("sub") or "unknown"), reason=body.reason,
+                                           idempotency_key=body.idempotency_key)
+    except WorkflowActionError as error:
+        codes = {"not_found": 404, "stale": 409, "not_available": 409}
+        raise HTTPException(codes.get(str(error), 403), str(error)) from error
     return await _public(row)
