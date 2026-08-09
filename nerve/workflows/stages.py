@@ -39,8 +39,26 @@ def validate_artifact(text: str, schema: Mapping[str, Any]) -> Any:
     """
     try:
         value = json.loads(text)
-    except (TypeError, json.JSONDecodeError) as e:
-        raise StageArtifactError("final response is not JSON") from e
+    except (TypeError, json.JSONDecodeError) as original_error:
+        # Codex stage sessions may preserve a short commentary preamble before
+        # the final answer. Accept one complete JSON value only when it is the
+        # terminal suffix; never salvage an intermediate object followed by
+        # more model text.
+        value = None
+        if isinstance(text, str):
+            decoder = json.JSONDecoder()
+            for index, char in enumerate(text):
+                if char not in "{[":
+                    continue
+                try:
+                    candidate, end = decoder.raw_decode(text, index)
+                except json.JSONDecodeError:
+                    continue
+                if not text[end:].strip():
+                    value = candidate
+                    break
+        if value is None:
+            raise StageArtifactError("final response is not JSON") from original_error
 
     def check(item: Any, node: Mapping[str, Any], path: str) -> None:
         unknown = set(node) - {"type", "required", "properties", "items"}

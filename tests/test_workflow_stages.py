@@ -65,3 +65,15 @@ def test_output_artifact_is_json_and_satisfies_declared_contract():
     assert validate_artifact('{"summary":"done"}', schema)["summary"] == "done"
     with pytest.raises(StageArtifactError, match="required"):
         validate_artifact("{}", schema)
+
+
+def test_output_artifact_accepts_terminal_json_after_commentary():
+    schema = {"type": "object", "required": ["summary"],
+              "properties": {"summary": {"type": "string"}}}
+    assert validate_artifact('I will inspect it first.\n{"summary":"done"}', schema) == {"summary": "done"}
+
+
+def test_output_artifact_rejects_text_after_json():
+    schema = {"type": "object", "properties": {}}
+    with pytest.raises(StageArtifactError, match="final response is not JSON"):
+        validate_artifact('{"summary":"done"}\nextra text', schema)
