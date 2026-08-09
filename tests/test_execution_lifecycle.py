@@ -125,6 +125,37 @@ def test_session_reservation_lease_is_bound_to_compiled_resource_slot():
 
 
 @pytest.mark.asyncio
+async def test_ydb_test_plan_does_not_reject_test_owned_error_text(
+    db, owner, tmp_path, monkeypatch,
+):
+    worktree = tmp_path / "ydb"
+    monkeypatch.setattr(
+        "nerve.executions.service.validate_worktree", lambda *_args: worktree,
+    )
+    monkeypatch.setattr(
+        "nerve.executions.service.ydb_snapshot",
+        lambda _top: {
+            "snapshot_id": "a" * 40,
+            "head": "b" * 40,
+            "pack": b"pack",
+        },
+    )
+    service = ExecutionService(
+        db=db, engine=_engine(), workspace=tmp_path, catalog=SimpleNamespace(),
+        execution_root=tmp_path / "runs",
+    )
+    service._start_serialized = AsyncMock(return_value={"id": "exec-ydb"})
+
+    await service.start_ydb(
+        session_id=owner, kind="ydb_test", worktree=str(worktree), args=["target"],
+    )
+
+    plan = service._start_serialized.await_args.kwargs["plan"]
+    assert plan["result"]["required_output"] == ["GOOD", "Ok"]
+    assert plan["result"]["forbidden_output"] == []
+
+
+@pytest.mark.asyncio
 async def test_ydb_host_release_refuses_active_execution(db, owner, tmp_path):
     await db.create_execution(
         "exec-active",
@@ -370,6 +401,34 @@ async def test_textual_result_rules_override_success_exit_code(db, owner, tmp_pa
     row = await _eventually(lambda: _textual_done(db, execution_id))
     assert row["status"] == "failed"
     assert row["result"]["missing_output"] == ["GOOD", "Ok"]
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_textual_result_rules_allow_error_text_in_passing_test_output(
+    db, owner, tmp_path, broadcast_stub,
+):
+    class TextPlan(StubPlan):
+        def as_dict(self, *, redact_secrets=True):
+            data = super().as_dict(redact_secrets=redact_secrets)
+            data["result"].update({"required_output": ["GOOD", "Ok"]})
+            return data
+
+    class PassingTestBackend(ControlledBackend):
+        async def run(self, *, execution_id, plan, workspace, execution_dir, emit, started):
+            await started({"job": execution_id})
+            await emit("stderr", 'priority: ERROR\nTotal 1 suite:\n\t1 - GOOD\nOk\n')
+            return BackendResult(0, summary="pipeline exited zero")
+
+    service = ExecutionService(
+        db=db, engine=_engine(), workspace=tmp_path, catalog=SimpleNamespace(),
+        backend=PassingTestBackend(), execution_root=tmp_path / "runs",
+    )
+    await service.initialize()
+    execution_id = (await service.start(session_id=owner, plan=TextPlan()))["id"]
+    row = await _eventually(lambda: _textual_done(db, execution_id))
+    assert row["status"] == "succeeded"
+    assert row["result"]["outcome"] == "succeeded"
     await service.shutdown()
 
 

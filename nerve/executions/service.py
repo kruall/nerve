@@ -123,8 +123,13 @@ class ExecutionService:
                 "session_reservation": {"pool": "ydb-builders", "worktree": str(top)},
                 "ydb_snapshot": snap,
                 "steps": [{"id": "ydb", "transport": "resource", "resource_slot": "session", "executable": "./ya", "argv": [{"type": "literal", "value": x} for x in argv], "cwd": "workspace"}],
+                # ya test writes test-owned stderr verbatim.  Valid passing
+                # tests can therefore contain words such as ERROR (for
+                # example, logging-level tests).  The reviewed wrapper's
+                # trustworthy success markers are the GOOD summary and final
+                # Ok; broad forbidden substrings produce false failures.
                 "result": {"success_exit_codes": [0], "required_output": (["GOOD", "Ok"] if test else []),
-                           "forbidden_output": (["FAIL", "FAILED", "ERROR", "BAD"] if test else [])},
+                           "forbidden_output": []},
                 "timeout_seconds": 86400, "cancellation": {"mode": "interrupt", "grace_seconds": 10, "run_cleanup": False}}
         try:
             return await self._start_serialized(session_id=session_id, plan=plan,
