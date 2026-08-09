@@ -120,3 +120,33 @@ async def test_session_reservation_can_reacquire_after_explicit_release(db, tmp_
     assert second["state"] == "active"
     assert second["lease"]["state"] == "active"
     assert second["lease_id"] != first["lease_id"]
+
+
+@pytest.mark.asyncio
+async def test_session_reservation_can_reacquire_after_operator_recovery(db, tmp_path):
+    service = await _service(db)
+    await db.create_session("session-a")
+    await service.reserve_for_session(
+        session_id="session-a", pool="builders", worktree=tmp_path,
+    )
+    assert await service.release_session_reservation(
+        session_id="session-a",
+        remote_quiescence_confirmed=False,
+        reason="uncertain remote state",
+    )
+    assert (await db.get_session_resource_reservation("session-a"))["state"] == "quarantined"
+
+    await service.recover_host(
+        host_id="builder-1",
+        requested_by="operator",
+        remote_quiescence_confirmed=True,
+    )
+    recovered = await db.get_session_resource_reservation("session-a")
+    assert recovered["state"] == "released"
+    assert recovered["quarantine_reason"] is None
+
+    reacquired = await service.reserve_for_session(
+        session_id="session-a", pool="builders", worktree=tmp_path,
+    )
+    assert reacquired["state"] == "active"
+    assert reacquired["lease"]["state"] == "active"

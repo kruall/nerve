@@ -323,6 +323,12 @@ class ResourceStore:
             if not result.rowcount:
                 raise KeyError(host_id)
             await self.db.execute("UPDATE resource_leases SET state='released', released_at=? WHERE host_id=? AND state='quarantined'", (now, host_id))
+            await self.db.execute(
+                """UPDATE session_resource_reservations
+                   SET state='released', released_at=?, quarantine_reason=NULL
+                   WHERE host_id=? AND state='quarantined'""",
+                (now, host_id),
+            )
         row = await self.get_resource_host(host_id)
         assert row is not None
         return row
