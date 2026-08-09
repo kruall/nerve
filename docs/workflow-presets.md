@@ -34,6 +34,12 @@ Use `workflow_preset_list`, `workflow_preset_describe`,
 under `/api/workflow-presets`. The initial catalog does not schedule stages or
 run agents: `start` delegates the already-pinned plan to an installed controller.
 
+The web UI rehydrates preset workflows from `/api/preset-workflows` and uses
+WebSocket `workflow_update` only as an invalidation signal. The public shape
+intentionally excludes inputs, prompts, raw arguments, skill contents and
+artifacts. `available_actions` is controller-owned and currently empty;
+`spent_usd` is `null` until the controller exposes normalized stage metering.
+
 An agent stage is resolved before its session starts. The controller expands
 required skill dependencies, pins their exact revisions, resolves the explicit
 default-deny `server.tool` allowlist and captures its input schemas, then
