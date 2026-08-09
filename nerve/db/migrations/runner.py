@@ -19,11 +19,19 @@ def discover_migrations() -> list[tuple[int, str]]:
     """
     migrations_dir = Path(__file__).parent
     results: list[tuple[int, str]] = []
+    modules_by_version: dict[int, str] = {}
     for info in pkgutil.iter_modules([str(migrations_dir)]):
         name = info.name
         if name.startswith("v") and "_" in name:
             try:
                 version = int(name.split("_", 1)[0][1:])
+                previous = modules_by_version.get(version)
+                if previous is not None:
+                    raise RuntimeError(
+                        f"Duplicate database migration version V{version}: "
+                        f"{previous} and {name}"
+                    )
+                modules_by_version[version] = name
                 results.append((version, name))
             except ValueError:
                 continue
