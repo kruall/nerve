@@ -115,10 +115,12 @@ class SshConnectionCatalog:
 
 
 class RemoteSupervisor(Protocol):
+    async def sync(self, connection: SshConnection, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
     async def start(self, connection: SshConnection, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
     async def status(self, connection: SshConnection, job_id: str, fencing_token: int, root: str) -> Mapping[str, Any]: ...
     async def tail(self, connection: SshConnection, job_id: str, fencing_token: int, cursor: int, root: str) -> Mapping[str, Any]: ...
     async def cancel(self, connection: SshConnection, job_id: str, fencing_token: int, grace_seconds: int, mode: str, root: str) -> Mapping[str, Any]: ...
+    async def files(self, connection: SshConnection, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
 
 
 class OpenSshSupervisor:
@@ -144,13 +146,16 @@ class OpenSshSupervisor:
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise SshTransportError("SSH supervisor returned invalid JSON") from exc
         if not isinstance(response, Mapping) or response.get("ok") is not True:
-            raise SshTransportError("SSH supervisor rejected request")
+            detail = str(response.get("error", ""))[:300] if isinstance(response, Mapping) else ""
+            raise SshTransportError("SSH supervisor rejected request" + (": " + detail if detail else ""))
         return response
 
     async def start(self, connection, request): return await self._rpc(connection, "start", request)
+    async def sync(self, connection, request): return await self._rpc(connection, "sync", request)
     async def status(self, connection, job_id, fencing_token, root): return await self._rpc(connection, "status", {"job_id": job_id, "fencing_token": fencing_token, "root": root})
     async def tail(self, connection, job_id, fencing_token, cursor, root): return await self._rpc(connection, "tail", {"job_id": job_id, "fencing_token": fencing_token, "cursor": cursor, "root": root})
     async def cancel(self, connection, job_id, fencing_token, grace_seconds, mode, root): return await self._rpc(connection, "cancel", {"job_id": job_id, "fencing_token": fencing_token, "grace_seconds": grace_seconds, "mode": mode, "root": root})
+    async def files(self, connection, request): return await self._rpc(connection, "files", request)
 
 
 class SshExecutionBackend:
@@ -175,6 +180,30 @@ class SshExecutionBackend:
             raise SshTransportError("selected lease references unknown host")
         return self.connections.resolve(str(host["connection_ref"])), remote[0], int(lease["fencing_token"])
 
+    async def inspect_ydb_files(self, *, session_id: str, reservation: Mapping[str, Any], operation: str, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
+        if operation not in {"list", "find", "read"}: raise SshTransportError("invalid YDB file operation")
+        host, lease = self.inventory.hosts.get(str(reservation.get("host_id"))), reservation.get("lease")
+        if not isinstance(host, Mapping) or not isinstance(lease, Mapping): raise SshTransportError("session reservation has no usable host")
+        connection = self.connections.resolve(str(host.get("connection_ref"))); root = connection.remote_roots[0]
+        request: dict[str, Any] = {
+            "root": root,
+            "session_id": session_id,
+            "fencing_token": int(lease["fencing_token"]),
+            "action": operation,
+        }
+        if operation == "list":
+            request.update(path=arguments.get("path", "."), depth=arguments.get("depth", 1),
+                           limit=arguments.get("limit", 200))
+        elif operation == "find":
+            request.update(relative_root=arguments.get("root", "."),
+                           pattern=arguments.get("pattern"), limit=arguments.get("limit", 200))
+        else:
+            request.update(path=arguments.get("path"), offset=arguments.get("offset", 0),
+                           limit=arguments.get("limit", 65536))
+        reply = await self.supervisor.files(connection, request)
+        if len(json.dumps(reply, separators=(",", ":"), ensure_ascii=False).encode()) > 512 * 1024: raise SshTransportError("remote file response exceeds safety limit")
+        return dict(reply)
+
     @staticmethod
     def _argv(step: Mapping[str, Any], plan: Mapping[str, Any]) -> list[str]:
         values = dict(plan.get("arguments", {}))
@@ -190,12 +219,21 @@ class SshExecutionBackend:
     async def run(self, *, execution_id: str, plan: Mapping[str, Any], workspace: Path, execution_dir: Path, emit: LogSink, started: StartedSink) -> BackendResult:
         connection, step, token = self._job(execution_id, plan)
         root = _remote_path(str(plan.get("remote_root", connection.remote_roots[0])), connection.remote_roots)
+        remote_workspace = root
+        snapshot = plan.get("ydb_snapshot")
+        # Recovery attaches to the durable supervisor job; it must never
+        # rewrite that job's checkout while it may still be compiling.
+        if isinstance(snapshot, Mapping) and not plan.get("_remote_existing_job"):
+            request = {"execution_id": execution_id, "lease_id": next(x["id"] for x in plan["selected_leases"] if x.get("slot") == step.get("resource_slot")),
+                       "fencing_token": token, "root": root, "session_id": str(plan.get("session_id", "")), "snapshot": dict(snapshot)}
+            reply = await self.supervisor.sync(connection, request)
+            remote_workspace = _remote_path(str(reply.get("workspace") or ""), connection.remote_roots)
         existing = plan.get("_remote_existing_job")
         if existing:
             job_id = str(existing)
         else:
             request = {"execution_id": execution_id, "lease_id": next(x["id"] for x in plan["selected_leases"] if x.get("slot") == step.get("resource_slot")), "fencing_token": token,
-                       "root": root, "argv": self._argv(step, plan), "cwd": str(step.get("cwd", "workspace")), "environment": {k: os.environ[k] for k in connection.environment_allowlist if k in os.environ}}
+                       "root": root, "argv": self._argv(step, plan), "cwd": remote_workspace if step.get("cwd") == "workspace" else "job", "environment": {k: os.environ[k] for k in connection.environment_allowlist if k in os.environ}}
             reply = await self.supervisor.start(connection, request)
             job_id = str(reply.get("job_id") or "")
             if not job_id or int(reply.get("fencing_token", -1)) != token:

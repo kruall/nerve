@@ -219,6 +219,11 @@ class SessionStore:
         )
 
     async def delete_session(self, session_id: str) -> None:
+        # A direct DB deletion is also used by non-gateway cleanup paths.
+        # Preserve fencing safety even when no resource service is running.
+        await self.quarantine_active_session_reservation(
+            session_id, reason="session deleted before remote quiescence was confirmed",
+        )
         async with self._atomic():
             await self.db.execute("DELETE FROM session_file_snapshots WHERE session_id = ?", (session_id,))
             await self.db.execute("DELETE FROM session_events WHERE session_id = ?", (session_id,))

@@ -24,6 +24,7 @@ from nerve.executions.backend import (
 )
 from nerve.executions.catalog import CompiledExecutionPlan, ExecutionCatalog
 from nerve.executions.public import public_execution
+from nerve.executions.ydb import snapshot as ydb_snapshot, validate_worktree
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,7 @@ class ExecutionService:
         backend: ExecutionBackend | None = None,
         resource_manager: ResourceLeaseManager | None = None,
         execution_root: Path | None = None,
+        ydb_worktree_root: Path | None = None,
     ) -> None:
         self.db = db
         self.engine = engine
@@ -68,6 +70,41 @@ class ExecutionService:
         self._stopping = False
         self._continuations_ready = False
         self._terminal_changed = asyncio.Condition()
+        self.ydb_worktree_root = Path(ydb_worktree_root) if ydb_worktree_root else None
+
+    async def start_ydb(self, *, session_id: str, kind: str, worktree: str, args: list[str], auto_continue: bool = True) -> Mapping[str, Any]:
+        """Start the two reviewed YDB commands; callers choose neither host nor SSH."""
+        if kind not in {"ydb_make", "ydb_test"} or not all(isinstance(x, str) and "\0" not in x for x in args):
+            raise ValueError("invalid YDB operation")
+        top = validate_worktree(worktree, self.ydb_worktree_root)
+        snap = ydb_snapshot(top)
+        test = kind == "ydb_test"
+        argv = ["make", "--build", "relwithdebinfo"] + (["-tA"] if test else []) + list(args)
+        plan = {"kind": kind, "profile_version": "1", "profile_hash": "built-in-ydb-v1",
+                "arguments": {"args": list(args)}, "resources": {"session": "ydb-builders"},
+                "session_reservation": {"pool": "ydb-builders", "worktree": str(top)},
+                "ydb_snapshot": snap,
+                "steps": [{"id": "ydb", "transport": "resource", "resource_slot": "session", "executable": "./ya", "argv": [{"type": "literal", "value": x} for x in argv], "cwd": "workspace"}],
+                "result": {"success_exit_codes": [0], "required_output": (["GOOD", "Ok"] if test else []),
+                           "forbidden_output": (["FAIL", "FAILED", "ERROR", "BAD"] if test else [])},
+                "timeout_seconds": 86400, "cancellation": {"mode": "interrupt", "grace_seconds": 10, "run_cleanup": False}}
+        return await self._start_serialized(session_id=session_id, plan=plan,
+            profile_snapshot={"kind": kind, "title": kind, "source": "built-in reviewed YDB operation"}, auto_continue=auto_continue)
+
+    async def inspect_ydb_files(self, *, session_id: str, operation: str, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
+        inspect = getattr(self.backend, "inspect_ydb_files", None)
+        use = getattr(self.resource_manager, "use_active_session_reservation", None)
+        if not callable(inspect) or not callable(use):
+            raise ValueError("YDB remote file inspection is unavailable")
+        async with use(session_id=session_id) as reservation:
+            return await inspect(session_id=session_id, reservation=reservation, operation=operation, arguments=arguments)
+
+    async def release_ydb_host(self, *, session_id: str) -> bool:
+        release = getattr(self.resource_manager, "release_session_reservation", None)
+        if not callable(release):
+            raise ValueError("YDB host release is unavailable")
+        return await release(session_id=session_id, remote_quiescence_confirmed=True,
+                             reason="owner explicitly released YDB session host")
 
     async def initialize(self, *, dispatch_continuations: bool = True) -> None:
         """Reconcile active rows and recover only unclaimed outbox items."""
@@ -253,11 +290,32 @@ class ExecutionService:
             return
         leases: Sequence[Mapping[str, Any]] = []
         try:
-            leases = await self.resource_manager.acquire(
-                execution_id=execution_id,
-                session_id=row["session_id"],
-                requests=row.get("resource_requests") or [],
-            )
+            reservation = row["plan"].get("session_reservation")
+            if reservation:
+                async with self.resource_manager.use_session_reservation(session_id=row["session_id"], pool=str(reservation["pool"]), worktree=str(reservation["worktree"])) as held:
+                    await self._run_with_leases(execution_id, row, [held["lease"]], held)
+                return
+            leases = await self.resource_manager.acquire(execution_id=execution_id, session_id=row["session_id"], requests=row.get("resource_requests") or [])
+            await self._run_with_leases(execution_id, row, leases, None)
+        except asyncio.CancelledError:
+            if not self._stopping:
+                await self.db.request_execution_cancel(execution_id, reason="lifecycle task cancelled")
+                await self.db.finalize_execution_cancelled(execution_id); await self._broadcast(execution_id)
+            raise
+        except Exception as exc:
+            if not self._stopping:
+                logger.warning("Execution %s failed in lifecycle (%s)", execution_id, type(exc).__name__)
+                won = await self.db.finish_execution(execution_id, status="failed", result={"outcome": "failed", "summary": "execution lifecycle failed before completion", "error": type(exc).__name__})
+                if not won: await self.db.finalize_execution_cancelled(execution_id)
+                await self._broadcast(execution_id)
+                if won: self._schedule_continuation(execution_id)
+        finally:
+            if leases and not self._stopping:
+                with contextlib.suppress(Exception): await self.resource_manager.release(execution_id=execution_id, leases=leases)
+
+    async def _run_with_leases(self, execution_id: str, row: Mapping[str, Any], leases: Sequence[Mapping[str, Any]], reservation: Mapping[str, Any] | None) -> None:
+        """The common durable backend path; a reservation lease is never released per command."""
+        try:
             # Persist lease selection before any backend call. If the daemon
             # dies in the next instruction, recovery can quarantine/release
             # the exact lease instead of losing ownership evidence.
@@ -322,34 +380,10 @@ class ExecutionService:
             if self._stopping:
                 return
             await self._finish_from_result(execution_id, plan, result)
-        except asyncio.CancelledError:
-            if not self._stopping:
-                await self.db.request_execution_cancel(execution_id, reason="lifecycle task cancelled")
-                await self.db.finalize_execution_cancelled(execution_id)
-                await self._broadcast(execution_id)
-            raise
-        except Exception as exc:
-            if self._stopping:
-                return
-            logger.warning("Execution %s failed in lifecycle (%s)", execution_id, type(exc).__name__)
-            won = await self.db.finish_execution(
-                execution_id,
-                status="failed",
-                result={
-                    "outcome": "failed",
-                    "summary": "execution lifecycle failed before completion",
-                    "error": type(exc).__name__,
-                },
-            )
-            if not won:
-                await self.db.finalize_execution_cancelled(execution_id)
-            await self._broadcast(execution_id)
-            if won:
-                self._schedule_continuation(execution_id)
         finally:
-            if leases and not self._stopping:
-                with contextlib.suppress(Exception):
-                    await self.resource_manager.release(execution_id=execution_id, leases=leases)
+            # Resource lifetime is managed by the caller: per-execution leases
+            # are released in _run, while session reservations remain pinned.
+            pass
 
     async def _finish_from_result(
         self,

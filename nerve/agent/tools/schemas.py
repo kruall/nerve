@@ -69,6 +69,18 @@ EXECUTION_KIND_START_SCHEMA = {
     "additionalProperties": False,
 }
 
+_YDB_OPERATION_PROPERTIES = {
+    "worktree": {"type": "string", "description": "Configured local YDB Git worktree top-level"},
+    "args": {"type": "array", "items": {"type": "string"}, "default": [], "description": "Additional ya argv elements"},
+    "detached": {"type": "boolean", "default": False},
+}
+YDB_MAKE_SCHEMA = {"type": "object", "properties": _YDB_OPERATION_PROPERTIES, "required": ["worktree"], "additionalProperties": False}
+YDB_TEST_SCHEMA = {"type": "object", "properties": _YDB_OPERATION_PROPERTIES, "required": ["worktree"], "additionalProperties": False}
+YDB_FILE_LIST_SCHEMA = {"type": "object", "properties": {"path": {"type": "string", "default": "."}, "depth": {"type": "integer", "minimum": 0, "maximum": 20, "default": 1}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 200}}, "required": [], "additionalProperties": False}
+YDB_FILE_FIND_SCHEMA = {"type": "object", "properties": {"root": {"type": "string", "default": "."}, "pattern": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 200}}, "required": ["pattern"], "additionalProperties": False}
+YDB_FILE_READ_SCHEMA = {"type": "object", "properties": {"path": {"type": "string"}, "offset": {"type": "integer", "minimum": 0, "default": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 131072, "default": 65536}}, "required": ["path"], "additionalProperties": False}
+YDB_HOST_RELEASE_SCHEMA = {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
+
 EXECUTION_STATUS_SCHEMA = {
     "type": "object",
     "properties": {

@@ -31,6 +31,88 @@ def _row(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
 
 
 class ResourceStore:
+    async def get_session_resource_reservation(self, session_id: str) -> dict[str, Any] | None:
+        async with self.db.execute(
+            "SELECT * FROM session_resource_reservations WHERE session_id=?", (session_id,)
+        ) as cursor:
+            return _row(await cursor.fetchone())
+
+    async def create_session_resource_reservation(
+        self, *, session_id: str, pool: str, worktree_identity: str, lease: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Persist a reservation only after its normal exclusive lease exists."""
+        now = utc_now_iso()
+        async with self._atomic():
+            insert = await self.db.execute(
+                """INSERT INTO session_resource_reservations
+                   (session_id, pool, host_id, lease_id, worktree_identity, state, created_at)
+                   VALUES (?, ?, ?, ?, ?, 'active', ?)
+                   ON CONFLICT(session_id) DO UPDATE SET
+                     pool=excluded.pool,
+                     host_id=excluded.host_id,
+                     lease_id=excluded.lease_id,
+                     worktree_identity=excluded.worktree_identity,
+                     state='active',
+                     created_at=excluded.created_at,
+                     released_at=NULL,
+                     quarantine_reason=NULL
+                   WHERE session_resource_reservations.state='released'""",
+                (session_id, pool, lease["host_id"], lease["id"], worktree_identity, now),
+            )
+            if not insert.rowcount:
+                raise ValueError("session reservation already exists and is not replaceable")
+            await self.db.execute(
+                """INSERT INTO resource_events(event_type, host_id, execution_id, lease_id, detail, created_at)
+                   VALUES ('session_reservation_acquired', ?, ?, ?, ?, ?)""",
+                (lease["host_id"], lease["execution_id"], lease["id"], session_id, now),
+            )
+        row = await self.get_session_resource_reservation(session_id)
+        assert row is not None
+        return row
+
+    async def settle_session_resource_reservation(
+        self, *, session_id: str, state: str, reason: str | None = None,
+    ) -> bool:
+        if state not in {"released", "quarantined"}:
+            raise ValueError("invalid reservation state")
+        result = await self._write(
+            """UPDATE session_resource_reservations
+               SET state=?, released_at=?, quarantine_reason=?
+               WHERE session_id=? AND state='active'""",
+            (state, utc_now_iso(), reason[:500] if reason else None, session_id),
+        )
+        return bool(result.rowcount)
+
+    async def list_active_session_resource_reservations(self) -> list[dict[str, Any]]:
+        async with self.db.execute(
+            "SELECT * FROM session_resource_reservations WHERE state='active' ORDER BY created_at"
+        ) as cursor:
+            return [_row(row) async for row in cursor]
+
+    async def quarantine_active_session_reservation(self, session_id: str, *, reason: str) -> bool:
+        """Last-resort DB lifecycle guard used when a session is deleted."""
+        now = utc_now_iso()
+        async with self._atomic():
+            async with self.db.execute(
+                "SELECT host_id, lease_id FROM session_resource_reservations WHERE session_id=? AND state='active'",
+                (session_id,),
+            ) as cursor:
+                reservation = await cursor.fetchone()
+            if reservation is None:
+                return False
+            updated = await self.db.execute(
+                """UPDATE resource_leases SET state='quarantined', revoking_at=COALESCE(revoking_at, ?), quarantine_reason=?
+                   WHERE id=? AND state IN ('active','revoking')""",
+                (now, reason[:500], reservation["lease_id"]),
+            )
+            if not updated.rowcount:
+                return False
+            await self.db.execute(
+                "UPDATE resource_hosts SET quarantined=1, quarantine_reason=?, updated_at=? WHERE id=?",
+                (reason[:500], now, reservation["host_id"]),
+            )
+        return True
+
     async def enqueue_resource_request(self, *, request_id: str, execution_id: str,
                                        session_id: str, slot: str, pool: str) -> dict[str, Any]:
         now = utc_now_iso()

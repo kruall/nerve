@@ -46,3 +46,27 @@ def test_remote_supervisor_rejects_stale_fencing_token(tmp_path):
     # reaps it.  Reporting ambiguity as non-quiescent is the safe outcome: the
     # lifecycle quarantines the lease rather than releasing the physical host.
     assert cancelled["quiescent"] is False
+
+
+def test_remote_supervisor_files_are_fenced_relative_and_text_only(tmp_path):
+    session = "session-a"; ident = remote_supervisor.hashlib.sha256(session.encode()).hexdigest()[:24]
+    checkout = tmp_path / ".nerve-ydb-worktrees" / ident; checkout.mkdir(parents=True)
+    (tmp_path / ".nerve-ydb-fences").mkdir()
+    (tmp_path / ".nerve-ydb-fences" / (ident + ".json")).write_text('{"fencing_token":7}')
+    (checkout / "a.txt").write_text("hello")
+    request = {"root": str(tmp_path), "session_id": session, "fencing_token": 7}
+    assert remote_supervisor._files({**request, "action": "list", "path": "."})["entries"][0]["path"] == "a.txt"
+    assert remote_supervisor._files({**request, "action": "read", "path": "a.txt"})["text"] == "hello"
+    assert remote_supervisor._files({
+        **request, "action": "find", "relative_root": ".", "pattern": "*.txt",
+    })["entries"] == ["a.txt"]
+    (checkout / "binary").write_bytes(b"bad\0data")
+    with pytest.raises(ValueError, match="binary"):
+        remote_supervisor._files({**request, "action": "read", "path": "binary"})
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret")
+    (checkout / "link").symlink_to(outside)
+    with pytest.raises(ValueError, match="symlink escapes"):
+        remote_supervisor._files({**request, "action": "read", "path": "link"})
+    with pytest.raises(ValueError, match="escapes"):
+        remote_supervisor._files({**request, "action": "read", "path": "../secret"})

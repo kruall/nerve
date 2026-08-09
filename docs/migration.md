@@ -6,6 +6,15 @@
 
 Nerve replaces OpenClaw. This guide covers migrating workspace files, cron jobs, tasks, and memory from the existing OpenClaw setup.
 
+## Session host reservations
+
+The resource migration v049 adds durable session-scoped host reservations. A
+future remote command supplies only a reviewed pool and local worktree; Nerve
+selects a host, pins the canonical worktree identity, and serializes commands
+that use that reservation. Reservations survive daemon restart. Session archive
+or deletion quarantines a host whenever remote quiescence cannot be proven;
+operators must use the existing confirmed host recovery flow before reuse.
+
 ## Workspace Files
 
 Copy identity and memory files from your OpenClaw workspace:

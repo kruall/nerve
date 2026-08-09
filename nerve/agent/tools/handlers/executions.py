@@ -18,6 +18,12 @@ from nerve.agent.tools.schemas import (
     EXECUTION_LIST_SCHEMA,
     EXECUTION_STATUS_SCHEMA,
     EXECUTION_TAIL_SCHEMA,
+    YDB_MAKE_SCHEMA,
+    YDB_TEST_SCHEMA,
+    YDB_FILE_LIST_SCHEMA,
+    YDB_FILE_FIND_SCHEMA,
+    YDB_FILE_READ_SCHEMA,
+    YDB_HOST_RELEASE_SCHEMA,
 )
 from nerve.executions import ExecutionCatalog, OperationValidationError
 from nerve.executions.public import DEFAULT_LOG_TAIL_LINES, public_execution, public_log_tail
@@ -114,6 +120,57 @@ async def execution_kind_start_handler(ctx: ToolContext, args: dict) -> ToolResu
     })
 
 
+async def _ydb_handler(ctx: ToolContext, args: dict, kind: str) -> ToolResult:
+    service = _service(ctx)
+    if service is None:
+        return ToolResult.text("Execution lifecycle service is unavailable.", is_error=True)
+    try:
+        values = args.get("args", [])
+        if not isinstance(values, list):
+            raise ValueError("args must be an array")
+        started = await service.start_ydb(session_id=ctx.session_id, kind=kind,
+                                          worktree=str(args.get("worktree") or ""), args=values,
+                                          auto_continue=bool(args.get("detached", False)))
+        if not bool(args.get("detached", False)):
+            started = await service.join_execution(execution_id=str(started["id"]), session_id=ctx.session_id)
+    except Exception as exc:
+        logger.warning("YDB operation rejected (%s)", type(exc).__name__)
+        return ToolResult.text("Could not start YDB operation: worktree or reviewed YDB service rejected the request.", is_error=True)
+    return _json({"kind": kind, "execution": public_execution(started)})
+
+
+async def ydb_make_handler(ctx: ToolContext, args: dict) -> ToolResult:
+    return await _ydb_handler(ctx, args, "ydb_make")
+
+
+async def ydb_test_handler(ctx: ToolContext, args: dict) -> ToolResult:
+    return await _ydb_handler(ctx, args, "ydb_test")
+
+
+async def _ydb_files_handler(ctx: ToolContext, args: dict, operation: str) -> ToolResult:
+    service = _service(ctx)
+    if service is None: return ToolResult.text("Execution lifecycle service is unavailable.", is_error=True)
+    try: return _json(await service.inspect_ydb_files(session_id=ctx.session_id, operation=operation, arguments=args))
+    except Exception as exc:
+        logger.warning("YDB file operation rejected (%s)", type(exc).__name__)
+        return ToolResult.text("Could not inspect files in this session's YDB checkout.", is_error=True)
+
+
+async def ydb_file_list_handler(ctx: ToolContext, args: dict) -> ToolResult: return await _ydb_files_handler(ctx, args, "list")
+async def ydb_file_find_handler(ctx: ToolContext, args: dict) -> ToolResult: return await _ydb_files_handler(ctx, args, "find")
+async def ydb_file_read_handler(ctx: ToolContext, args: dict) -> ToolResult: return await _ydb_files_handler(ctx, args, "read")
+
+
+async def ydb_host_release_handler(ctx: ToolContext, args: dict) -> ToolResult:
+    service = _service(ctx)
+    if service is None: return ToolResult.text("Execution lifecycle service is unavailable.", is_error=True)
+    try: released = await service.release_ydb_host(session_id=ctx.session_id)
+    except Exception as exc:
+        logger.warning("YDB host release rejected (%s)", type(exc).__name__)
+        return ToolResult.text("Could not safely release this session's YDB host.", is_error=True)
+    return _json({"released": released})
+
+
 def _service(ctx: ToolContext):
     return ctx.execution_service or getattr(ctx.engine, "execution_service", None)
 
@@ -203,6 +260,12 @@ async def execution_list_handler(ctx: ToolContext, args: dict) -> ToolResult:
 
 
 EXECUTION_SPECS = [
+    ToolSpec("ydb_make", "Synchronize a configured YDB worktree to the session's reviewed builder and run ya make.", YDB_MAKE_SCHEMA, ydb_make_handler),
+    ToolSpec("ydb_test", "Synchronize a configured YDB worktree to the session's reviewed builder and run ya tests.", YDB_TEST_SCHEMA, ydb_test_handler),
+    ToolSpec("ydb_file_list", "List bounded paths in this session's synchronized YDB checkout.", YDB_FILE_LIST_SCHEMA, ydb_file_list_handler),
+    ToolSpec("ydb_file_find", "Find bounded paths in this session's synchronized YDB checkout.", YDB_FILE_FIND_SCHEMA, ydb_file_find_handler),
+    ToolSpec("ydb_file_read", "Read bounded UTF-8 text from this session's synchronized YDB checkout.", YDB_FILE_READ_SCHEMA, ydb_file_read_handler),
+    ToolSpec("ydb_host_release", "Release this session's idle YDB builder host.", YDB_HOST_RELEASE_SCHEMA, ydb_host_release_handler),
     ToolSpec(
         "execution_kind_list",
         "List compact summaries of configured declarative execution kinds. Use describe only for the kind you need.",

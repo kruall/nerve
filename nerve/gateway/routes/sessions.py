@@ -532,6 +532,9 @@ async def delete_session(session_id: str, user: dict = Depends(require_auth)):
             await engine.execution_service.cancel_session(
                 session_id, reason="session deleted",
             )
+        resource_service = getattr(engine, "resource_service", None)
+        if resource_service is not None:
+            await resource_service.cleanup_session_reservation(session_id)
         # Disconnect client
         client = engine.sessions.remove_client(session_id)
         if client:

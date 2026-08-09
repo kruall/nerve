@@ -141,6 +141,31 @@ The built-in local backend executes literal argv with no shell. Resource
 transport requires a configured inventory/backend implementation; lease
 acquisition and release remain service-owned and are never model-managed.
 
+## Session-sticky YDB builders
+
+When `resources.ydb_worktree_root` is configured, the owner-session tools
+`ydb_make(worktree, args)` and `ydb_test(worktree, args)` are available. They
+only accept a Git top-level below that local allowlist; neither accepts a host,
+remote path, connection reference, or shell command. Both use the fixed
+`ydb-builders` pool and retain one fenced host reservation for the session and
+worktree.
+
+Before each command, Nerve snapshots `HEAD`, tracked changes, and non-ignored
+untracked files without touching the index or worktree. The named SSH
+supervisor receives a thin object pack above a pre-provisioned bare cache,
+atomically switches a session-specific checkout under its configured root,
+preserves ignored build cache, and removes stale non-ignored files. It then
+executes literal argv:
+`./ya make --build relwithdebinfo …` (and adds `-tA` for `ydb_test`). Test
+success also requires `GOOD` and `Ok` output and rejects common failure
+markers, even when the exit status is zero.
+
+The owner session can inspect that pinned checkout with `ydb_file_list`,
+`ydb_file_find`, and `ydb_file_read`; these accept only relative checkout
+paths and return bounded deterministic results. `ydb_host_release()` releases
+an idle reservation so the next YDB command reserves again; active or uncertain
+remote work is quarantined rather than released.
+
 ## Durable lifecycle and recovery
 
 Executions use the persistent states `queued`, `starting`, `running`,

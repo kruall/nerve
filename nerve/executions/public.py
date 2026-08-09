@@ -278,10 +278,20 @@ def public_resource_snapshot(raw: Mapping[str, Any]) -> dict[str, Any]:
             )
             if (value := _scalar(request.get(key))) is not None
         })
+    reservations: list[dict[str, Any]] = []
+    for reservation in raw.get("session_reservations", []):
+        if not isinstance(reservation, Mapping):
+            continue
+        reservations.append({
+            key: value
+            for key in ("session_id", "pool", "host_id", "lease_id", "state", "created_at")
+            if (value := _scalar(reservation.get(key))) is not None
+        })
     return {
         "pools": pools,
         "hosts": hosts,
         "leases": leases,
         "queue": queue,
+        "session_reservations": reservations,
         "updated_at": _scalar(raw.get("updated_at")),
     }

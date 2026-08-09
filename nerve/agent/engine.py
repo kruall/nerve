@@ -593,8 +593,17 @@ class AgentEngine:
             catalog=self.execution_catalog,
             resource_manager=resource_service,
             backend=backend,
+            ydb_worktree_root=(getattr(self.config, "resources", {}).get("ydb_worktree_root")),
         )
         self.set_execution_service(execution_service)
+        # Archive is a hard lifecycle boundary for session-owned remote state.
+        # The reservation layer quarantines if quiescence cannot be proven.
+        previous_archive = self.sessions._on_archive
+        async def cleanup_reservation_for_archive(session_id: str) -> bool:
+            first = await previous_archive(session_id) if previous_archive else False
+            second = await resource_service.cleanup_session_reservation(session_id)
+            return bool(first or second)
+        self.sessions._on_archive = cleanup_reservation_for_archive
         await execution_service.initialize(dispatch_continuations=False)
 
         # Recover orphaned sessions from previous crash
