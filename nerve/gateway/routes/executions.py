@@ -319,6 +319,23 @@ async def retry_execution(
     return {"execution": public_execution(row)}
 
 
+@router.post("/api/sessions/{session_id}/executions/{execution_id}/dismiss")
+async def dismiss_execution(
+    session_id: str,
+    execution_id: str,
+    user: dict = Depends(require_auth),
+):
+    row = await _service_call(
+        "dismiss_execution",
+        execution_id=execution_id,
+        session_id=session_id,
+        requested_by=str(user.get("sub", "user")),
+    )
+    if not isinstance(row, Mapping):
+        raise HTTPException(status_code=503, detail="execution service returned an invalid record")
+    return {"execution": public_execution(row)}
+
+
 @router.get("/api/resources")
 async def list_resources(user: dict = Depends(require_auth)):
     raw = await _resource_call("resource_snapshot")

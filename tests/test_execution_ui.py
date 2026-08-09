@@ -68,6 +68,10 @@ class FakeExecutionService:
         self.calls.append(("retry", kwargs))
         return {**self.execution, "id": "exec-2", "status": "queued"}
 
+    async def dismiss_execution(self, **kwargs):
+        self.calls.append(("dismiss", kwargs))
+        return {**self.execution, "status": "succeeded", "dismissed_at": "2026-01-01T00:00:00+00:00"}
+
     async def resource_snapshot(self):
         return {
             "hosts": [{
@@ -106,6 +110,15 @@ def test_public_execution_drops_transport_details():
     }
     assert "backend_handle" not in public
     assert "hostname" not in public["selected_host"]
+
+
+def test_public_execution_exposes_dismissal_and_boolean_auto_continue():
+    public = public_execution({
+        "id": "exec-1", "session_id": "session-1", "kind": "build", "status": "succeeded",
+        "auto_continue": 0, "dismissed_at": "2026-01-01T00:00:00+00:00",
+    })
+    assert public["auto_continue"] is False
+    assert public["dismissed_at"] == "2026-01-01T00:00:00+00:00"
 
 
 def test_public_resource_snapshot_drops_connection_material():
@@ -151,6 +164,17 @@ async def test_execution_routes_are_bounded_and_preserve_profile_retry_choice(ui
     )
     assert retried["execution"]["id"] == "exec-2"
     assert ui_service.calls[-1][1]["profile_mode"] == "current"
+
+
+@pytest.mark.asyncio
+async def test_dismiss_route_is_session_scoped_and_returns_the_dismissed_record(ui_service):
+    from nerve.gateway.routes.executions import dismiss_execution
+
+    dismissed = await dismiss_execution("session-1", "exec-1", user={"sub": "operator"})
+    assert dismissed["execution"]["dismissed_at"] == "2026-01-01T00:00:00+00:00"
+    assert ui_service.calls[-1] == ("dismiss", {
+        "execution_id": "exec-1", "session_id": "session-1", "requested_by": "operator",
+    })
 
 
 @pytest.mark.asyncio

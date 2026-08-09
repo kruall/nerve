@@ -660,6 +660,29 @@ class ExecutionService:
         row = await self.db.get_execution(execution_id)
         return self._decorate(row) if row else None
 
+    async def dismiss_execution(
+        self, *, execution_id: str, session_id: str, requested_by: str,
+    ):
+        """Hide a settled execution from its owning session's panel.
+
+        The owner check is repeated in the database CAS, so a stale client
+        cannot dismiss a different session's row after a lookup race.
+        """
+        row = await self.db.get_execution(execution_id)
+        if row is None or row.get("session_id") != session_id:
+            raise KeyError(execution_id)
+        if row.get("dismissed_at"):
+            return self._decorate(row)
+        if not await self.db.dismiss_session_execution(execution_id, session_id=session_id):
+            current = await self.db.get_execution(execution_id)
+            if current is not None and current.get("session_id") == session_id and current.get("dismissed_at"):
+                return self._decorate(current)
+            raise ValueError("execution is not eligible for dismissal")
+        current = await self.db.get_execution(execution_id)
+        assert current is not None
+        await self._broadcast(execution_id)
+        return self._decorate(current)
+
     async def join_execution(self, *, execution_id: str, session_id: str):
         row = await self.db.get_execution(execution_id)
         if row is None or row.get("session_id") != session_id:

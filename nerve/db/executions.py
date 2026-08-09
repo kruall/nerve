@@ -94,7 +94,7 @@ class ExecutionStore:
         include_terminal: bool = True,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
-        where = "session_id = ?"
+        where = "session_id = ? AND dismissed_at IS NULL"
         params: list[Any] = [session_id]
         if not include_terminal:
             placeholders = ",".join("?" for _ in ACTIVE_EXECUTION_STATUSES)
@@ -213,6 +213,28 @@ class ExecutionStore:
                 status, json.dumps(dict(result)), now, now, execution_id,
                 *expected,
             ),
+        )
+        return (update.rowcount or 0) == 1
+
+    async def dismiss_session_execution(
+        self, execution_id: str, *, session_id: str,
+    ) -> bool:
+        """CAS-dismiss a terminal row only after its continuation is settled.
+
+        This intentionally changes no execution, lease, log, result, or audit
+        data; ``dismissed_at`` only controls the session-panel listing.
+        """
+        now = utc_now_iso()
+        update = await self._write(
+            """UPDATE executions
+               SET dismissed_at = ?, updated_at = ?, revision = revision + 1
+               WHERE id = ? AND session_id = ? AND dismissed_at IS NULL
+                 AND status IN ('succeeded', 'failed', 'cancelled', 'lost')
+                 AND (
+                     continuation_state IN ('completed', 'failed', 'suppressed')
+                     OR (auto_continue = 0 AND continuation_state = 'none')
+                 )""",
+            (now, now, execution_id, session_id),
         )
         return (update.rowcount or 0) == 1
 

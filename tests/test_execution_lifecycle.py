@@ -185,6 +185,67 @@ async def test_join_consumes_completion_without_autonomous_resume(
 
 
 @pytest.mark.asyncio
+async def test_dismiss_hides_only_settled_owner_execution_and_preserves_evidence(
+    db, owner, tmp_path, broadcast_stub,
+):
+    backend = ControlledBackend()
+    service = ExecutionService(
+        db=db, engine=_engine(), workspace=tmp_path, catalog=SimpleNamespace(),
+        backend=backend, execution_root=tmp_path / "runs",
+    )
+    await service.initialize()
+    started = await service.start(session_id=owner, plan=StubPlan(), auto_continue=False)
+    await backend.started_event.wait()
+
+    with pytest.raises(ValueError, match="not eligible"):
+        await service.dismiss_execution(
+            execution_id=started["id"], session_id=owner, requested_by="operator",
+        )
+    with pytest.raises(KeyError):
+        await service.dismiss_execution(
+            execution_id=started["id"], session_id="other-session", requested_by="operator",
+        )
+
+    backend.release_event.set()
+    row = await _eventually(lambda: _settled(db, started["id"]))
+    await db.append_execution_log(started["id"], stream="stdout", text="durable\n")
+    dismissed = await service.dismiss_execution(
+        execution_id=started["id"], session_id=owner, requested_by="operator",
+    )
+    again = await service.dismiss_execution(
+        execution_id=started["id"], session_id=owner, requested_by="operator",
+    )
+    assert dismissed["dismissed_at"] == again["dismissed_at"]
+    assert await service.list_executions(session_id=owner, include_terminal=True, limit=20) == []
+    assert (await service.get_execution(execution_id=started["id"]))["dismissed_at"]
+    assert (await service.tail_logs(execution_id=started["id"], limit=20, before=None))["entries"][-1]["text"] == "durable\n"
+    assert row["continuation_state"] == "suppressed"
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_db_dismiss_rejects_pending_continuation(db, owner):
+    await db.create_execution(
+        "exec-pending-dismiss", session_id=owner, kind="test.wait",
+        profile_version="1", profile_hash="hash", profile_snapshot={}, plan={},
+        resource_requests=[], auto_continue=True,
+    )
+    assert await db.transition_execution(
+        "exec-pending-dismiss", to_status="running", expect=("queued",),
+    )
+    assert await db.finish_execution(
+        "exec-pending-dismiss", status="succeeded", result={"outcome": "ok"},
+    )
+    assert not await db.dismiss_session_execution("exec-pending-dismiss", session_id=owner)
+    assert (await db.get_execution("exec-pending-dismiss"))["continuation_state"] == "pending"
+
+
+async def _settled(db, execution_id):
+    row = await db.get_execution(execution_id)
+    return row if row and row["status"] == "succeeded" else None
+
+
+@pytest.mark.asyncio
 async def test_forget_keeps_execution_running_and_suppresses_resume(
     db, owner, tmp_path, broadcast_stub,
 ):

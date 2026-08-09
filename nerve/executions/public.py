@@ -49,6 +49,10 @@ class ExecutionUiService(Protocol):
         self, *, execution_id: str, profile_mode: str, requested_by: str,
     ) -> Mapping[str, Any]: ...
 
+    async def dismiss_execution(
+        self, *, execution_id: str, session_id: str, requested_by: str,
+    ) -> Mapping[str, Any]: ...
+
 
 @runtime_checkable
 class ResourceUiService(Protocol):
@@ -98,12 +102,14 @@ def public_execution(raw: Mapping[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key in (
         "id", "session_id", "kind", "profile_version", "profile_hash",
-        "status", "revision", "requested_pool", "queue_position",
+        "status", "revision", "auto_continue", "requested_pool", "queue_position",
         "created_at", "queued_at", "started_at", "finished_at", "updated_at",
-        "duration_ms", "cancel_requested_at", "cancel_reason",
+        "duration_ms", "cancel_requested_at", "cancel_reason", "dismissed_at",
     ):
         value = _scalar(raw.get(key))
         if value is not None:
+            if key == "auto_continue":
+                value = bool(value)
             result[key] = value
 
     host = raw.get("selected_host")
