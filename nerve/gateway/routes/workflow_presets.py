@@ -28,7 +28,9 @@ async def start_workflow_preset(name: str, body: Any=Body(default={}), user: dic
     session_id = body.get("session_id")
     if not isinstance(session_id, str) or not session_id: raise HTTPException(422, "session_id is required")
     if not await get_deps().db.get_session(session_id): raise HTTPException(404, "owner session not found")
-    return {"plan":plan.as_dict(),"workflow":await service.start(session_id=session_id,plan=plan)}
+    # The persisted plan contains pinned prompts and raw specs.  The public
+    # workflow projection is the only start response the web client needs.
+    return {"workflow":await _public(await service.start(session_id=session_id,plan=plan))}
 
 def _service():
     service = getattr(get_deps().engine, "workflow_preset_service", None)
@@ -62,6 +64,6 @@ async def get_preset_workflow(workflow_id: str, user: dict = Depends(require_aut
 async def cancel_preset_workflow(workflow_id: str, user: dict = Depends(require_auth)):
     service = _service(); row = await service.db.get_preset_workflow(workflow_id)
     if row is None: raise HTTPException(404, "workflow not found")
-    await service.cancel_session(row["observer_session_id"], reason="Cancelled from web UI")
+    await service.cancel(workflow_id, reason="Cancelled from web UI")
     row = await service.db.get_preset_workflow(workflow_id)
     return await _public(row)

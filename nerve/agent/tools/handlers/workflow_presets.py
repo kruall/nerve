@@ -37,7 +37,11 @@ async def start_handler(ctx, args):
     if service is None: return ToolResult.text("Workflow preset controller is not installed; the preset can be validated but not started.", is_error=True)
     started = await service.start(session_id=ctx.session_id, plan=plan)
     if not isinstance(started, Mapping): return ToolResult.text("Workflow preset controller returned an invalid result.", is_error=True)
-    return _out({"plan":plan.as_dict(), "workflow":dict(started)})
+    # Keep start responses stable and safe for chat clients.  The durable row
+    # carries pinned inputs and stage specs; those must never be echoed into a
+    # tool-result block.
+    preset = plan.preset
+    return _out({"workflow_id": started.get("id"), "preset": {"name": preset.name, "title": preset.title}, "status": started.get("status"), "links": {"workflow": f"/api/preset-workflows/{started.get('id')}", "workflows": "/workflows"}})
 
 WORKFLOW_PRESET_SPECS = [
     ToolSpec("workflow_preset_list", "List compact summaries of reviewed workflow presets.", {"type":"object","properties":{},"required":[]}, list_handler),

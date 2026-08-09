@@ -81,6 +81,17 @@ async def test_cancelled_workflow_suppresses_final_continuation(db):
     engine.run.assert_not_awaited()
 
 @pytest.mark.asyncio
+async def test_cancel_targets_only_the_requested_preset_workflow(db):
+    await db.create_session("owner", source="web", backend="codex", status="idle")
+    engine = SimpleNamespace(run=AsyncMock())
+    service = WorkflowPresetService(db=db, engine=engine, executions=_Executions(), agent_runs=None)
+    await db.create_preset_workflow("one", session_id="owner", plan={}, preset_hash="x", spec_hash="one")
+    await db.create_preset_workflow("two", session_id="owner", plan={}, preset_hash="x", spec_hash="two")
+    assert await service.cancel("one", reason="test")
+    assert (await db.get_preset_workflow("one"))["status"] == "cancelling"
+    assert (await db.get_preset_workflow("two"))["status"] == "queued"
+
+@pytest.mark.asyncio
 async def test_codex_json_string_result_completes_stage_parent_and_outbox(db):
     engine, service = await _agent_stage(db)
     await service.initialize()

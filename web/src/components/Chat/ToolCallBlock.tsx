@@ -19,8 +19,10 @@ import { PlanToolBlock } from './tools/PlanToolBlock';
 import { SkillToolBlock } from './tools/SkillToolBlock';
 import { NotificationToolBlock } from './tools/NotificationToolBlock';
 import { WorkflowRunToolBlock } from './tools/WorkflowRunToolBlock';
+import { PresetWorkflowToolBlock } from './tools/PresetWorkflowToolBlock';
 
 const WORKFLOW_RUN_ID_RE = /wfr-[0-9a-f]{8}/;
+const PRESET_WORKFLOW_ID_RE = /wfp-[0-9a-f]+/;
 
 /**
  * First wfr-xxxxxxxx id in a workflow_run_* tool result. Both tools embed it:
@@ -43,6 +45,16 @@ function extractWorkflowRunId(result?: string): string | null {
   } catch { /* not JSON */ }
   const match = text.match(WORKFLOW_RUN_ID_RE);
   return match ? match[0] : null;
+}
+
+function extractPresetWorkflowId(result?: string): string | null {
+  if (!result) return null;
+  let text = result;
+  try {
+    const parsed: unknown = JSON.parse(result);
+    if (Array.isArray(parsed)) text = parsed.filter(b => b && b.type === 'text').map(b => String(b.text)).join('\n');
+  } catch { /* not JSON */ }
+  return text.match(PRESET_WORKFLOW_ID_RE)?.[0] ?? null;
 }
 
 const TOOL_ICONS: Record<string, typeof Terminal> = {
@@ -113,6 +125,11 @@ export function ToolCallBlock({ block }: { block: ToolCallBlockData }) {
     if (runId && !block.isError) {
       return <WorkflowRunToolBlock block={block} runId={runId} />;
     }
+  }
+
+  if (block.tool.includes('workflow_preset_start')) {
+    const workflowId = extractPresetWorkflowId(block.result);
+    if (workflowId && !block.isError) return <PresetWorkflowToolBlock block={block} workflowId={workflowId} />;
   }
 
   // MCP tool routing by name pattern

@@ -789,6 +789,7 @@ export const api = {
   validateWorkflowPreset: (name: string, inputs: Record<string, unknown>) => request<{ valid: boolean }> (`/workflow-presets/${encodeURIComponent(name)}/validate`, { method: 'POST', body: JSON.stringify({ inputs }) }),
   startWorkflowPreset: (name: string, inputs: Record<string, unknown>, session_id: string) => request<{ workflow: PresetWorkflow }>(`/workflow-presets/${encodeURIComponent(name)}/start`, { method: 'POST', body: JSON.stringify({ inputs, session_id }) }),
   listPresetWorkflows: () => request<{ workflows: PresetWorkflow[]; total: number }>('/preset-workflows'),
+  getPresetWorkflow: (id: string) => request<PresetWorkflow>(`/preset-workflows/${encodeURIComponent(id)}`),
   cancelPresetWorkflow: (id: string) => request<PresetWorkflow>(`/preset-workflows/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
 
   // Files

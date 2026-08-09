@@ -67,14 +67,24 @@ class WorkflowPresetService:
         changed = False
         for workflow in await self.db.active_preset_workflows():
             if workflow["observer_session_id"] != session_id: continue
-            changed |= await self.db.transition_preset_workflow(workflow["id"], to_status="cancelling")
-            for stage in await self.db.list_stage_runs(workflow["id"]):
-                if stage["status"] not in ACTIVE_STAGE_RUNS: continue
-                await self.db.transition_stage_run(stage["id"], to_status="cancelling")
-                if stage.get("child_type") == "execution": await self.executions.cancel_execution(execution_id=stage["child_id"], requested_by="workflow", reason=reason)
-                elif stage.get("child_type") == "agent" and self.agent_runs: await self.agent_runs.kill_run(stage["child_id"], reason=reason, killed_by="workflow")
-            await self._changed(workflow["id"])
+            changed |= await self.cancel(workflow["id"], reason=reason)
         return changed
+
+    async def cancel(self, workflow_id: str, *, reason: str) -> bool:
+        """Cancel exactly one workflow; chat cards must not affect siblings."""
+        changed = await self.db.transition_preset_workflow(workflow_id, to_status="cancelling")
+        if not changed:
+            return False
+        for stage in await self.db.list_stage_runs(workflow_id):
+            if stage["status"] not in ACTIVE_STAGE_RUNS:
+                continue
+            await self.db.transition_stage_run(stage["id"], to_status="cancelling")
+            if stage.get("child_type") == "execution":
+                await self.executions.cancel_execution(execution_id=stage["child_id"], requested_by="workflow", reason=reason)
+            elif stage.get("child_type") == "agent" and self.agent_runs:
+                await self.agent_runs.kill_run(stage["child_id"], reason=reason, killed_by="workflow")
+        await self._changed(workflow_id)
+        return True
 
     async def _drive(self, workflow_id: str) -> None:
         try:

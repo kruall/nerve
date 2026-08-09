@@ -1,8 +1,38 @@
 from pathlib import Path
+import json
+from types import SimpleNamespace
+
 import pytest
 import yaml
+
+from nerve.agent.tools.handlers.workflow_presets import start_handler
+from nerve.agent.tools.registry import ToolContext
 from nerve.executions import ExecutionCatalog
 from nerve.workflows.presets import WorkflowPresetCatalog, WorkflowPresetError
+
+
+@pytest.mark.asyncio
+async def test_preset_start_result_is_compact_and_does_not_echo_pinned_plan():
+    preset = SimpleNamespace(name="fast-discover", title="Fast discovery")
+    plan = SimpleNamespace(preset=preset, inputs={"prompt": "private prompt"})
+    service = SimpleNamespace(start=lambda **_: _started())
+    catalog = SimpleNamespace(compile=lambda *_: plan)
+    engine = SimpleNamespace(workflow_preset_catalog=catalog, workflow_preset_service=service)
+
+    result = await start_handler(ToolContext(session_id="session", engine=engine), {"name": "fast-discover", "inputs": {}})
+
+    body = json.loads(result.content[0]["text"])
+    assert body == {
+        "workflow_id": "wfp-123abc",
+        "preset": {"name": "fast-discover", "title": "Fast discovery"},
+        "status": "queued",
+        "links": {"workflow": "/api/preset-workflows/wfp-123abc", "workflows": "/workflows"},
+    }
+    assert "private prompt" not in result.content[0]["text"]
+
+
+async def _started():
+    return {"id": "wfp-123abc", "status": "queued", "plan": {"inputs": {"prompt": "private prompt"}}}
 
 def _execution(ws):
     p=ws/"config/executions/kinds/echo.yaml"; p.parent.mkdir(parents=True)
