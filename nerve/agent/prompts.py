@@ -21,7 +21,7 @@ _skill_manager: Any = None
 _PROMPT_TOOL_REGISTRY = None
 
 _WORKFLOW_DISCOVERY_TOOLS = frozenset({"workflow_preset_list", "workflow_preset_describe"})
-_WORKFLOW_OPTIONAL_TOOLS = frozenset({"workflow_preset_validate", "workflow_preset_start"})
+_WORKFLOW_OPTIONAL_TOOLS = frozenset({"workflow_preset_validate", "workflow_preset_start", "workflow_preset_join"})
 _WORKFLOW_DESCRIPTION_LIMIT = 200
 
 
@@ -156,6 +156,8 @@ def format_workflow_preset_section(
         lines.append("Validate its inputs when uncertainty matters.")
     if "workflow_preset_start" in tools:
         lines.append("Starting a preset remains your choice; it does not replace observer follow-up.")
+    if "workflow_preset_join" in tools:
+        lines.append("Join a started preset when this session must wait explicitly and consume its completion wakeup.")
     lines.append("The observer remains responsible for review, integration, and task lifecycle not supplied by the preset.")
     return "\n".join(lines)
 

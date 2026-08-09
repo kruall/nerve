@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from nerve.agent.tools.handlers.workflow_presets import start_handler
+from nerve.agent.tools.handlers.workflow_presets import join_handler, start_handler
 from nerve.agent.tools.registry import ToolContext
 from nerve.executions import ExecutionCatalog
 from nerve.workflows.presets import WorkflowPresetCatalog, WorkflowPresetError
@@ -33,6 +33,17 @@ async def test_preset_start_result_is_compact_and_does_not_echo_pinned_plan():
 
 async def _started():
     return {"id": "wfp-123abc", "status": "queued", "plan": {"inputs": {"prompt": "private prompt"}}}
+
+@pytest.mark.asyncio
+async def test_preset_join_uses_observer_session_and_returns_terminal_summary():
+    service = SimpleNamespace(join=lambda workflow_id, session_id: _joined(workflow_id, session_id))
+    engine = SimpleNamespace(workflow_preset_service=service)
+    result = await join_handler(ToolContext(session_id="owner", engine=engine), {"workflow_id":"wfp-123"})
+    assert json.loads(result.content[0]["text"]) == {"workflow_id":"wfp-123", "status":"succeeded", "result":{"outcome":"succeeded"}, "stages":[]}
+
+async def _joined(workflow_id, session_id):
+    assert session_id == "owner"
+    return {"workflow_id":workflow_id, "status":"succeeded", "result":{"outcome":"succeeded"}, "stages":[]}
 
 def _execution(ws):
     p=ws/"config/executions/kinds/echo.yaml"; p.parent.mkdir(parents=True)

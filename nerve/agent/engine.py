@@ -1366,7 +1366,7 @@ class AgentEngine:
                     workflow_tools=(
                         workflow_preset_tool_capabilities(
                             {spec.name for spec in self.registry.list()}, backend.excluded_tools(),
-                        ) - ({"workflow_preset_start"} if self.workflow_preset_service is None else set())
+                        ) - ({"workflow_preset_start", "workflow_preset_join"} if self.workflow_preset_service is None else set())
                     ),
                 )
 

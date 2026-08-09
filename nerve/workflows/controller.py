@@ -32,6 +32,7 @@ class WorkflowPresetService:
     def __init__(self, *, db: Any, engine: Any, executions: Any, agent_runs: Any | None):
         self.db, self.engine, self.executions, self.agent_runs = db, engine, executions, agent_runs
         self._tasks: dict[str, asyncio.Task] = {}; self._stopping = False
+        self._terminal_changed = asyncio.Condition()
 
     async def initialize(self) -> None:
         # A claimed row might already have reached the engine when the process
@@ -61,6 +62,8 @@ class WorkflowPresetService:
         """Publish a redacted workflow snapshot after every durable transition."""
         row = await self.db.get_preset_workflow(workflow_id)
         if row: await self._broadcast(row)
+        async with self._terminal_changed:
+            self._terminal_changed.notify_all()
 
     def _schedule(self, workflow_id: str) -> None:
         if self._stopping or workflow_id in self._tasks: return
@@ -89,6 +92,32 @@ class WorkflowPresetService:
                 await self.agent_runs.kill_run(stage["child_id"], reason=reason, killed_by="workflow")
         await self._changed(workflow_id)
         return True
+
+    async def join(self, workflow_id: str, *, session_id: str) -> dict:
+        reservation = await self.db.reserve_preset_workflow_join(workflow_id, session_id)
+        if reservation == "not_found":
+            raise WorkflowActionError(f"no such preset workflow in this session: {workflow_id}")
+        if reservation == "delivering":
+            raise WorkflowActionError("preset workflow completion is already being delivered")
+        while True:
+            async with self._terminal_changed:
+                workflow = await self.db.get_preset_workflow(workflow_id)
+                if workflow is None:
+                    raise WorkflowActionError(f"no such preset workflow: {workflow_id}")
+                if workflow["status"] not in ("queued", "running", "cancelling"):
+                    stages = await self.db.list_stage_runs(workflow_id)
+                    return {
+                        "workflow_id": workflow["id"], "status": workflow["status"],
+                        "result": workflow.get("result"),
+                        "stages": [
+                            {"stage_id": stage["stage_id"], "status": stage["status"],
+                             "summary": (stage.get("artifact") or {}).get("summary")
+                                or (stage.get("result") or {}).get("summary")
+                                or (stage.get("result") or {}).get("outcome")}
+                            for stage in stages
+                        ],
+                    }
+                await self._terminal_changed.wait()
 
     async def available_actions(self, workflow: Mapping[str, Any]) -> list[dict[str, Any]]:
         # Registry is deliberately fail-closed.  Retry needs attempt journaling
@@ -217,6 +246,8 @@ class WorkflowPresetService:
             return
         terminal = await self.db.get_preset_workflow(workflow["id"])
         await self._broadcast(terminal)
+        async with self._terminal_changed:
+            self._terminal_changed.notify_all()
         if status != "cancelled": await self._deliver_completion(terminal)
 
     async def _deliver_completion(self, workflow: Mapping[str, Any]) -> None:

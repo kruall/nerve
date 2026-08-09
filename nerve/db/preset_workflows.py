@@ -24,6 +24,37 @@ def _row(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
 
 
 class PresetWorkflowStore:
+    async def reserve_preset_workflow_join(self, workflow_id: str, session_id: str) -> str:
+        """Atomically make join, rather than an observer wakeup, own completion."""
+        now = utc_now_iso()
+        async with self._atomic():
+            async with self.db.execute(
+                "SELECT observer_session_id, completion_mode FROM preset_workflows WHERE id = ?",
+                (workflow_id,),
+            ) as cursor:
+                workflow = await cursor.fetchone()
+            if workflow is None or workflow["observer_session_id"] != session_id:
+                return "not_found"
+            if workflow["completion_mode"] == "join":
+                return "reserved"
+            async with self.db.execute(
+                "SELECT state FROM workflow_completion_outbox WHERE workflow_id = ?",
+                (workflow_id,),
+            ) as cursor:
+                completion = await cursor.fetchone()
+            if completion is not None and completion["state"] in ("claimed", "completed", "failed"):
+                return "delivering"
+            await self.db.execute(
+                "UPDATE preset_workflows SET completion_mode = 'join', updated_at = ? WHERE id = ?",
+                (now, workflow_id),
+            )
+            await self.db.execute(
+                """UPDATE workflow_completion_outbox SET state = 'suppressed', updated_at = ?
+                   WHERE workflow_id = ? AND state = 'pending'""",
+                (now, workflow_id),
+            )
+        return "reserved"
+
     async def create_preset_workflow(self, workflow_id: str, *, session_id: str, plan: Mapping[str, Any], preset_hash: str, spec_hash: str) -> dict:
         now = utc_now_iso()
         await self._write("""INSERT INTO preset_workflows
@@ -131,7 +162,6 @@ class PresetWorkflowStore:
         if to_status not in TERMINAL_PRESET_WORKFLOWS:
             raise ValueError("terminal status required")
         now = utc_now_iso(); marks = ",".join("?" for _ in expect)
-        outbox_state = "suppressed" if to_status == "cancelled" else "pending"
         async with self._atomic():
             cursor = await self.db.execute(
                 f"""UPDATE preset_workflows SET status=?, result=?, finished_at=?,
@@ -144,8 +174,11 @@ class PresetWorkflowStore:
             if changed:
                 await self.db.execute(
                     """INSERT OR IGNORE INTO workflow_completion_outbox
-                    (workflow_id,state,created_at,updated_at) VALUES (?, ?, ?, ?)""",
-                    (workflow_id, outbox_state, now, now),
+                    (workflow_id,state,created_at,updated_at)
+                    SELECT id, CASE WHEN ? = 'cancelled' OR completion_mode = 'join'
+                       THEN 'suppressed' ELSE 'pending' END, ?, ?
+                    FROM preset_workflows WHERE id = ?""",
+                    (to_status, now, now, workflow_id),
                 )
         return changed
 
