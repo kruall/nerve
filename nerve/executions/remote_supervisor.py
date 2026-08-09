@@ -19,6 +19,7 @@ import sys
 import time
 import shutil
 import struct
+import contextlib
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
@@ -27,6 +28,7 @@ _MAGIC = b"NRS1"
 _VERSION = 1
 _MAX_HEADER = 64 * 1024
 _MAX_PACK = 512 * 1024 * 1024
+_TERMINAL_STATE_BY_UNKNOWN_EXIT_CODE = "failed"
 
 
 def _decode_frame(raw: bytes) -> tuple[dict[str, Any], bytes]:
@@ -92,11 +94,101 @@ def _write(job: Path, state: Mapping[str, Any]) -> None:
     temp.replace(job / "state.json")
 
 
+def _cas_state(job: Path, token: int, expected_state: str, updates: Mapping[str, Any]) -> dict[str, Any]:
+    with open(job / ".state.lock", "a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        state = _read(job, token)
+        if state.get("state") != expected_state:
+            return state
+        state.update(updates)
+        _write(job, state)
+        return state
+
+
 def _alive(pgid: int) -> bool:
+    # Unit/in-process callers can still be the detached monitor's parent. Reap
+    # an exited child so a zombie is not mistaken for a live process group.
+    # Normal one-shot RPC status calls are not the parent and take the
+    # ChildProcessError path without changing production behavior.
+    try:
+        reaped, _ = os.waitpid(pgid, os.WNOHANG)
+        if reaped == pgid:
+            return False
+    except ChildProcessError:
+        pass
     try: os.killpg(pgid, 0)
     except ProcessLookupError: return False
     except PermissionError: return True
     return True
+
+
+def _monitor(payload_path: str) -> None:
+    payload = json.loads(Path(payload_path).read_text())
+    job = _job_dir(_safe_root(str(payload["root"])), str(payload["job_id"]))
+    token = int(payload["fencing_token"])
+    argv = payload.get("argv")
+    if not isinstance(argv, list) or not argv or not all(isinstance(x, str) and "\0" not in x for x in argv):
+        raise ValueError("invalid structured argv")
+    cwd = _safe_root(str(payload["cwd"])) if not isinstance(payload.get("cwd"), PurePosixPath) else payload["cwd"]
+    environment = payload.get("environment")
+    if not isinstance(environment, Mapping) or not all(isinstance(k, str) and isinstance(v, str) for k, v in environment.items()):
+        raise ValueError("invalid execution environment")
+    lock_fd = payload.get("lock_fd")
+    if isinstance(lock_fd, bool) or not isinstance(lock_fd, int) or lock_fd < 0:
+        raise ValueError("invalid inherited host lock")
+    lock_open = True
+
+    def release_host_lock() -> None:
+        nonlocal lock_open
+        if lock_open:
+            os.close(lock_fd)
+            lock_open = False
+    out = open(job / "stdout.log", "ab", buffering=0)
+    err = open(job / "stderr.log", "ab", buffering=0)
+    try:
+        # The RPC parent must durably publish the monitor PID/process group
+        # before the command can finish and attempt its terminal CAS.  This
+        # also gives a concurrent cancel a stable process group to signal.
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                initial = _read(job, token)
+            except FileNotFoundError:
+                initial = None
+            if initial is not None and int(initial.get("process_group", -1)) == os.getpgrp():
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError("monitor initial state was not published")
+            time.sleep(.01)
+        proc = subprocess.Popen(argv, cwd=str(cwd), env=dict(environment), stdin=subprocess.DEVNULL, stdout=out, stderr=err)
+        exit_code = proc.wait()
+        summary = "succeeded" if exit_code == 0 else "failed"
+        release_host_lock()
+        _cas_state(job, token, "running", {
+            "state": summary,
+            "exit_code": exit_code,
+            "finished_at": time.time(),
+            "summary": "remote command " + summary,
+            "pid": proc.pid,
+        })
+    except Exception as exc:
+        with contextlib.suppress(OSError):
+            release_host_lock()
+        with contextlib.suppress(Exception):
+            _cas_state(job, token, "running", {
+                "state": _TERMINAL_STATE_BY_UNKNOWN_EXIT_CODE,
+                "exit_code": None,
+                "finished_at": time.time(),
+                "summary": "monitor failed before command exit",
+                "error": type(exc).__name__ + ": " + str(exc),
+            })
+    finally:
+        with contextlib.suppress(OSError):
+            release_host_lock()
+        out.close()
+        err.close()
+        with contextlib.suppress(FileNotFoundError):
+            Path(payload_path).unlink()
 
 
 def _start(request: Mapping[str, Any]) -> dict[str, Any]:
@@ -123,15 +215,38 @@ def _start(request: Mapping[str, Any]) -> dict[str, Any]:
     if cwd != root and root not in cwd.parents:
         raise ValueError("cwd escapes job root")
     cwd.mkdir(parents=True, exist_ok=True)
-    out = open(job / "stdout.log", "ab", buffering=0); err = open(job / "stderr.log", "ab", buffering=0)
-    # ``lock`` remains inherited by the process group leader.  Therefore a
+    environment = request.get("environment")
+    if not isinstance(environment, Mapping) or not all(isinstance(k, str) and isinstance(v, str) for k, v in environment.items()):
+        raise ValueError("invalid execution environment")
+    payload = job / ".monitor.json"
+    encoded_payload = json.dumps({
+        "argv": argv,
+        "cwd": str(cwd),
+        "environment": dict(environment),
+        "execution_id": execution_id,
+        "job_id": job_id,
+        "fencing_token": token,
+        "lock_fd": lock.fileno(),
+        "root": str(root),
+    }, separators=(",", ":")).encode()
+    payload_fd = os.open(payload, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(payload_fd, "wb") as stream:
+        stream.write(encoded_payload)
+    # ``lock`` remains inherited by the monitor process group leader.  A
     # second central lease cannot overlap physically even if the control plane
     # has lost the first worker.
-    proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
-                            start_new_session=True, pass_fds=(lock.fileno(),))
-    # The child now owns the inherited flock fd; the RPC process must release
+    try:
+        proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "_monitor", str(payload)],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True, pass_fds=(lock.fileno(),))
+    except OSError:
+        lock.close()
+        with contextlib.suppress(FileNotFoundError):
+            payload.unlink()
+        raise RuntimeError("failed to launch detached monitor process")
+    # The monitor now owns the inherited flock fd; the RPC process must release
     # its copy so worker disconnects cannot keep a dead job's lease forever.
-    lock.close(); out.close(); err.close()
+    lock.close()
     state = {"job_id": job_id, "execution_id": execution_id, "fencing_token": token,
              "pid": proc.pid, "process_group": proc.pid, "state": "running", "exit_code": None,
              "started_at": time.time()}
@@ -221,7 +336,12 @@ def _status(request: Mapping[str, Any]) -> dict[str, Any]:
         # A reaped child does not reveal an exit code after reconnect.  It is
         # nevertheless quiescent; control plane classifies an unknown code as
         # failed instead of fabricating success.
-        state.update(state="finished", exit_code=state.get("exit_code"), finished_at=time.time()); _write(job, state)
+        state = _cas_state(job, int(request["fencing_token"]), "running", {
+            "state": "failed",
+            "exit_code": state.get("exit_code"),
+            "summary": "remote command disappeared without recorded exit code",
+            "finished_at": time.time(),
+        })
     return {"ok": True, **state}
 
 
@@ -240,7 +360,7 @@ def _cancel(request: Mapping[str, Any]) -> dict[str, Any]:
         deadline = time.monotonic() + 5
         while _alive(pgid) and time.monotonic() < deadline: time.sleep(.05)
     quiescent = not _alive(pgid)
-    if quiescent: state.update(state="cancelled", finished_at=time.time()); _write(job, state)
+    if quiescent: state = _cas_state(job, int(request["fencing_token"]), "running", {"state": "cancelled", "finished_at": time.time()})
     return {"ok": True, "state": state["state"], "quiescent": quiescent}
 
 
@@ -330,4 +450,9 @@ def rpc() -> None:
 
 
 if __name__ == "__main__":
-    rpc()
+    if len(sys.argv) > 1 and sys.argv[1] == "_monitor":
+        if len(sys.argv) != 3:
+            raise SystemExit("monitor mode requires exactly one request path argument")
+        _monitor(sys.argv[2])
+    else:
+        rpc()

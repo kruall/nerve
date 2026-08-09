@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import io
+import sys
+import time
 import struct
+from typing import Any
 from types import SimpleNamespace
 
 import pytest
 
 from nerve.executions import remote_supervisor
 from nerve.executions.ssh import OpenSshSupervisor, SshConnectionCatalog, SshTransportError
+from nerve.executions.ssh import SshExecutionBackend
 
 
 def test_connection_catalog_requires_pinned_named_connection(tmp_path):
@@ -76,16 +80,14 @@ def test_catalog_does_not_accept_unknown_connection():
 def test_remote_supervisor_rejects_stale_fencing_token(tmp_path):
     started = remote_supervisor._start({
         "root": str(tmp_path), "execution_id": "exec-a", "fencing_token": 7,
-        "argv": ["/bin/sleep", "10"], "cwd": "execution_dir",
+        "argv": [sys.executable, "-c", "import time; time.sleep(10)"], "cwd": "execution_dir", "environment": {},
     })
     request = {"root": str(tmp_path), "job_id": started["job_id"], "fencing_token": 6}
     with pytest.raises(PermissionError, match="stale"):
         remote_supervisor._status(request)
     cancelled = remote_supervisor._cancel({**request, "fencing_token": 7, "grace_seconds": 0})
-    # A locally spawned process may still be a zombie until its supervisor
-    # reaps it.  Reporting ambiguity as non-quiescent is the safe outcome: the
-    # lifecycle quarantines the lease rather than releasing the physical host.
-    assert cancelled["quiescent"] is False
+    assert cancelled["quiescent"] is True
+    assert cancelled["state"] == "cancelled"
 
 
 def test_remote_supervisor_files_are_fenced_relative_and_text_only(tmp_path):
@@ -110,3 +112,126 @@ def test_remote_supervisor_files_are_fenced_relative_and_text_only(tmp_path):
         remote_supervisor._files({**request, "action": "read", "path": "link"})
     with pytest.raises(ValueError, match="escapes"):
         remote_supervisor._files({**request, "action": "read", "path": "../secret"})
+
+
+def test_remote_supervisor_monitor_records_success_and_failure_exit_codes(tmp_path):
+    for argv, expected_state, expected_exit_code in (
+        ([sys.executable, "-c", "raise SystemExit(0)"], "succeeded", 0),
+        ([sys.executable, "-c", "raise SystemExit(1)"], "failed", 1),
+    ):
+        started = remote_supervisor._start({
+            "root": str(tmp_path), "execution_id": "exec-a", "fencing_token": 7,
+            "argv": argv, "cwd": "execution_dir", "environment": {},
+        })
+        request = {"root": str(tmp_path), "job_id": started["job_id"], "fencing_token": 7}
+        for _ in range(1000):
+            status = remote_supervisor._status(request)
+            if status["state"] in {"succeeded", "failed", "cancelled", "finished"}:
+                break
+            time.sleep(.01)
+        else:
+            raise AssertionError("remote monitor did not persist a terminal state")
+        assert status["state"] == expected_state
+        assert status["exit_code"] == expected_exit_code
+
+
+def test_remote_supervisor_status_preserves_monitor_terminal_state(tmp_path):
+    started = remote_supervisor._start({
+        "root": str(tmp_path), "execution_id": "exec-race", "fencing_token": 7,
+        "argv": [sys.executable, "-c", "raise SystemExit(0)"], "cwd": "execution_dir", "environment": {},
+    })
+    request = {"root": str(tmp_path), "job_id": started["job_id"], "fencing_token": 7}
+    terminal = None
+    for _ in range(1000):
+        status = remote_supervisor._status(request)
+        if status["state"] in {"succeeded", "failed", "cancelled"}:
+            terminal = status
+            break
+        time.sleep(.01)
+    assert terminal is not None
+    assert remote_supervisor._status(request)["state"] == terminal["state"]
+
+
+def test_remote_supervisor_cancel_drives_quiescence(tmp_path):
+    started = remote_supervisor._start({
+        "root": str(tmp_path), "execution_id": "exec-cancel", "fencing_token": 7,
+        "argv": [sys.executable, "-c", "import time; time.sleep(5)"], "cwd": "execution_dir", "environment": {},
+    })
+    request = {"root": str(tmp_path), "job_id": started["job_id"], "fencing_token": 7}
+    cancelled = remote_supervisor._cancel({**request, "grace_seconds": 0, "mode": "terminate"})
+    assert cancelled["quiescent"] is True
+    assert cancelled["state"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_ssh_backend_treats_legacy_finished_state_as_terminal(tmp_path):
+    known = tmp_path / "known_hosts"; known.write_text("worker ssh-ed25519 AAAA\n")
+    catalog = SshConnectionCatalog({"ssh_connections": {"worker": {
+        "host": "127.0.0.1", "user": "root", "known_hosts": str(known), "remote_roots": [str(tmp_path)],
+    }}})
+
+    class Supervisor:
+        async def start(self, connection, request): return {"ok": True, "job_id": "job-legacy", "process_group": 1, "fencing_token": int(request["fencing_token"])}
+        async def status(self, connection, job_id, fencing_token, root): return {"state": "finished", "exit_code": None, "summary": "legacy finished", "fencing_token": fencing_token}
+        async def tail(self, connection, job_id, fencing_token, cursor, root): return {"entries": [], "cursor": cursor}
+        async def cancel(self, connection, job_id, fencing_token, grace_seconds, mode, root): return {"state": "finished", "quiescent": True}
+
+    backend = SshExecutionBackend(
+        inventory=type("inventory", (), {"hosts": {"1": {"connection_ref": "worker"}}})(),
+        connections=catalog, supervisor=Supervisor(),
+    )
+    plan = {
+        "steps": [{"transport": "resource", "resource_slot": "slot", "executable": "/bin/true", "argv": []}],
+        "selected_leases": [{"slot": "slot", "host_id": "1", "fencing_token": 7, "id": "lease-a"}],
+        "arguments": {},
+        "remote_root": str(tmp_path),
+    }
+    async def started(payload: dict[str, Any]) -> None:
+        assert payload["job_id"] == "job-legacy"
+
+    async def emit(_stream: str, _text: str) -> None:
+        return None
+
+    result = await backend.run(
+        execution_id="exec-legacy",
+        plan=plan,
+        workspace=tmp_path,
+        execution_dir=tmp_path,
+        emit=emit,
+        started=started,
+    )
+    assert result.exit_code is None
+    assert result.summary == "legacy finished"
+
+
+@pytest.mark.asyncio
+async def test_ssh_backend_recovers_legacy_finished_state_as_failed(tmp_path):
+    known = tmp_path / "known_hosts"; known.write_text("worker ssh-ed25519 AAAA\n")
+    catalog = SshConnectionCatalog({"ssh_connections": {"worker": {
+        "host": "127.0.0.1", "user": "root", "known_hosts": str(known), "remote_roots": [str(tmp_path)],
+    }}})
+
+    class Supervisor:
+        async def start(self, connection, request): raise RuntimeError("should not start during recovery")
+        async def status(self, connection, job_id, fencing_token, root): return {"state": "finished", "summary": "legacy finished", "fencing_token": fencing_token}
+        async def tail(self, connection, job_id, fencing_token, cursor, root): return {}
+        async def cancel(self, connection, job_id, fencing_token, grace_seconds, mode, root): return {}
+
+    backend = SshExecutionBackend(
+        inventory=type("inventory", (), {"hosts": {"1": {"connection_ref": "worker"}}})(),
+        connections=catalog, supervisor=Supervisor(),
+    )
+    execution = {
+        "id": "exec-legacy-recover",
+        "plan": {
+            "steps": [{"transport": "resource", "resource_slot": "slot", "executable": "/bin/true", "argv": []}],
+            "selected_leases": [{"slot": "slot", "host_id": "1", "fencing_token": 7, "id": "lease-a"}],
+            "arguments": {},
+            "remote_root": str(tmp_path),
+        },
+        "backend_handle": {"job_id": "job-legacy", "fencing_token": 7},
+    }
+    recovered = await backend.recover(execution)
+    assert recovered.state == "finished"
+    assert recovered.result is not None
+    assert recovered.result.exit_code is None

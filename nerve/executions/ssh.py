@@ -307,7 +307,7 @@ class SshExecutionBackend:
                 cursor = int(tail.get("cursor", cursor))
                 for entry in tail.get("entries", []): await emit(str(entry.get("stream", "stdout")), str(entry.get("text", "")))
                 status = await self.supervisor.status(connection, job_id, token, root)
-                if status.get("state") in {"succeeded", "failed", "cancelled"}:
+                if status.get("state") in {"succeeded", "failed", "cancelled", "finished"}:
                     return BackendResult(status.get("exit_code"), summary=str(status.get("summary", "remote job finished")), error=status.get("error"))
                 await asyncio.sleep(self.poll_seconds)
         finally:
@@ -330,7 +330,8 @@ class SshExecutionBackend:
             status = await self.supervisor.status(connection, str(job_id), int(token), root)
         except (SshTransportError, KeyError, ValueError): return BackendRecovery("orphaned")
         if status.get("state") in {"running", "starting"}: return BackendRecovery("reattachable")
-        return BackendRecovery("finished", BackendResult(status.get("exit_code"), summary=str(status.get("summary", "remote job finished"))))
+        state = str(status.get("state"))
+        return BackendRecovery("finished", BackendResult(None if state == "finished" else status.get("exit_code"), summary=str(status.get("summary", "remote job finished")), error=status.get("error")))
 
     async def reattach(self, *, execution: Mapping[str, Any], emit: LogSink) -> BackendResult:
         handle = execution.get("backend_handle") or {}
