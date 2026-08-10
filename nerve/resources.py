@@ -193,6 +193,7 @@ class LeaseService:
         )
 
     async def initialize(self) -> None:
+        await self.release_idle_recovered_session_reservations()
         await self.reconcile_expired()
         if self._reconciler is None:
             self._reconciler = asyncio.create_task(self._reconcile_loop())
@@ -218,6 +219,32 @@ class LeaseService:
             if lease is not None:
                 await self.heartbeat(execution_id=lease["execution_id"], lease=lease)
         return await self.db.revoke_expired_resource_leases()
+
+    async def release_idle_recovered_session_reservations(self) -> None:
+        """Drop pre-restart cache reservations that do not back live work.
+
+        A session reservation is an optimization for consecutive YDB operations,
+        not durable work in its own right.  The previous implementation renewed
+        every reservation during startup, including reservations whose owner had
+        no active execution.  Such a lease then survived indefinitely and could
+        starve the builder pool after a daemon restart.
+
+        An active execution remains the durable ownership proof, so its
+        reservation is retained for execution recovery.  Otherwise the daemon
+        shutdown boundary makes the cached host safely releasable.
+        """
+        for reservation in await self.db.list_active_session_resource_reservations():
+            if not self._is_recovered_session_reservation(reservation):
+                continue
+            active = await self.db.list_session_executions(
+                str(reservation["session_id"]), include_terminal=False, limit=1,
+            )
+            if not active:
+                await self.release_session_reservation(
+                    session_id=str(reservation["session_id"]),
+                    remote_quiescence_confirmed=True,
+                    reason="idle session reservation released after daemon restart",
+                )
 
     async def acquire(self, *, execution_id: str, session_id: str, requests: Sequence[Mapping[str, Any]]) -> Sequence[Mapping[str, Any]]:
         if not requests:

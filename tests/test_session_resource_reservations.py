@@ -116,6 +116,44 @@ async def test_session_resource_reservation_cleanup_after_recovery_quarantines(d
 
 
 @pytest.mark.asyncio
+async def test_startup_releases_idle_session_reservation_from_before_restart(db, tmp_path):
+    first = await _service(db)
+    await db.create_session("session-a")
+    reservation = await first.reserve_for_session(
+        session_id="session-a", pool="builders", worktree=tmp_path,
+    )
+
+    recovered = await _service(db)
+    await recovered.initialize()
+
+    settled = await db.get_session_resource_reservation("session-a")
+    assert settled is not None and settled["state"] == "released"
+    lease = await db.get_resource_lease(reservation["lease_id"])
+    assert lease is not None and lease["state"] == "released"
+
+
+@pytest.mark.asyncio
+async def test_startup_keeps_recovered_reservation_for_active_execution(db, tmp_path):
+    first = await _service(db)
+    await db.create_session("session-a")
+    reservation = await first.reserve_for_session(
+        session_id="session-a", pool="builders", worktree=tmp_path,
+    )
+    await db.create_execution(
+        "exec-active", session_id="session-a", kind="test", profile_version="1",
+        profile_hash="hash", profile_snapshot={}, plan={}, resource_requests=[],
+    )
+
+    recovered = await _service(db)
+    await recovered.initialize()
+
+    settled = await db.get_session_resource_reservation("session-a")
+    assert settled is not None and settled["state"] == "active"
+    lease = await db.get_resource_lease(reservation["lease_id"])
+    assert lease is not None and lease["state"] == "active"
+
+
+@pytest.mark.asyncio
 async def test_explicit_confirmed_release_after_recovery_does_not_quarantine(db, tmp_path):
     first = await _service(db)
     await db.create_session("session-a")
