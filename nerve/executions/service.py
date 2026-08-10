@@ -162,24 +162,25 @@ class ExecutionService:
 
     async def start_artifact_transfer(self, *, session_id: str, source: Mapping[str, Any], destination: Mapping[str, Any], auto_continue: bool = True) -> Mapping[str, Any]:
         """Persist a fenced remote/local transfer plan; endpoints have no coordinates."""
-        def endpoint(value: Mapping[str, Any], name: str) -> tuple[str, str, str, bool]:
+        def endpoint(value: Mapping[str, Any], name: str) -> tuple[str, str, str, bool, str | None]:
             if not isinstance(value, Mapping):
                 raise ValueError("artifact transfer " + name + " endpoint is invalid")
             local = value.get("host") == "localhost"
-            allowed = {"host", "path", "artifact_root"} if local else {"pool", "path", "artifact_root"}
+            allowed = {"host", "path", "artifact_root"} if local else {"pool", "host", "path", "artifact_root"}
             if set(value) - allowed or (local and set(value) != allowed):
                 raise ValueError("artifact transfer " + name + " endpoint is invalid")
             pool = "localhost" if local else value.get("pool")
+            host = None if local else value.get("host")
             path, root = value.get("path"), value.get("artifact_root")
-            if not all(isinstance(x, str) and x and "\x00" not in x for x in (pool, path, root)):
+            if not all(isinstance(x, str) and x and "\x00" not in x for x in (pool, path, root)) or (host is not None and (not isinstance(host, str) or not host or "\x00" in host)):
                 raise ValueError("artifact transfer " + name + " endpoint is invalid")
             from pathlib import PurePosixPath
             for part in (path, root):
                 parsed = PurePosixPath(part)
                 if parsed.is_absolute() or ".." in parsed.parts or not parsed.parts:
                     raise ValueError("artifact transfer paths must be confined relative paths")
-            return pool, path, root, local
-        sp, sx, sr, source_local = endpoint(source, "source"); dp, dx, dr, destination_local = endpoint(destination, "destination")
+            return pool, path, root, local, host
+        sp, sx, sr, source_local, sh = endpoint(source, "source"); dp, dx, dr, destination_local, dh = endpoint(destination, "destination")
         if source_local and destination_local:
             raise ValueError("localhost-to-localhost artifact transfer is not supported")
         local_roots = getattr(getattr(self.resource_manager, "inventory", None), "local_artifact_roots", {})
@@ -187,10 +188,12 @@ class ExecutionService:
             if local and root not in local_roots:
                 raise ValueError("artifact transfer local artifact root is not configured")
         validate_remote = getattr(self.backend, "validate_artifact_endpoint", None)
-        for local, pool, root in (
-            (source_local, sp, sr), (destination_local, dp, dr),
+        for local, pool, root, host, name in (
+            (source_local, sp, sr, sh, "source"), (destination_local, dp, dr, dh, "destination"),
         ):
             if not local:
+                if host is not None and host not in self.resource_manager.inventory.members(pool):
+                    raise ValueError(f"artifact transfer {name} host is not a member of its pool")
                 if callable(validate_remote):
                     validate_remote(pool, root)
                 else:
@@ -199,7 +202,7 @@ class ExecutionService:
                     self.resource_manager.inventory.members(pool)
         resources = ({"destination": dp} if source_local else {"source": sp} if destination_local else {"source": sp, "destination": dp})
         plan = {"kind": "artifact_transfer", "profile_version": "1", "profile_hash": "built-in-artifact-transfer-v1",
-                "resources": resources, "artifact_transfer": {"transfer_id": "transfer-" + uuid.uuid4().hex, "source_path": sx, "source_root": sr, "source_local": source_local, "destination_path": dx, "destination_root": dr, "destination_local": destination_local},
+                "resources": resources, "resource_hosts": {slot: host for slot, host in (("source", sh), ("destination", dh)) if host is not None}, "artifact_transfer": {"transfer_id": "transfer-" + uuid.uuid4().hex, "source_path": sx, "source_root": sr, "source_local": source_local, "destination_path": dx, "destination_root": dr, "destination_local": destination_local},
                 "steps": [], "result": {"success_exit_codes": [0]}, "timeout_seconds": 86400,
                 "cancellation": {"mode": "terminate", "grace_seconds": 10, "run_cleanup": False}}
         return await self._start_serialized(session_id=session_id, plan=plan, profile_snapshot={"kind": "artifact_transfer", "title": "direct artifact transfer", "source": "built-in reviewed transfer"}, auto_continue=auto_continue)
@@ -475,7 +478,12 @@ class ExecutionService:
                     )
                     await self._run_with_leases(execution_id, row, [lease], held)
                 return
-            leases = await self.resource_manager.acquire(execution_id=execution_id, session_id=row["session_id"], requests=row.get("resource_requests") or [])
+            requested_hosts = dict(row["plan"].get("resource_hosts", {}))
+            requests = [
+                {**request, "host": requested_hosts.get(str(request.get("slot")))}
+                for request in row.get("resource_requests") or []
+            ]
+            leases = await self.resource_manager.acquire(execution_id=execution_id, session_id=row["session_id"], requests=requests)
             await self._run_with_leases(execution_id, row, leases, None)
         except asyncio.CancelledError:
             if not self._stopping:

@@ -20,6 +20,18 @@ async def test_overlapping_pools_are_exclusive_and_fenced(db):
     assert not await service.heartbeat(execution_id="one", lease=first[0])
 
 @pytest.mark.asyncio
+async def test_explicit_host_is_selected_from_its_pool(db):
+    config = {"connections": ["lab-ssh"], "hosts": [
+        {"id": "host-a", "connection_ref": "lab-ssh"}, {"id": "host-b", "connection_ref": "lab-ssh"}],
+        "pools": [{"id": "workers", "members": ["host-a", "host-b"]}]}
+    inventory = ResourceInventory(db, config); await inventory.initialize()
+    service = LeaseService(db=db, inventory=inventory)
+    lease = await service.acquire(execution_id="pinned", session_id="s", requests=[{"pool": "workers", "host": "host-b"}])
+    assert lease[0]["host_id"] == "host-b"
+    with pytest.raises(ResourceInventoryError, match="not a member"):
+        await service.acquire(execution_id="invalid", session_id="s", requests=[{"pool": "workers", "host": "missing"}])
+
+@pytest.mark.asyncio
 async def test_quarantine_never_becomes_available_without_confirmed_recovery(db):
     inventory=ResourceInventory(db, CONFIG); await inventory.initialize(); service=LeaseService(db=db, inventory=inventory)
     lease=(await service.acquire(execution_id="one",session_id="s",requests=[{"pool":"build"}]))[0]

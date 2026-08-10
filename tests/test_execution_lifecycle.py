@@ -217,6 +217,21 @@ async def test_artifact_transfer_builds_one_or_two_resource_slots(db, owner, tmp
     plan = service._start_serialized.await_args.kwargs["plan"]
     assert plan["resources"] == {"source": "builders", "destination": "workers"}
 
+    await service.start_artifact_transfer(
+        session_id=owner,
+        source={"pool": "builders", "host": "builders-host", "artifact_root": "artifacts", "path": "a.bin"},
+        destination={"pool": "workers", "host": "workers-host", "artifact_root": "artifacts", "path": "b.bin"},
+    )
+    plan = service._start_serialized.await_args.kwargs["plan"]
+    assert plan["resource_hosts"] == {"source": "builders-host", "destination": "workers-host"}
+
+    with pytest.raises(ValueError, match="not a member"):
+        await service.start_artifact_transfer(
+            session_id=owner,
+            source={"pool": "builders", "host": "other-host", "artifact_root": "artifacts", "path": "a.bin"},
+            destination={"pool": "workers", "artifact_root": "artifacts", "path": "b.bin"},
+        )
+
     with pytest.raises(ValueError, match="localhost-to-localhost"):
         await service.start_artifact_transfer(
             session_id=owner,

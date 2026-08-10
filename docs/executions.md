@@ -170,8 +170,10 @@ bundle: either every slot is fenced and assigned in one transaction or no slot
 is assigned. Queue ordering is durable and deterministic across restarts, so a
 two-host operation cannot hold one pool while waiting on another.
 
-`artifact_transfer` accepts tagged endpoints. A remote endpoint contains only
-`pool`, a configured relative connection artifact root, and relative path; a
+`artifact_transfer` accepts tagged endpoints. A remote endpoint contains `pool`,
+a configured relative connection artifact root, and relative path. It may also
+contain an explicit `host` that must be a member of the selected pool; this
+pins that transfer slot to the named host. A
 localhost endpoint is exactly `{host: localhost, artifact_root: <configured
 local root id>, path: <relative path>}`. localhost-to-localhost is rejected.
 Plans retain only root ids and relative paths. Remote-to-remote creates

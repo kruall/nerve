@@ -227,11 +227,14 @@ class LeaseService:
         for request in requests:
             pool = str(request.get("pool") or "")
             slot = str(request.get("slot") or "resource")
+            host = request.get("host")
             if not pool: raise ResourceInventoryError("resource request must select a pool")
+            if host is not None and (not isinstance(host, str) or host not in self.inventory.members(pool)):
+                raise ResourceInventoryError("resource request host is not a member of its pool")
             if slot in seen_slots: raise ResourceInventoryError("resource request slot is duplicated")
-            seen_slots.add(slot); normalized.append((slot, pool))
+            seen_slots.add(slot); normalized.append((slot, pool, host))
         bundle_id = f"bundle-{uuid.uuid4().hex[:12]}"
-        queued = [{"id": f"request-{uuid.uuid4().hex[:12]}", "slot": slot, "pool": pool} for slot, pool in normalized]
+        queued = [{"id": f"request-{uuid.uuid4().hex[:12]}", "slot": slot, "pool": pool} for slot, pool, _host in normalized]
         bundle = await self.db.enqueue_resource_bundle(
             bundle_id=bundle_id, execution_id=execution_id,
             session_id=session_id, requests=queued,
@@ -244,7 +247,8 @@ class LeaseService:
                 if execution is not None and execution.get("status") == "cancelling":
                     await self.db.cancel_resource_requests(execution_id)
                     raise ResourceInventoryError("resource request was cancelled")
-                acquired = await self.db.try_acquire_resource_bundle(bundle_id=bundle_id, candidates={row['id']: self.inventory.members(row['pool']) for row in queued}, ttl_seconds=self.ttl_seconds)
+                requested = {slot: host for slot, _pool, host in normalized}
+                acquired = await self.db.try_acquire_resource_bundle(bundle_id=bundle_id, candidates={row['id']: ([requested[row['slot']]] if requested[row['slot']] is not None else self.inventory.members(row['pool'])) for row in queued}, ttl_seconds=self.ttl_seconds)
                 if acquired is not None:
                     return [
                         {**lease, "slot": request["slot"]}
