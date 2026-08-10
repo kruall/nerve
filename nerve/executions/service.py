@@ -700,7 +700,7 @@ class ExecutionService:
             raise
         except ExecutionBackendUncertain as exc:
             if not self._stopping:
-                await self.resource_manager.quarantine(
+                await self._quarantine_leases(
                     execution_id=execution_id,
                     leases=leases,
                     reason="remote execution cleanup could not prove quiescence",
@@ -725,7 +725,7 @@ class ExecutionService:
                     leases = []
                     await self.db.append_execution_log(execution_id, stream="stdout", text="stage=resource_release quiescence=confirmed\n")
                 else:
-                    await self.resource_manager.quarantine(
+                    await self._quarantine_leases(
                         execution_id=execution_id, leases=leases,
                         reason="remote transport failed and quiescence could not be proven",
                     )
@@ -905,7 +905,7 @@ class ExecutionService:
             result = await self.backend.reattach(execution=row, emit=emit)
         except Exception as exc:
             logger.warning("Could not reattach execution %s (%s)", row["id"], type(exc).__name__)
-            await self.resource_manager.quarantine(
+            await self._quarantine_leases(
                 execution_id=row["id"],
                 leases=row.get("selected_leases") or [],
                 reason="backend reattachment failed",
@@ -942,14 +942,23 @@ class ExecutionService:
                 row["id"], stream="stdout", text="stage=resource_release quiescence=confirmed\n",
             )
         elif leases:
-            await self.resource_manager.quarantine(
+            await self._quarantine_leases(
                 execution_id=row["id"], leases=leases,
                 reason="cancellation could not confirm backend quiescence",
             )
             await self.db.append_execution_log(
                 row["id"], stream="stdout", text="stage=resource_quarantine quiescence=unproven\n",
             )
-        await self.db.finalize_execution_cancelled(row["id"])
+        if confirmed:
+            await self.db.finalize_execution_cancelled(row["id"])
+        else:
+            await self.db.finalize_execution_lost(
+                row["id"], result={
+                    "outcome": "lost",
+                    "summary": "remote quiescence could not be proven during cancellation",
+                    "error": "remote_quiescence_unknown",
+                },
+            )
         await self._broadcast(row["id"])
 
     async def _cancel_with_quiescence(
@@ -1000,6 +1009,25 @@ class ExecutionService:
             await log("remote_quiescence_confirmed", source="cancel_acknowledgement")
         return confirmed
 
+    async def _quarantine_leases(
+        self, *, execution_id: str, leases: Sequence[Mapping[str, Any]], reason: str,
+    ) -> None:
+        """Quarantine a retained handle's original lease lineage.
+
+        Handle leases predate the Operation that temporarily borrows them, so
+        their lease row is fenced by the session-handle allocator id rather
+        than this Operation id.  Quarantining with the latter silently loses
+        the CAS; preserve that lineage instead.
+        """
+        grouped: dict[str, list[Mapping[str, Any]]] = {}
+        for lease in leases:
+            owner = str(lease.get("execution_id") or execution_id)
+            grouped.setdefault(owner, []).append(lease)
+        for owner, owned_leases in grouped.items():
+            await self.resource_manager.quarantine(
+                execution_id=owner, leases=owned_leases, reason=reason,
+            )
+
     async def _quarantine_or_release(
         self, row: Mapping[str, Any], recovery: BackendRecovery,
     ) -> None:
@@ -1007,7 +1035,7 @@ class ExecutionService:
         if not leases:
             return
         if recovery.state in {"orphaned", "missing"}:
-            await self.resource_manager.quarantine(
+            await self._quarantine_leases(
                 execution_id=row["id"], leases=leases,
                 reason="backend state is unknown after daemon restart",
             )
@@ -1192,7 +1220,8 @@ class ExecutionService:
         continuation_task = self._continuations.get(execution_id)
         if accepted and continuation_task is not None:
             continuation_task.cancel()
-        if accepted and row["status"] in ACTIVE_EXECUTION_STATUSES:
+        terminal_won = False
+        if accepted:
             cancelled = await self._cancel_with_quiescence(row)
             if cancelled and row.get("selected_leases") and not self._uses_retained_handles(row):
                 await self.resource_manager.release(
@@ -1205,7 +1234,7 @@ class ExecutionService:
                 # A timeout/cancel acknowledgement is not proof that remote
                 # work stopped.  Keep the physical host unavailable until an
                 # administrator confirms quiescence.
-                await self.resource_manager.quarantine(
+                await self._quarantine_leases(
                     execution_id=execution_id,
                     leases=row["selected_leases"],
                     reason="cancellation could not confirm backend quiescence",
@@ -1214,9 +1243,23 @@ class ExecutionService:
                     execution_id, stream="stdout", text="stage=resource_quarantine quiescence=unproven\n",
                 )
             if cancelled or (not row.get("selected_leases") and row["status"] in {"queued", "starting"}):
-                await self.db.finalize_execution_cancelled(execution_id)
+                terminal_won = await self.db.finalize_execution_cancelled(execution_id)
+            elif not cancelled:
+                terminal_won = await self.db.finalize_execution_lost(
+                    execution_id, result={
+                        "outcome": "lost",
+                        "summary": "remote quiescence could not be proven during cancellation",
+                        "error": "remote_quiescence_unknown",
+                },
+            )
         await self._broadcast(execution_id)
         current = await self.db.get_execution(execution_id)
+        if terminal_won or (
+            accepted and current is not None
+            and current["status"] in {"cancelled", "lost"}
+            and current["continuation_state"] == "pending"
+        ):
+            self._schedule_continuation(execution_id)
         assert current is not None
         return self._decorate(current)
 
@@ -1240,8 +1283,10 @@ class ExecutionService:
         # Finalization settles queued requests in the same transaction as the
         # terminal execution state, so a restart cannot leave an orphaned
         # queue entry between these two durable transitions.
-        await self.db.finalize_execution_cancelled(execution_id)
+        terminal_won = await self.db.finalize_execution_cancelled(execution_id)
         await self._broadcast(execution_id)
+        if terminal_won:
+            self._schedule_continuation(execution_id)
         current = await self.db.get_execution(execution_id)
         assert current is not None
         return self._decorate(current)
@@ -1263,7 +1308,7 @@ class ExecutionService:
                 await self.resource_manager.release(execution_id=execution_id, leases=row["selected_leases"])
                 await self.db.append_execution_log(execution_id, stream="stdout", text="stage=resource_release quiescence=confirmed\n")
             if not cancelled and row.get("selected_leases"):
-                await self.resource_manager.quarantine(
+                await self._quarantine_leases(
                     execution_id=execution_id,
                     leases=row["selected_leases"],
                     reason="session cancellation could not confirm backend quiescence",
@@ -1271,6 +1316,14 @@ class ExecutionService:
                 await self.db.append_execution_log(execution_id, stream="stdout", text="stage=resource_quarantine quiescence=unproven\n")
             if cancelled or (not row.get("selected_leases") and row["status"] == "cancelling"):
                 await self.db.finalize_execution_cancelled(execution_id)
+            elif not cancelled:
+                await self.db.finalize_execution_lost(
+                    execution_id, result={
+                        "outcome": "lost",
+                        "summary": "remote quiescence could not be proven during session stop",
+                        "error": "remote_quiescence_unknown",
+                    },
+                )
             await self._broadcast(execution_id)
         return True
 

@@ -346,9 +346,15 @@ class ExecutionStore:
     async def request_execution_cancel(
         self, execution_id: str, *, reason: str | None,
     ) -> bool:
-        """Accept cancellation and suppress a pending/claimed continuation."""
+        """Durably win cancellation only while the Operation is active.
+
+        A terminal completion is the other contender in this race.  It must
+        retain its already-published continuation rather than being converted
+        into a late cancellation request.
+        """
         now = utc_now_iso()
-        active_marks = ",".join("?" for _ in ACTIVE_EXECUTION_STATUSES)
+        cancellable_statuses = ("queued", "starting", "running")
+        active_marks = ",".join("?" for _ in cancellable_statuses)
         result = await self._write(
             f"""UPDATE executions
                 SET status = CASE
@@ -356,13 +362,12 @@ class ExecutionStore:
                         ELSE status
                     END,
                     cancel_reason = ?, cancel_requested_at = ?, updated_at = ?,
-                    revision = revision + 1, continuation_state = 'suppressed',
-                    continuation_error = NULL
+                    revision = revision + 1, continuation_error = NULL
                 WHERE id = ?
-                  AND (status IN ({active_marks}) OR continuation_state IN ('pending', 'claimed'))""",
+                  AND status IN ({active_marks})""",
             (
-                *ACTIVE_EXECUTION_STATUSES, (reason or "user requested cancellation")[:500],
-                now, now, execution_id, *ACTIVE_EXECUTION_STATUSES,
+                *cancellable_statuses, (reason or "user requested cancellation")[:500],
+                now, now, execution_id, *cancellable_statuses,
             ),
         )
         return (result.rowcount or 0) == 1
@@ -384,7 +389,11 @@ class ExecutionStore:
             update = await self.db.execute(
                 """UPDATE executions
                    SET status = 'cancelled', result = ?, finished_at = ?, updated_at = ?,
-                       revision = revision + 1, continuation_state = 'suppressed'
+                       revision = revision + 1,
+                       continuation_state = CASE
+                           WHEN continuation_state = 'suppressed' THEN 'suppressed'
+                           WHEN auto_continue = 1 THEN 'pending'
+                           ELSE 'suppressed' END
                    WHERE id = ? AND status = 'cancelling'
                      AND NOT EXISTS (
                          SELECT 1 FROM resource_leases
@@ -405,6 +414,28 @@ class ExecutionStore:
                    WHERE execution_id=? AND state='queued'""",
                 (now, execution_id),
             )
+            await self.db.execute("DELETE FROM operation_resource_refs WHERE operation_id=?", (execution_id,))
+        return True
+
+    async def finalize_execution_lost(
+        self, execution_id: str, *, result: Mapping[str, Any],
+    ) -> bool:
+        """Record an ambiguous cancellation without making its lineage reusable."""
+        now = utc_now_iso()
+        async with self._atomic():
+            update = await self.db.execute(
+                """UPDATE executions
+                   SET status = 'lost', result = ?, finished_at = ?, updated_at = ?,
+                       revision = revision + 1,
+                       continuation_state = CASE
+                           WHEN continuation_state = 'suppressed' THEN 'suppressed'
+                           WHEN auto_continue = 1 THEN 'pending'
+                           ELSE 'suppressed' END
+                   WHERE id = ? AND status = 'cancelling'""",
+                (json.dumps(dict(result)), now, now, execution_id),
+            )
+            if not update.rowcount:
+                return False
             await self.db.execute("DELETE FROM operation_resource_refs WHERE operation_id=?", (execution_id,))
         return True
 
@@ -466,7 +497,7 @@ class ExecutionStore:
                 """UPDATE executions SET continuation_state = 'claimed',
                    continuation_claimed_at = ?, updated_at = ?, revision = revision + 1
                    WHERE id = ? AND continuation_state = 'pending'
-                     AND cancel_requested_at IS NULL""",
+                     AND (cancel_requested_at IS NULL OR status IN ('succeeded', 'failed', 'cancelled', 'lost'))""",
                 (now, now, execution_id),
             )
             claimed = (cursor.rowcount or 0) == 1

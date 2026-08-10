@@ -1122,7 +1122,7 @@ async def test_ambiguous_remote_reconnect_quarantines_selected_lease(db, owner, 
 
     cancelled = await service.cancel_execution(execution_id=row["id"], requested_by="owner", reason="stop")
 
-    assert cancelled["status"] == "cancelling"
+    assert cancelled["status"] == "lost"
     leases.release.assert_not_awaited()
     leases.quarantine.assert_awaited_once()
 

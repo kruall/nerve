@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import pytest
 
@@ -85,6 +85,15 @@ async def _service(db, tmp_path):
 async def _wait_for(event):
     async with asyncio.timeout(2):
         await event.wait()
+
+
+async def _eventually(predicate):
+    async with asyncio.timeout(2):
+        while True:
+            result = await predicate()
+            if result:
+                return result
+            await asyncio.sleep(0.01)
 
 
 @pytest.mark.asyncio
@@ -211,6 +220,106 @@ async def test_cancel_dismiss_and_suppress_keep_terminal_refs_detached(db, tmp_p
     assert await db.suppress_execution_continuation("cancelled")
     assert await db.dismiss_session_execution("cancelled", session_id="owner")
     assert await db.list_operation_resource_refs("cancelled") == []
+
+
+@pytest.mark.asyncio
+async def test_completion_wins_late_cancel_and_duplicate_cancel_is_idempotent(db, tmp_path):
+    _service_instance, resources, _backend = await _service(db, tmp_path)
+    handle = (await resources.acquire_handles("owner", [{"pool": "a"}]))[0]
+    await _create_handle_execution(db, "completion-wins", handle["id"], auto_continue=True)
+    assert await db.transition_execution("completion-wins", to_status="running", expect=("queued",))
+    assert await db.finish_execution("completion-wins", status="succeeded", result={"outcome": "succeeded"})
+    assert not await db.request_execution_cancel("completion-wins", reason="too late")
+    assert (await db.get_execution("completion-wins"))["continuation_state"] == "pending"
+
+    await _create_handle_execution(db, "cancel-wins", handle["id"], auto_continue=True)
+    # The first Operation detached its ref, so its retained handle is safe to reuse.
+    assert await db.request_execution_cancel("cancel-wins", reason="first")
+    assert not await db.request_execution_cancel("cancel-wins", reason="duplicate")
+    assert await db.finalize_execution_cancelled("cancel-wins")
+    assert await db.list_operation_resource_refs("cancel-wins") == []
+    claimed, _row = await db.claim_execution_continuation("cancel-wins")
+    claimed_again, _row = await db.claim_execution_continuation("cancel-wins")
+    assert claimed and not claimed_again
+
+
+@pytest.mark.asyncio
+async def test_quiescent_handle_cancellation_detaches_and_resumes_once(db, tmp_path):
+    service, resources, backend = await _service(db, tmp_path)
+    await service.start_continuations()
+    handle = (await resources.acquire_handles("owner", [{"pool": "a"}]))[0]
+    execution = await service.start(
+        session_id="owner", plan=_Plan({"slot": "a"}),
+        handle_ids=[handle["id"]], auto_continue=True,
+    )
+    await _wait_for(backend.started)
+    task = service._tasks[execution["id"]]
+
+    cancelled = await service.cancel_execution(
+        execution_id=execution["id"], requested_by="owner", reason="stop",
+    )
+    await task
+
+    assert cancelled["status"] == "cancelled"
+    assert await db.list_operation_resource_refs(execution["id"]) == []
+    assert (await db.get_session_resource_handle(handle["id"]))["state"] == "active"
+    async def resumed_once():
+        row = await db.get_execution(execution["id"])
+        return row if row["continuation_state"] == "completed" else None
+
+    await _eventually(resumed_once)
+    assert service.engine.run.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_handle_cancellation_loses_and_quarantines_lineage(db, tmp_path):
+    service, resources, backend = await _service(db, tmp_path)
+    handle = (await resources.acquire_handles("owner", [{"pool": "a"}]))[0]
+    execution = await service.start(
+        session_id="owner", plan=_Plan({"slot": "a"}),
+        handle_ids=[handle["id"]], auto_continue=False,
+    )
+    await _wait_for(backend.started)
+    task = service._tasks[execution["id"]]
+
+    async def ambiguous_cancel(**_kwargs):
+        return False
+
+    backend.cancel = ambiguous_cancel
+    cancelled = await service.cancel_execution(
+        execution_id=execution["id"], requested_by="owner", reason="stop",
+    )
+    backend.release.set()
+    await task
+
+    assert cancelled["status"] == "lost"
+    assert await db.list_operation_resource_refs(execution["id"]) == []
+    assert (await db.get_session_resource_handle(handle["id"]))["state"] == "quarantined"
+    assert (await db.get_resource_host("a"))["quarantined"] == 1
+
+
+@pytest.mark.asyncio
+async def test_quarantine_groups_operation_and_retained_lease_lineage(db, tmp_path):
+    service, resources, _backend = await _service(db, tmp_path)
+    resources.quarantine = AsyncMock()
+    ordinary = [
+        {"id": "ordinary-a", "host_id": "a", "fencing_token": 1},
+        {"id": "ordinary-b", "host_id": "b", "fencing_token": 1},
+    ]
+    retained = [
+        {"id": "retained-a", "execution_id": "allocator-a", "host_id": "a", "fencing_token": 2},
+        {"id": "retained-b", "execution_id": "allocator-b", "host_id": "b", "fencing_token": 2},
+    ]
+
+    await service._quarantine_leases(
+        execution_id="operation", leases=[*ordinary, *retained], reason="uncertain",
+    )
+
+    assert resources.quarantine.await_args_list == [
+        call(execution_id="operation", leases=ordinary, reason="uncertain"),
+        call(execution_id="allocator-a", leases=[retained[0]], reason="uncertain"),
+        call(execution_id="allocator-b", leases=[retained[1]], reason="uncertain"),
+    ]
 
 
 @pytest.mark.asyncio
