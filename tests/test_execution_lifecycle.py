@@ -846,6 +846,29 @@ async def test_engine_stop_counts_execution_listener_without_live_agent():
 
 
 @pytest.mark.asyncio
+async def test_execution_stop_listener_releases_session_reservation():
+    from nerve.agent.engine import AgentEngine
+
+    execution_service = SimpleNamespace(cancel_session=AsyncMock(return_value=True))
+    resource_service = SimpleNamespace(
+        cleanup_session_reservation=AsyncMock(return_value=True),
+    )
+    engine = SimpleNamespace(
+        _execution_stop_listener=None,
+        _stop_listeners=[],
+        resource_service=resource_service,
+        sessions=SimpleNamespace(_on_archive=None),
+    )
+    engine.add_stop_listener = engine._stop_listeners.append
+
+    AgentEngine.set_execution_service(engine, execution_service)
+
+    assert await engine._execution_stop_listener("owner") is True
+    execution_service.cancel_session.assert_awaited_once_with("owner")
+    resource_service.cleanup_session_reservation.assert_awaited_once_with("owner")
+
+
+@pytest.mark.asyncio
 async def test_session_archive_invokes_execution_cancellation_hook(db, owner):
     from nerve.agent.sessions import SessionManager
 

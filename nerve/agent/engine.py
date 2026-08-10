@@ -378,7 +378,17 @@ class AgentEngine:
         self._execution_stop_listener = None
         self.sessions._on_archive = None
         if service is not None:
-            self._execution_stop_listener = service.cancel_session
+            async def cancel_for_stop(session_id: str) -> bool:
+                cancelled = await service.cancel_session(session_id)
+                resource_service = getattr(self, "resource_service", None)
+                released = (
+                    await resource_service.cleanup_session_reservation(session_id)
+                    if resource_service is not None
+                    else False
+                )
+                return bool(cancelled or released)
+
+            self._execution_stop_listener = cancel_for_stop
             self.add_stop_listener(self._execution_stop_listener)
 
             async def cancel_for_archive(session_id: str) -> bool:
