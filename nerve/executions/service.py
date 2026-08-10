@@ -501,9 +501,26 @@ class ExecutionService:
         try:
             reservation = row["plan"].get("session_reservation")
             if reservation:
+                await self.db.append_execution_log(
+                    execution_id,
+                    stream="stdout",
+                    text=(
+                        "stage=reservation_wait "
+                        f"pool={reservation['pool']} slot=session\n"
+                    ),
+                )
                 async with self.resource_manager.use_session_reservation(session_id=row["session_id"], pool=str(reservation["pool"]), worktree=str(reservation["worktree"])) as held:
                     lease = _bind_session_reservation_slot(
                         row["plan"], reservation, held["lease"],
+                    )
+                    await self.db.append_execution_log(
+                        execution_id,
+                        stream="stdout",
+                        text=(
+                            "stage=reservation_acquired "
+                            f"pool={held['pool']} host={lease['host_id']} "
+                            f"lease={lease['id']}\n"
+                        ),
                     )
                     await self._run_with_leases(execution_id, row, [lease], held)
                 return
@@ -595,6 +612,13 @@ class ExecutionService:
             async def emit(stream: str, text: str) -> None:
                 await self.db.append_execution_log(execution_id, stream=stream, text=text)
 
+            await emit(
+                "stdout",
+                "stage=backend_dispatch "
+                f"kind={plan.get('kind')} "
+                f"host={leases[0].get('host_id', 'local') if leases else 'local'}\n",
+            )
+
             async def started(handle: Mapping[str, Any]) -> None:
                 won = await self.db.transition_execution(
                     execution_id, to_status="running", expect=("starting",),
@@ -611,6 +635,12 @@ class ExecutionService:
                         grace_seconds=int(policy.get("grace_seconds", 5)),
                         mode=str(policy.get("mode", "terminate")),
                     )
+                    return
+                await emit(
+                    "stdout",
+                    "stage=remote_started "
+                    f"job={handle.get('job_id', 'unknown')}\n",
+                )
                 await self._broadcast(execution_id)
 
             try:
