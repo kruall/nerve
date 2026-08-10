@@ -111,6 +111,21 @@ def test_framed_protocol_round_trips_binary_pack_and_rejects_bad_frames():
             remote_supervisor._decode_frame(frame)
 
 
+@pytest.mark.asyncio
+async def test_ssh_supervisor_operations_match_the_remote_frame_contract():
+    assert OpenSshSupervisor._OPERATIONS == remote_supervisor._FRAME_OPERATIONS
+    for operation in OpenSshSupervisor._OPERATIONS:
+        request, pack = remote_supervisor._decode_frame(
+            OpenSshSupervisor._frame({"version": 1, "operation": operation})
+        )
+        assert request["operation"] == operation
+        assert pack == b""
+
+    with pytest.raises(SshTransportError, match="unsupported SSH supervisor operation"):
+        # A typo or an unimplemented operation must not become an SSH request.
+        await OpenSshSupervisor()._rpc(None, "spin_run", {})
+
+
 def test_remote_rpc_stdout_is_a_single_framed_response(monkeypatch):
     output = io.BytesIO()
     request = remote_supervisor._encode_frame({"version": 1, "operation": "status", "root": "/bad", "job_id": "bad", "fencing_token": 1})

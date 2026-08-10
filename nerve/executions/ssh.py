@@ -173,6 +173,7 @@ class RemoteSupervisor(Protocol):
     async def files(self, connection: SshConnection, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
     async def artifact_put(self, connection: SshConnection, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
     async def artifact_get(self, connection: SshConnection, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
+    async def ydb_publish(self, connection: SshConnection, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
     async def artifact_transfer_prepare_destination(self, connection: SshConnection, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
     async def artifact_transfer_prepare_source(self, connection: SshConnection, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
     async def artifact_transfer_receive(self, connection: SshConnection, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
@@ -186,6 +187,16 @@ class OpenSshSupervisor:
     _MAGIC = b"NRS1"
     _MAX_HEADER = 64 * 1024
     _MAX_PACK = 512 * 1024 * 1024
+    # This must match remote_supervisor._FRAME_OPERATIONS.  Validate before
+    # opening SSH so backend additions (for example a mistaken ``spin_run``)
+    # fail locally rather than being misclassified as transport ambiguity.
+    _OPERATIONS = frozenset({
+        "start", "sync", "spin_prepare", "artifact_put", "artifact_get",
+        "ydb_publish", "artifact_transfer_prepare_destination",
+        "artifact_transfer_prepare_source", "artifact_transfer_receive",
+        "artifact_transfer_status", "artifact_transfer_cancel",
+        "artifact_transfer_cleanup", "status", "cancel", "tail", "files",
+    })
 
     @classmethod
     def _frame(cls, request: Mapping[str, Any], pack: bytes = b"") -> bytes:
@@ -215,6 +226,8 @@ class OpenSshSupervisor:
 
     async def _rpc(self, connection: SshConnection, operation: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         # Never log connection coordinates, payload fields, or artifact data.
+        if operation not in self._OPERATIONS:
+            raise SshTransportError("unsupported SSH supervisor operation")
         logger.info("ssh_rpc started operation=%s connection=%s", operation, connection.name)
         if shutil.which("ssh") is None:
             logger.warning("ssh_rpc failed operation=%s connection=%s reason=no_client", operation, connection.name)

@@ -36,6 +36,17 @@ _MAX_PACK = 512 * 1024 * 1024
 _MAX_ARTIFACT_GET = 32 * 1024
 _TERMINAL_STATE_BY_UNKNOWN_EXIT_CODE = "failed"
 _SPIN_RETENTION_SECONDS = 24 * 60 * 60
+# Keep this explicit protocol surface small.  The SSH client has a matching
+# allowlist so a new backend method cannot accidentally emit an operation the
+# installed standalone supervisor will reject.
+_FRAME_OPERATIONS = frozenset({
+    "start", "sync", "spin_prepare", "artifact_put", "artifact_get",
+    "ydb_publish", "artifact_transfer_prepare_destination",
+    "artifact_transfer_prepare_source", "artifact_transfer_receive",
+    "artifact_transfer_status", "artifact_transfer_cancel",
+    "artifact_transfer_cleanup", "status", "cancel", "tail", "files",
+})
+_PACK_OPERATIONS = frozenset({"sync", "artifact_put"})
 
 
 def _decode_frame(raw: bytes) -> tuple[dict[str, Any], bytes]:
@@ -55,9 +66,9 @@ def _decode_frame(raw: bytes) -> tuple[dict[str, Any], bytes]:
     if not isinstance(request, dict) or request.get("version") != _VERSION:
         raise ValueError("unsupported frame version")
     operation = request.get("operation")
-    if operation not in {"start", "sync", "spin_prepare", "artifact_put", "artifact_get", "ydb_publish", "artifact_transfer_prepare_destination", "artifact_transfer_prepare_source", "artifact_transfer_receive", "artifact_transfer_status", "artifact_transfer_cancel", "artifact_transfer_cleanup", "status", "cancel", "tail", "files"}:
+    if operation not in _FRAME_OPERATIONS:
         raise ValueError("invalid frame operation")
-    if pack_size and operation not in {"sync", "artifact_put"}:
+    if pack_size and operation not in _PACK_OPERATIONS:
         raise ValueError("binary pack is only permitted for sync or artifact_put")
     return request, raw[16 + header_size:]
 

@@ -330,6 +330,12 @@ host-level `flock` while the process group exists. A cancellation reply is
 accepted only when the worker reports that process group quiescent. Transport
 ambiguity therefore quarantines the lease rather than releasing the host.
 
+The protocol does not negotiate individual operations: the installed worker
+artifact must be from a release that accepts every enabled backend RPC. In
+particular, remote SPIN uses the metadata-only `spin_prepare` RPC before the
+normal fenced `start`; install the reviewed supervisor artifact before enabling
+remote SPIN on a host.
+
 The shipped `ydb.build` and `ydb.test` examples select only `ydb-build` and
 `ydb-test` pools. The test profile requires `GOOD` and final `Ok`, and rejects
 known build/test failure markers; a zero exit status alone is not success.
