@@ -54,7 +54,7 @@ def _decode_frame(raw: bytes) -> tuple[dict[str, Any], bytes]:
     if not isinstance(request, dict) or request.get("version") != _VERSION:
         raise ValueError("unsupported frame version")
     operation = request.get("operation")
-    if operation not in {"start", "sync", "artifact_put", "artifact_get", "artifact_transfer_prepare_destination", "artifact_transfer_prepare_source", "artifact_transfer_receive", "artifact_transfer_status", "artifact_transfer_cancel", "artifact_transfer_cleanup", "status", "cancel", "tail", "files"}:
+    if operation not in {"start", "sync", "artifact_put", "artifact_get", "ydb_publish", "artifact_transfer_prepare_destination", "artifact_transfer_prepare_source", "artifact_transfer_receive", "artifact_transfer_status", "artifact_transfer_cancel", "artifact_transfer_cleanup", "status", "cancel", "tail", "files"}:
         raise ValueError("invalid frame operation")
     if pack_size and operation not in {"sync", "artifact_put"}:
         raise ValueError("binary pack is only permitted for sync or artifact_put")

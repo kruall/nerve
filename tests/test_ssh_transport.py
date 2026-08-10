@@ -211,6 +211,13 @@ def test_artifact_frame_allows_binary_only_for_the_fixed_put_operation():
     assert request["operation"] == "artifact_put" and received == payload
 
 
+def test_remote_supervisor_frame_allows_ydb_publish_without_binary_payload():
+    request, received = remote_supervisor._decode_frame(
+        OpenSshSupervisor._frame({"version": 1, "operation": "ydb_publish"})
+    )
+    assert request["operation"] == "ydb_publish" and received == b""
+
+
 def test_artifact_endpoint_validation_rejects_unknown_root_before_lease(tmp_path):
     backend, _local_root = _artifact_backend(tmp_path, SimpleNamespace())
 
