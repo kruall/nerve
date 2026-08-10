@@ -141,6 +141,47 @@ The built-in local backend executes literal argv with no shell. Resource
 transport requires a configured inventory/backend implementation; lease
 acquisition and release remain service-owned and are never model-managed.
 
+## Remote artifacts
+
+The SSH supervisor exposes a fixed `artifact_put` RPC for copying a verified
+local control-host file to a leased resource host. The caller provides a local
+source that is pre-checked for its exact size and SHA-256, a lease id/fencing
+token, and a relative destination below the connection's configured artifact
+root. The supervisor checks the fence, rejects traversal and symlink escapes,
+writes a private temporary sibling, verifies size and SHA-256 again, then
+atomically renames it into place and removes temporary state on failure.
+
+Resource requests that need more than one host are acquired as a single durable
+bundle: either every slot is fenced and assigned in one transaction or no slot
+is assigned. Queue ordering is durable and deterministic across restarts, so a
+two-host operation cannot hold one pool while waiting on another.
+
+`artifact_transfer` accepts tagged endpoints. A remote endpoint contains only
+`pool`, a configured relative connection artifact root, and relative path; a
+localhost endpoint is exactly `{host: localhost, artifact_root: <configured
+local root id>, path: <relative path>}`. localhost-to-localhost is rejected.
+Plans retain only root ids and relative paths. Remote-to-remote creates
+`source` and `destination` slots; local-to-remote creates only `destination`,
+and remote-to-local creates only `source`. Connection coordinates are never
+tool input. The destination
+worker generates a one-time client key, then connects directly to the source
+worker's ephemeral sshd. The control plane relays only public keys and transfer
+metadata, never artifact bytes. sshd uses a fresh host key, private state below
+the reviewed remote root, a forced fixed `artifact-send` helper, and disables
+PTY, shell, forwarding, agent/X11 forwarding, and tunnels. The destination
+writes SSH stdout to a private temporary sibling, verifies the source size and
+SHA-256, and atomically renames it. Success removes transfer key/server state;
+cancellation ambiguity quarantines both leases.
+
+Remote-to-local downloads are limited to 32 KiB while the deployed NRS1
+response frame is JSON-only. Larger copies fail explicitly rather than being
+silently buffered in the control process.
+
+Local-to-remote uploads use the existing authenticated supervisor channel and
+are capped by the 512 MiB NRS1 binary-frame limit; the control process buffers
+that frame. Large benchmark artifacts should therefore use direct
+remote-to-remote transfer rather than staging through localhost.
+
 ## Session-sticky YDB builders
 
 When `resources.ydb_worktree_root` is configured, the owner-session tools
@@ -260,7 +301,8 @@ copy `nerve/executions/remote_supervisor.py` from the reviewed release to that
 path and mark it executable. The transport sends exactly one `NRS1` frame on
 stdin: four-byte magic, 32-bit bounded JSON-header length, UTF-8 JSON header
 with `version: 1`, 64-bit raw-pack length, then raw pack bytes. Only `sync`
-accepts a pack. The worker requires exact EOF after the declared payload and
+and the legacy one-way `artifact_put` accept a pack. The direct transfer RPCs
+are metadata-only. The worker requires exact EOF after the declared payload and
 writes exactly one framed response to stdout; diagnostics and job output never
 share stdout. The worker stores a fenced job record and holds a
 host-level `flock` while the process group exists. A cancellation reply is

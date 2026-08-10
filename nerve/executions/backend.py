@@ -20,6 +20,10 @@ class ExecutionBackendError(RuntimeError):
     """A backend cannot execute the normalized plan."""
 
 
+class ExecutionBackendUncertain(ExecutionBackendError):
+    """Remote work may still exist, so selected resources must be quarantined."""
+
+
 @dataclass(frozen=True)
 class BackendResult:
     exit_code: int | None

@@ -20,6 +20,7 @@ from nerve.executions.backend import (
     BackendResult,
     ExecutionBackend,
     ExecutionBackendError,
+    ExecutionBackendUncertain,
     LocalExecutionBackend,
     NoResourceLeaseManager,
     ResourceLeaseManager,
@@ -138,6 +139,39 @@ class ExecutionService:
             with contextlib.suppress(OSError):
                 pack_path.unlink()
             raise
+
+    async def start_artifact_transfer(self, *, session_id: str, source: Mapping[str, Any], destination: Mapping[str, Any], auto_continue: bool = True) -> Mapping[str, Any]:
+        """Persist a fenced remote/local transfer plan; endpoints have no coordinates."""
+        def endpoint(value: Mapping[str, Any], name: str) -> tuple[str, str, str, bool]:
+            if not isinstance(value, Mapping):
+                raise ValueError("artifact transfer " + name + " endpoint is invalid")
+            local = value.get("host") == "localhost"
+            allowed = {"host", "path", "artifact_root"} if local else {"pool", "path", "artifact_root"}
+            if set(value) - allowed or (local and set(value) != allowed):
+                raise ValueError("artifact transfer " + name + " endpoint is invalid")
+            pool = "localhost" if local else value.get("pool")
+            path, root = value.get("path"), value.get("artifact_root")
+            if not all(isinstance(x, str) and x and "\x00" not in x for x in (pool, path, root)):
+                raise ValueError("artifact transfer " + name + " endpoint is invalid")
+            from pathlib import PurePosixPath
+            for part in (path, root):
+                parsed = PurePosixPath(part)
+                if parsed.is_absolute() or ".." in parsed.parts or not parsed.parts:
+                    raise ValueError("artifact transfer paths must be confined relative paths")
+            return pool, path, root, local
+        sp, sx, sr, source_local = endpoint(source, "source"); dp, dx, dr, destination_local = endpoint(destination, "destination")
+        if source_local and destination_local:
+            raise ValueError("localhost-to-localhost artifact transfer is not supported")
+        local_roots = getattr(getattr(self.resource_manager, "inventory", None), "local_artifact_roots", {})
+        for local, root in ((source_local, sr), (destination_local, dr)):
+            if local and root not in local_roots:
+                raise ValueError("artifact transfer local artifact root is not configured")
+        resources = ({"destination": dp} if source_local else {"source": sp} if destination_local else {"source": sp, "destination": dp})
+        plan = {"kind": "artifact_transfer", "profile_version": "1", "profile_hash": "built-in-artifact-transfer-v1",
+                "resources": resources, "artifact_transfer": {"transfer_id": "transfer-" + uuid.uuid4().hex, "source_path": sx, "source_root": sr, "source_local": source_local, "destination_path": dx, "destination_root": dr, "destination_local": destination_local},
+                "steps": [], "result": {"success_exit_codes": [0]}, "timeout_seconds": 86400,
+                "cancellation": {"mode": "terminate", "grace_seconds": 10, "run_cleanup": False}}
+        return await self._start_serialized(session_id=session_id, plan=plan, profile_snapshot={"kind": "artifact_transfer", "title": "direct artifact transfer", "source": "built-in reviewed transfer"}, auto_continue=auto_continue)
 
     async def inspect_ydb_files(self, *, session_id: str, operation: str, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
         inspect = getattr(self.backend, "inspect_ydb_files", None)
@@ -358,6 +392,22 @@ class ExecutionService:
                 await self.db.request_execution_cancel(execution_id, reason="lifecycle task cancelled")
                 await self.db.finalize_execution_cancelled(execution_id); await self._broadcast(execution_id)
             raise
+        except ExecutionBackendUncertain as exc:
+            if not self._stopping:
+                await self.resource_manager.quarantine(
+                    execution_id=execution_id,
+                    leases=leases,
+                    reason="remote execution cleanup could not prove quiescence",
+                )
+                leases = []
+                won = await self.db.finish_execution(
+                    execution_id,
+                    status="failed",
+                    result={"outcome": "failed", "summary": str(exc), "error": "remote_quiescence_unknown"},
+                )
+                await self._broadcast(execution_id)
+                if won:
+                    self._schedule_continuation(execution_id)
         except Exception as exc:
             if not self._stopping:
                 logger.warning("Execution %s failed in lifecycle (%s)", execution_id, type(exc).__name__)

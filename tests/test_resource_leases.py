@@ -49,6 +49,49 @@ async def test_fifo_queue_survives_service_recreation(db):
     await asyncio.wait_for(two, 1)
 
 @pytest.mark.asyncio
+async def test_multi_slot_bundle_is_all_or_none_and_cannot_deadlock(db):
+    config = {"connections":["lab-ssh"], "hosts":[
+        {"id":"a", "connection_ref":"lab-ssh"}, {"id":"b", "connection_ref":"lab-ssh"}],
+        "pools":[{"id":"a", "members":["a"]}, {"id":"b", "members":["b"]}]}
+    inventory = ResourceInventory(db, config); await inventory.initialize()
+    service = LeaseService(db=db, inventory=inventory)
+    # Reverse slot order was the old sequential-acquire deadlock shape.
+    one = asyncio.create_task(service.acquire(execution_id="one", session_id="s1", requests=[{"slot":"left", "pool":"a"}, {"slot":"right", "pool":"b"}]))
+    two = asyncio.create_task(service.acquire(execution_id="two", session_id="s2", requests=[{"slot":"right", "pool":"b"}, {"slot":"left", "pool":"a"}]))
+    first = await asyncio.wait_for(one, 1)
+    assert {lease["host_id"] for lease in first} == {"a", "b"}
+    assert not two.done()
+    await service.release(execution_id="one", leases=first)
+    second = await asyncio.wait_for(two, 1)
+    assert {lease["host_id"] for lease in second} == {"a", "b"}
+
+
+@pytest.mark.asyncio
+async def test_queued_bundle_is_reused_after_waiter_restart(db):
+    inventory = ResourceInventory(db, CONFIG); await inventory.initialize()
+    service = LeaseService(db=db, inventory=inventory)
+    held = await service.acquire(
+        execution_id="blocker", session_id="blocker-session",
+        requests=[{"slot": "worker", "pool": "build"}],
+    )
+    first = asyncio.create_task(service.acquire(
+        execution_id="restarted", session_id="session-a",
+        requests=[{"slot": "worker", "pool": "build"}],
+    ))
+    await asyncio.sleep(.02)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    resumed = asyncio.create_task(service.acquire(
+        execution_id="restarted", session_id="session-a",
+        requests=[{"slot": "worker", "pool": "build"}],
+    ))
+    await service.release(execution_id="blocker", leases=held)
+    acquired = await asyncio.wait_for(resumed, 1)
+    assert acquired[0]["slot"] == "worker"
+
+@pytest.mark.asyncio
 async def test_expiry_moves_to_revoking_and_never_frees_host(db):
     inventory=ResourceInventory(db, CONFIG); await inventory.initialize(); service=LeaseService(db=db, inventory=inventory)
     lease=(await service.acquire(execution_id="old",session_id="s",requests=[{"pool":"build"}]))[0]

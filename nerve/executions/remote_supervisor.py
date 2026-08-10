@@ -13,13 +13,16 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
 import time
 import shutil
+import shlex
 import struct
 import contextlib
+import socket
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
@@ -28,6 +31,9 @@ _MAGIC = b"NRS1"
 _VERSION = 1
 _MAX_HEADER = 64 * 1024
 _MAX_PACK = 512 * 1024 * 1024
+# artifact_get is deliberately bounded until the streaming NRS extension is
+# deployed everywhere.  It is not advertised as a large-artifact operation.
+_MAX_ARTIFACT_GET = 32 * 1024
 _TERMINAL_STATE_BY_UNKNOWN_EXIT_CODE = "failed"
 
 
@@ -48,10 +54,10 @@ def _decode_frame(raw: bytes) -> tuple[dict[str, Any], bytes]:
     if not isinstance(request, dict) or request.get("version") != _VERSION:
         raise ValueError("unsupported frame version")
     operation = request.get("operation")
-    if operation not in {"start", "sync", "status", "cancel", "tail", "files"}:
+    if operation not in {"start", "sync", "artifact_put", "artifact_get", "artifact_transfer_prepare_destination", "artifact_transfer_prepare_source", "artifact_transfer_receive", "artifact_transfer_status", "artifact_transfer_cancel", "artifact_transfer_cleanup", "status", "cancel", "tail", "files"}:
         raise ValueError("invalid frame operation")
-    if pack_size and operation != "sync":
-        raise ValueError("binary pack is only permitted for sync")
+    if pack_size and operation not in {"sync", "artifact_put"}:
+        raise ValueError("binary pack is only permitted for sync or artifact_put")
     return request, raw[16 + header_size:]
 
 
@@ -73,6 +79,15 @@ def _safe_root(value: str) -> Path:
     if not path.is_absolute() or ".." in path.parts:
         raise ValueError("invalid job root")
     return Path(path)
+
+
+_UNIX_ACCOUNT = re.compile(r"[a-z_][a-z0-9_-]{0,31}$")
+
+
+def _validate_unix_account(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not _UNIX_ACCOUNT.fullmatch(value):
+        raise ValueError(f"invalid {field}")
+    return value
 
 
 def _job_dir(root: Path, job_id: str) -> Path:
@@ -120,6 +135,49 @@ def _alive(pgid: int) -> bool:
     except ProcessLookupError: return False
     except PermissionError: return True
     return True
+
+
+def _stream_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        while True:
+            chunk = stream.read(1 << 16)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _wait_for_transfer_listener(address: str, port: int, process_group: int) -> bool:
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if not _alive(process_group):
+            return False
+        try:
+            with socket.create_connection((address, port), timeout=0.1):
+                return True
+        except OSError:
+            time.sleep(.05)
+    return False
+
+
+def _wait_for_quiescence(process_group: int, grace_seconds: float) -> bool:
+    end = time.monotonic() + max(0.0, float(grace_seconds))
+    while time.monotonic() < end:
+        if not _alive(process_group):
+            return True
+        time.sleep(.05)
+    return not _alive(process_group)
+
+
+def _kill_process_group(process_group: int, grace_seconds: float) -> bool:
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(process_group, signal.SIGTERM)
+    if _wait_for_quiescence(process_group, grace_seconds):
+        return True
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(process_group, signal.SIGKILL)
+    return _wait_for_quiescence(process_group, 0.25)
 
 
 def _monitor(payload_path: str) -> None:
@@ -439,13 +497,223 @@ def _files(request: Mapping[str, Any]) -> dict[str, Any]:
     raise ValueError("invalid file action")
 
 
+def _artifact_root(request: Mapping[str, Any]) -> Path:
+    """Return a configured artifact root without accepting arbitrary paths.
+
+    The control plane supplies ``root`` from a named connection's reviewed
+    configuration.  ``artifact_root`` is deliberately relative to it, so an
+    RPC caller cannot turn artifact transfer into a general remote file write.
+    """
+    root = _safe_root(str(request["root"])).resolve()
+    value = request.get("artifact_root", "artifacts")
+    if not isinstance(value, str) or "\0" in value:
+        raise ValueError("invalid artifact root")
+    relative = PurePosixPath(value)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("artifact root escapes configured root")
+    result = root.joinpath(*relative.parts)
+    result.mkdir(parents=True, exist_ok=True)
+    resolved = result.resolve()
+    if resolved != root and root not in resolved.parents:
+        raise ValueError("artifact root escapes configured root")
+    return resolved
+
+
+def _artifact_target(root: Path, value: Any) -> Path:
+    if not isinstance(value, str) or not value or "\0" in value or "\n" in value or "\r" in value:
+        raise ValueError("invalid artifact relative path")
+    path = PurePosixPath(value)
+    if path.is_absolute() or ".." in path.parts or path.name in {"", "."}:
+        raise ValueError("artifact path escapes configured root")
+    target = root.joinpath(*path.parts)
+    # Existing parents must resolve beneath the configured root.  Create one
+    # component at a time so a pre-existing symlink cannot redirect writes.
+    parent = root
+    for component in path.parts[:-1]:
+        parent = parent / component
+        if parent.exists():
+            resolved = parent.resolve()
+            if resolved != root and root not in resolved.parents:
+                raise ValueError("artifact path symlink escapes configured root")
+        else:
+            parent.mkdir(mode=0o700)
+    return target
+
+
+def _advance_artifact_fence(root: Path, request: Mapping[str, Any]) -> tuple[int, str]:
+    token = int(request["fencing_token"])
+    lease_id = str(request.get("lease_id") or "")
+    if not lease_id or not lease_id.replace("-", "").isalnum():
+        raise ValueError("invalid artifact lease id")
+    fence = root / ".nerve-artifact-fence.json"
+    if fence.exists():
+        previous = json.loads(fence.read_text())
+        if int(previous.get("fencing_token", -1)) > token:
+            raise PermissionError("stale fencing token")
+    temporary = fence.with_suffix(".tmp")
+    temporary.write_text(json.dumps({
+        "fencing_token": token, "lease_id": lease_id, "updated_at": time.time(),
+    }))
+    os.chmod(temporary, 0o600)
+    temporary.replace(fence)
+    return token, lease_id
+
+
+def _artifact_put(request: Mapping[str, Any], pack: bytes) -> dict[str, Any]:
+    """Install one verified artifact through the authenticated supervisor RPC.
+
+    This is intentionally only a control-host-to-leased-host primitive.  It
+    has no SSH coordinate, command, forwarding, or shell input.  A future
+    remote-to-remote data plane must use the separately designed isolated
+    ephemeral sshd protocol rather than silently relaying bytes here.
+    """
+    root = _artifact_root(request)
+    _advance_artifact_fence(root, request)
+    expected_size, expected_sha = request.get("size"), request.get("sha256")
+    if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size < 0:
+        raise ValueError("invalid artifact size")
+    if not isinstance(expected_sha, str) or len(expected_sha) != 64 or any(c not in "0123456789abcdef" for c in expected_sha):
+        raise ValueError("invalid artifact SHA-256")
+    if len(pack) != expected_size or hashlib.sha256(pack).hexdigest() != expected_sha:
+        raise ValueError("artifact checksum or size verification failed")
+    target = _artifact_target(root, request.get("path"))
+    temporary = target.with_name("." + target.name + ".nerve-transfer-" + os.urandom(8).hex())
+    try:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(pack)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if temporary.stat().st_size != expected_size or _stream_sha256(temporary) != expected_sha:
+            raise ValueError("artifact verification failed after staging")
+        temporary.replace(target)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
+    return {"ok": True, "path": str(request["path"]), "size": expected_size, "sha256": expected_sha}
+
+
+def _artifact_get(request: Mapping[str, Any]) -> dict[str, Any]:
+    """Read one fenced artifact below a reviewed root.
+
+    The NRS1 response is JSON-only, so this compatibility operation is capped
+    at 8 MiB.  The client verifies the returned digest before atomic install.
+    """
+    root = _artifact_root(request)
+    # Persisting/validating the fence is also required for reads: a stale
+    # lease must not observe an artifact that a newer owner replaced.
+    _advance_artifact_fence(root, request)
+    source = _artifact_target(root, request.get("path"))
+    if not source.is_file() or source.is_symlink():
+        raise ValueError("artifact source is unavailable")
+    size = source.stat().st_size
+    if size > _MAX_ARTIFACT_GET:
+        raise ValueError("artifact exceeds configured NRS1 artifact_get limit")
+    digest = hashlib.sha256()
+    chunks: list[bytes] = []
+    with source.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk); chunks.append(chunk)
+    import base64
+    return {"ok": True, "size": size, "sha256": digest.hexdigest(), "data": base64.b64encode(b"".join(chunks)).decode("ascii")}
+
+
+def _transfer_dir(root: Path, ident: Any) -> Path:
+    if not isinstance(ident, str) or not ident.startswith("transfer-") or not ident[9:].isalnum(): raise ValueError("invalid transfer id")
+    value = root / ".nerve-transfers" / ident; value.mkdir(parents=True, mode=0o700, exist_ok=True); return value
+
+def _transfer_save(directory: Path, state: Mapping[str, Any]) -> None:
+    temporary = directory / ".state.tmp"; temporary.write_text(json.dumps(state, separators=(",", ":"))); os.chmod(temporary, 0o600); temporary.replace(directory / "state.json")
+
+def _transfer_load(request: Mapping[str, Any]) -> tuple[Path, dict[str, Any]]:
+    directory = _transfer_dir(_safe_root(str(request["root"])), request.get("transfer_id")); state = json.loads((directory / "state.json").read_text())
+    if state.get("fencing_token") != int(request["fencing_token"]): raise PermissionError("stale fencing token")
+    return directory, state
+
+def _artifact_transfer_prepare_destination(request: Mapping[str, Any]) -> dict[str, Any]:
+    directory = _transfer_dir(_safe_root(str(request["root"])), request.get("transfer_id")); key = directory / "client_key"; keygen = str(request.get("ssh_keygen_path"))
+    if not keygen.startswith("/") or ".." in PurePosixPath(keygen).parts: raise ValueError("invalid ssh-keygen path")
+    subprocess.run([keygen, "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); os.chmod(key, 0o600)
+    _transfer_save(directory, {"role":"destination", "state":"prepared", "fencing_token":int(request["fencing_token"]), "client_key":str(key)})
+    return {"ok":True, "client_public_key":key.with_suffix(".pub").read_text().strip()}
+
+def _artifact_transfer_prepare_source(request: Mapping[str, Any]) -> dict[str, Any]:
+    root = _safe_root(str(request["root"])); directory = _transfer_dir(root, request.get("transfer_id")); source = _artifact_target(_artifact_root(request), request.get("path"))
+    public, sshd, supervisor = request.get("client_public_key"), str(request.get("sshd_path")), str(request.get("supervisor_path"))
+    transfer_user = _validate_unix_account(request.get("transfer_user"), "transfer_user")
+    if not source.is_file() or not isinstance(public, str) or not public.startswith("ssh-ed25519 ") or "\n" in public or not all(x.startswith("/") and ".." not in PurePosixPath(x).parts for x in (sshd, supervisor)): raise ValueError("invalid direct transfer setup")
+    address, port = str(request.get("bind_address")), int(request.get("port")); host_key, authorized, config = directory/"host_key", directory/"authorized_keys", directory/"sshd_config"
+    subprocess.run([str(request.get("ssh_keygen_path") or "/usr/bin/ssh-keygen"), "-q", "-t", "ed25519", "-N", "", "-f", str(host_key)], check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    forced = " ".join(shlex.quote(value) for value in (
+        supervisor, "artifact-send", str(request["transfer_id"]), str(root),
+    ))
+    authorized.write_text('restrict ' + public + "\n")
+    config.write_text("\n".join(["Port "+str(port), "ListenAddress "+address, "HostKey "+str(host_key), "AuthorizedKeysFile "+str(authorized), "PidFile "+str(directory/"sshd.pid"), "AuthenticationMethods publickey", "PubkeyAuthentication yes", "PasswordAuthentication no", "KbdInteractiveAuthentication no", "PermitRootLogin prohibit-password", "PermitTTY no", "AllowUsers "+transfer_user, "ForceCommand "+forced, "DisableForwarding yes", "AllowTcpForwarding no", "AllowAgentForwarding no", "X11Forwarding no", "PermitTunnel no", "GatewayPorts no", "UsePAM no", "LogLevel ERROR"]) + "\n")
+    proc = subprocess.Popen([sshd, "-D", "-f", str(config), "-E", str(directory/"sshd.log")], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    process_group = os.getpgid(proc.pid)
+    state={"role":"source", "state":"serving", "fencing_token":int(request["fencing_token"]), "pid":proc.pid, "process_group":process_group, "source":str(source), "size":source.stat().st_size, "sha256":_stream_sha256(source), "transfer_user":transfer_user}; _transfer_save(directory,state)
+    if not _wait_for_transfer_listener(address, port, process_group):
+        _kill_process_group(process_group, 0)
+        raise RuntimeError("direct transfer source did not start listening")
+    return {"ok":True,"address":address,"port":port,"host_public_key":host_key.with_suffix(".pub").read_text().strip(),"size":state["size"],"sha256":state["sha256"],"transfer_user":transfer_user}
+
+def _artifact_transfer_receive(request: Mapping[str, Any]) -> dict[str, Any]:
+    directory,state=_transfer_load(request)
+    target=_artifact_target(_artifact_root(request), request.get("path"))
+    address, port = str(request.get("source_address")), int(request.get("source_port"))
+    ssh, transfer_user = str(request.get("ssh_path")), _validate_unix_account(request.get("transfer_user"), "transfer_user")
+    known = directory/"known_hosts"
+    known.write_text("["+address+"]:"+str(port)+" "+str(request["source_host_key"])+"\n")
+    temporary=target.with_name("."+target.name+".nerve-transfer-"+os.urandom(8).hex())
+    try:
+        with open(temporary,"xb",buffering=0) as output:
+            proc=subprocess.Popen([ssh,"-T","-o","BatchMode=yes","-o","StrictHostKeyChecking=yes","-o","UserKnownHostsFile="+str(known),"-o","GlobalKnownHostsFile=/dev/null","-o","IdentitiesOnly=yes","-o","ForwardAgent=no","-o","ClearAllForwardings=yes","-o","RequestTTY=no","-i",state["client_key"],"-p",str(port),transfer_user+"@"+address],stdin=subprocess.DEVNULL,stdout=output,stderr=subprocess.DEVNULL,start_new_session=True)
+            state["state"]="receiving"; state["pid"]=proc.pid; state["process_group"]=os.getpgid(proc.pid); _transfer_save(directory,state)
+            returncode=proc.wait()
+        if returncode or temporary.stat().st_size != request.get("size") or _stream_sha256(temporary)!=request.get("sha256"): raise ValueError("direct artifact transfer verification failed")
+        temporary.replace(target); state["state"]="succeeded"; _transfer_save(directory,state); return {"ok":True,"size":request["size"],"sha256":request["sha256"]}
+    finally:
+        with contextlib.suppress(FileNotFoundError): temporary.unlink()
+
+def _artifact_transfer_cleanup(request: Mapping[str, Any]) -> dict[str, Any]:
+    directory,state=_transfer_load(request)
+    process_group = state.get("process_group")
+    if process_group is None:
+        process_group = state.get("pid")
+    if isinstance(process_group, bool) or not isinstance(process_group, int):
+        process_group = None
+    grace = request.get("grace_seconds", 2)
+    if process_group is None:
+        quiescent = True
+    else:
+        quiescent = _kill_process_group(int(process_group), float(grace))
+    if quiescent:
+        for item in directory.iterdir():
+            if item.name!="state.json":
+                with contextlib.suppress(OSError):
+                    if item.is_dir():
+                        shutil.rmtree(item, ignore_errors=True)
+                    else:
+                        item.unlink()
+        state["state"]="cleaned"; _transfer_save(directory,state)
+    return {"ok":True,"quiescent":quiescent}
+
+def _artifact_transfer_cancel(request: Mapping[str, Any]) -> dict[str, Any]: return _artifact_transfer_cleanup(request)
+def _artifact_transfer_status(request: Mapping[str, Any]) -> dict[str, Any]:
+    _,state=_transfer_load(request); return {"ok":True,"state":state.get("state"),"quiescent":state.get("state") in {"succeeded","cleaned","cancelled"}}
+
+def _artifact_send(ident: str, root: str) -> None:
+    directory=_transfer_dir(_safe_root(root),ident); state=json.loads((directory/"state.json").read_text())
+    if state.get("role")!="source" or state.get("state")!="serving": raise SystemExit(1)
+    with open(state["source"],"rb") as stream: shutil.copyfileobj(stream,sys.stdout.buffer)
+
 def rpc() -> None:
     try:
         request, pack = _decode_frame(sys.stdin.buffer.read())
         operation = request.pop("operation")
         request.pop("version")
-        handlers = {"start": _start, "status": _status, "cancel": _cancel, "tail": _tail, "files": _files}
-        result = _sync(request, pack) if operation == "sync" else handlers[operation](request)
+        handlers = {"start": _start, "status": _status, "cancel": _cancel, "tail": _tail, "files": _files, "artifact_get": _artifact_get, "artifact_transfer_prepare_destination": _artifact_transfer_prepare_destination, "artifact_transfer_prepare_source": _artifact_transfer_prepare_source, "artifact_transfer_receive": _artifact_transfer_receive, "artifact_transfer_status": _artifact_transfer_status, "artifact_transfer_cancel": _artifact_transfer_cancel, "artifact_transfer_cleanup": _artifact_transfer_cleanup}
+        result = _sync(request, pack) if operation == "sync" else (_artifact_put(request, pack) if operation == "artifact_put" else handlers[operation](request))
     except Exception as exc:
         # Keep errors useful to the control plane without turning this fixed
         # protocol into an unbounded remote stderr channel.
@@ -461,5 +729,7 @@ if __name__ == "__main__":
         if len(sys.argv) != 3:
             raise SystemExit("monitor mode requires exactly one request path argument")
         _monitor(sys.argv[2])
+    elif len(sys.argv) == 4 and sys.argv[1] == "artifact-send":
+        _artifact_send(sys.argv[2], sys.argv[3])
     else:
         rpc()

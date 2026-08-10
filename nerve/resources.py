@@ -23,6 +23,20 @@ class ResourceInventory:
         raw = dict(config or {})
         self.config = raw
         self.connections = set(raw.get("connections", []))
+        # Local artifacts are an explicit deployment-owned allowlist.  Keep
+        # the canonical paths private to the backend; plans carry only ids.
+        roots = raw.get("local_artifact_roots", {})
+        if not isinstance(roots, Mapping):
+            raise ResourceInventoryError("local_artifact_roots must be a mapping")
+        self.local_artifact_roots: dict[str, Path] = {}
+        for ident, value in roots.items():
+            if (not isinstance(ident, str) or not ident or not isinstance(value, str)
+                    or not value or "\0" in value):
+                raise ResourceInventoryError("local artifact roots must have non-empty ids and paths")
+            path = Path(value)
+            if not path.is_absolute():
+                raise ResourceInventoryError("local artifact roots must be absolute paths")
+            self.local_artifact_roots[ident] = path.resolve(strict=False)
         host_rows = [dict(h) for h in raw.get("hosts", []) if isinstance(h, Mapping) and h.get("id")]
         pool_rows = [dict(p) for p in raw.get("pools", []) if isinstance(p, Mapping) and p.get("id")]
         if len({str(h["id"]) for h in host_rows}) != len(host_rows):
@@ -202,48 +216,46 @@ class LeaseService:
         return await self.db.revoke_expired_resource_leases()
 
     async def acquire(self, *, execution_id: str, session_id: str, requests: Sequence[Mapping[str, Any]]) -> Sequence[Mapping[str, Any]]:
-        leases=[]
-        # Profiles currently have one remote slot in normal use. Multiple slots
-        # are acquired deterministically and rolled back on partial failure.
+        if not requests:
+            return []
+        normalized = []
+        seen_slots = set()
+        for request in requests:
+            pool = str(request.get("pool") or "")
+            slot = str(request.get("slot") or "resource")
+            if not pool: raise ResourceInventoryError("resource request must select a pool")
+            if slot in seen_slots: raise ResourceInventoryError("resource request slot is duplicated")
+            seen_slots.add(slot); normalized.append((slot, pool))
+        bundle_id = f"bundle-{uuid.uuid4().hex[:12]}"
+        queued = [{"id": f"request-{uuid.uuid4().hex[:12]}", "slot": slot, "pool": pool} for slot, pool in normalized]
+        bundle = await self.db.enqueue_resource_bundle(
+            bundle_id=bundle_id, execution_id=execution_id,
+            session_id=session_id, requests=queued,
+        )
+        bundle_id = str(bundle["id"])
+        queued = list(bundle["requests"])
         try:
-            for request in requests:
-                pool=str(request.get("pool") or "")
-                if not pool: raise ResourceInventoryError("resource request must select a pool")
-                slot = str(request.get("slot") or "resource")
-                queued = await self.db.enqueue_resource_request(
-                    request_id=f"request-{uuid.uuid4().hex[:12]}", execution_id=execution_id,
-                    session_id=session_id, slot=slot, pool=pool,
-                )
-                acquired=None
-                while acquired is None:
-                    execution = await self.db.get_execution(execution_id)
-                    if execution is not None and execution.get("status") == "cancelling":
-                        await self.db.cancel_resource_requests(execution_id)
-                        raise ResourceInventoryError("resource request was cancelled")
-                    acquired = await self.db.try_acquire_resource_request(
-                        request_id=str(queued["id"]),
-                        lease_id=f"lease-{uuid.uuid4().hex[:12]}",
-                        host_ids=self.inventory.members(pool),
-                        ttl_seconds=self.ttl_seconds,
-                    )
-                    if acquired is None:
-                        await asyncio.sleep(self.poll_seconds)
-                leases.append(acquired)
-            return leases
+            while True:
+                execution = await self.db.get_execution(execution_id)
+                if execution is not None and execution.get("status") == "cancelling":
+                    await self.db.cancel_resource_requests(execution_id)
+                    raise ResourceInventoryError("resource request was cancelled")
+                acquired = await self.db.try_acquire_resource_bundle(bundle_id=bundle_id, candidates={row['id']: self.inventory.members(row['pool']) for row in queued}, ttl_seconds=self.ttl_seconds)
+                if acquired is not None:
+                    return [
+                        {**lease, "slot": request["slot"]}
+                        for lease, request in zip(acquired, queued, strict=True)
+                    ]
+                await asyncio.sleep(self.poll_seconds)
         except asyncio.CancelledError:
             execution = await self.db.get_execution(execution_id)
-            for lease in leases:
-                await self.db.release_resource_lease(
-                    lease_id=str(lease.get("id")), execution_id=execution_id,
-                    fencing_token=int(lease.get("fencing_token", -1)),
-                )
             if execution is not None and execution.get("status") == "cancelling":
                 await self.db.cancel_resource_requests(execution_id)
             else:
                 await self.db.requeue_resource_requests(execution_id)
             raise
         except Exception:
-            await self.release(execution_id=execution_id, leases=leases)
+            await self.db.cancel_resource_requests(execution_id)
             raise
 
     async def heartbeat(self, *, execution_id: str, lease: Mapping[str, Any]) -> bool:
@@ -257,11 +269,13 @@ class LeaseService:
     async def release(self, *, execution_id: str, leases: Sequence[Mapping[str, Any]]) -> None:
         for lease in leases:
             await self.db.release_resource_lease(lease_id=str(lease.get("id")), execution_id=execution_id, fencing_token=int(lease.get("fencing_token", -1)))
+        await self.db.settle_resource_bundles(execution_id)
         await self.db.cancel_resource_requests(execution_id)
 
     async def quarantine(self, *, execution_id: str, leases: Sequence[Mapping[str, Any]], reason: str) -> None:
         for lease in leases:
             await self.db.quarantine_resource_lease(lease_id=str(lease.get("id")), execution_id=execution_id, fencing_token=int(lease.get("fencing_token", -1)), reason=reason)
+        await self.db.settle_resource_bundles(execution_id)
 
     async def resource_snapshot(self) -> Mapping[str, Any]:
         await self.reconcile_expired()

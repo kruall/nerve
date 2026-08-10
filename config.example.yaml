@@ -270,6 +270,10 @@ memory:
 #   lease_ttl_seconds: 90       # expiry enters revoking; it never frees a host
 #   queue_poll_seconds: 0.25    # local waiter cadence; FIFO state is durable
 #   connections: [lab-ssh]
+#   # Explicit local roots for artifact_transfer localhost endpoints.  Values
+#   # are deployment-reviewed absolute paths; tool input uses only their ids.
+#   local_artifact_roots:
+#     control-artifacts: /var/lib/nerve/artifacts
 #   # Deployment-local SSH coordinates. This section is intentionally absent
 #   # from model-visible execution profiles; pin every worker host key.
 #   # ssh_connections:
@@ -282,6 +286,14 @@ memory:
 #   #     # Installed from nerve/executions/remote_supervisor.py; this is a
 #   #     # reviewed fixed absolute path, never an execution argument.
 #   #     supervisor_path: /usr/local/libexec/nerve-remote-supervisor
+#   #     artifact_roots: [artifacts]
+#   #     # Direct artifact_transfer only uses these reviewed connection values.
+#   #     transfer_bind_address: 10.0.0.10
+#   #     transfer_port: 31999
+#   #     transfer_user: nerve-worker  # defaults to the reviewed SSH user
+#   #     sshd_path: /usr/sbin/sshd
+#   #     ssh_path: /usr/bin/ssh
+#   #     ssh_keygen_path: /usr/bin/ssh-keygen
 #   hosts:
 #     - id: builder-a
 #       connection_ref: lab-ssh

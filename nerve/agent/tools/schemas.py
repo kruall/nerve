@@ -69,6 +69,14 @@ EXECUTION_KIND_START_SCHEMA = {
     "additionalProperties": False,
 }
 
+ARTIFACT_TRANSFER_SCHEMA = {
+    "type": "object", "properties": {
+        "source": {"oneOf": [{"type": "object", "properties": {"host": {"const": "localhost"}, "path": {"type": "string"}, "artifact_root": {"type": "string"}}, "required": ["host", "path", "artifact_root"], "additionalProperties": False}, {"type": "object", "properties": {"pool": {"type": "string"}, "path": {"type": "string"}, "artifact_root": {"type": "string"}}, "required": ["pool", "path", "artifact_root"], "additionalProperties": False}]},
+        "destination": {"oneOf": [{"type": "object", "properties": {"host": {"const": "localhost"}, "path": {"type": "string"}, "artifact_root": {"type": "string"}}, "required": ["host", "path", "artifact_root"], "additionalProperties": False}, {"type": "object", "properties": {"pool": {"type": "string"}, "path": {"type": "string"}, "artifact_root": {"type": "string"}}, "required": ["pool", "path", "artifact_root"], "additionalProperties": False}]},
+        "detached": {"type": "boolean", "default": False},
+    }, "required": ["source", "destination"], "additionalProperties": False,
+}
+
 _YDB_OPERATION_PROPERTIES = {
     "worktree": {"type": "string", "description": "Configured local YDB Git worktree top-level"},
     "args": {"type": "array", "items": {"type": "string"}, "default": [], "description": "Additional ya argv elements"},

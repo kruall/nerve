@@ -8,10 +8,13 @@ catalog and sends a JSON RPC request to ``nerve-remote-supervisor``.
 from __future__ import annotations
 
 import asyncio
+import base64
+import contextlib
 import hashlib
 import ipaddress
 import json
 import os
+import re
 import shutil
 import struct
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -19,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
-from nerve.executions.backend import BackendRecovery, BackendResult, ExecutionBackendError, LogSink, StartedSink
+from nerve.executions.backend import BackendRecovery, BackendResult, ExecutionBackendError, ExecutionBackendUncertain, LogSink, StartedSink
 
 
 class SshTransportError(ExecutionBackendError):
@@ -35,10 +38,17 @@ class SshConnection:
     known_hosts: Path | None = None
     allowed_cidrs: tuple[str, ...] = ()
     remote_roots: tuple[str, ...] = ()
+    artifact_roots: tuple[str, ...] = ("artifacts",)
     identity_file: Path | None = None
     connect_timeout_seconds: int = 15
     environment_allowlist: tuple[str, ...] = ()
     supervisor_path: str = "/usr/local/libexec/nerve-remote-supervisor"
+    transfer_bind_address: str = "127.0.0.1"
+    transfer_port: int = 31999
+    transfer_user: str = ""
+    sshd_path: str = "/usr/sbin/sshd"
+    ssh_path: str = "/usr/bin/ssh"
+    ssh_keygen_path: str = "/usr/bin/ssh-keygen"
 
     def ssh_argv(self) -> list[str]:
         """Fixed, injection-free OpenSSH options for a named connection."""
@@ -76,13 +86,16 @@ class SshConnectionCatalog:
                 raise SshTransportError("SSH connection names and definitions must be mappings")
             if {str(field).lower() for field in value} & self._FORBIDDEN:
                 raise SshTransportError("SSH connection contains forbidden raw options")
-            allowed = {"host", "user", "port", "known_hosts", "allowed_cidrs", "remote_roots", "identity_file", "connect_timeout_seconds", "environment_allowlist", "supervisor_path"}
+            allowed = {"host", "user", "port", "known_hosts", "allowed_cidrs", "remote_roots", "artifact_roots", "identity_file", "connect_timeout_seconds", "environment_allowlist", "supervisor_path", "transfer_bind_address", "transfer_port", "sshd_path", "ssh_path", "ssh_keygen_path", "transfer_user"}
             unknown = set(value) - allowed
             if unknown:
                 raise SshTransportError("unknown SSH connection fields: " + ", ".join(sorted(unknown)))
             host, user = value.get("host"), value.get("user")
             if not isinstance(host, str) or not host or not isinstance(user, str) or not user:
                 raise SshTransportError("trusted SSH connection requires host and user")
+            transfer_user = value.get("transfer_user", user)
+            if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", transfer_user):
+                raise SshTransportError("trusted SSH connection transfer_user must be a safe Unix account")
             port = value.get("port", 22)
             if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
                 raise SshTransportError("trusted SSH connection port is invalid")
@@ -93,6 +106,17 @@ class SshConnectionCatalog:
             if not isinstance(roots, list) or not roots or not all(isinstance(root, str) for root in roots):
                 raise SshTransportError("trusted SSH connection requires allowed remote_roots")
             normalized_roots = tuple(_remote_path(root, [root]) for root in roots)
+            artifact_roots = value.get("artifact_roots", ["artifacts"])
+            if (not isinstance(artifact_roots, list) or not artifact_roots
+                    or not all(isinstance(item, str) for item in artifact_roots)):
+                raise SshTransportError("trusted SSH connection requires artifact_roots")
+            normalized_artifact_roots: list[str] = []
+            for artifact_root in artifact_roots:
+                parsed = PurePosixPath(artifact_root)
+                if (not artifact_root or parsed.is_absolute() or ".." in parsed.parts
+                        or "\0" in artifact_root or artifact_root != parsed.as_posix()):
+                    raise SshTransportError("artifact_roots must be normalized relative paths")
+                normalized_artifact_roots.append(parsed.as_posix())
             cidrs = value.get("allowed_cidrs", [])
             if not isinstance(cidrs, list) or not all(isinstance(item, str) for item in cidrs):
                 raise SshTransportError("allowed_cidrs must be a list of CIDRs")
@@ -107,10 +131,24 @@ class SshConnectionCatalog:
                     or supervisor_path.startswith("//") or ".." in PurePosixPath(supervisor_path).parts
                     or supervisor_path != normalized_supervisor):
                 raise SshTransportError("supervisor_path must be a fixed absolute normalized path")
+            def fixed_executable(field: str, default: str) -> str:
+                candidate = value.get(field, default)
+                if not isinstance(candidate, str) or not candidate.startswith("/") or ".." in PurePosixPath(candidate).parts or candidate != PurePosixPath(candidate).as_posix():
+                    raise SshTransportError(field + " must be a fixed absolute normalized path")
+                return candidate
+            bind = value.get("transfer_bind_address", "127.0.0.1")
+            try: ipaddress.ip_address(bind)
+            except ValueError as exc: raise SshTransportError("transfer_bind_address must be an IP address") from exc
+            transfer_port = value.get("transfer_port", 31999)
+            if isinstance(transfer_port, bool) or not isinstance(transfer_port, int) or not 1 <= transfer_port <= 65535:
+                raise SshTransportError("transfer_port is invalid")
             self._connections[name] = SshConnection(name=name, host=host, user=user, port=port,
                 known_hosts=Path(known), allowed_cidrs=tuple(cidrs), remote_roots=normalized_roots,
+                artifact_roots=tuple(normalized_artifact_roots),
                 identity_file=Path(value["identity_file"]) if value.get("identity_file") else None,
-                connect_timeout_seconds=int(value.get("connect_timeout_seconds", 15)), environment_allowlist=tuple(env), supervisor_path=supervisor_path)
+                transfer_user=transfer_user,
+                connect_timeout_seconds=int(value.get("connect_timeout_seconds", 15)), environment_allowlist=tuple(env), supervisor_path=supervisor_path,
+                transfer_bind_address=bind, transfer_port=transfer_port, sshd_path=fixed_executable("sshd_path", "/usr/sbin/sshd"), ssh_path=fixed_executable("ssh_path", "/usr/bin/ssh"), ssh_keygen_path=fixed_executable("ssh_keygen_path", "/usr/bin/ssh-keygen"))
 
     def resolve(self, name: str) -> SshConnection:
         try:
@@ -129,6 +167,14 @@ class RemoteSupervisor(Protocol):
     async def tail(self, connection: SshConnection, job_id: str, fencing_token: int, cursor: int, root: str) -> Mapping[str, Any]: ...
     async def cancel(self, connection: SshConnection, job_id: str, fencing_token: int, grace_seconds: int, mode: str, root: str) -> Mapping[str, Any]: ...
     async def files(self, connection: SshConnection, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
+    async def artifact_put(self, connection: SshConnection, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
+    async def artifact_get(self, connection: SshConnection, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
+    async def artifact_transfer_prepare_destination(self, connection: SshConnection, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
+    async def artifact_transfer_prepare_source(self, connection: SshConnection, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
+    async def artifact_transfer_receive(self, connection: SshConnection, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
+    async def artifact_transfer_status(self, connection: SshConnection, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
+    async def artifact_transfer_cancel(self, connection: SshConnection, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
+    async def artifact_transfer_cleanup(self, connection: SshConnection, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
 
 
 class OpenSshSupervisor:
@@ -178,6 +224,18 @@ class OpenSshSupervisor:
             if len(pack) != length or hashlib.sha256(pack).hexdigest() != expected:
                 raise SshTransportError("YDB snapshot pack verification failed")
             request["snapshot"] = snapshot
+        elif operation == "artifact_put":
+            source = request.pop("source_path", None)
+            expected, length = request.get("sha256"), request.get("size")
+            if not isinstance(source, str) or not isinstance(expected, str) or not isinstance(length, int):
+                raise SshTransportError("artifact transfer has no verified local source")
+            try: pack = Path(source).read_bytes()
+            except OSError as exc: raise SshTransportError("artifact transfer source is unavailable") from exc
+            if len(pack) != length or hashlib.sha256(pack).hexdigest() != expected:
+                raise SshTransportError("artifact transfer source verification failed")
+            artifact_root = request.get("artifact_root", "artifacts")
+            if artifact_root not in connection.artifact_roots:
+                raise SshTransportError("artifact transfer root is not configured for this connection")
         request = self._frame({"version": 1, "operation": operation, **request}, pack)
         # The remote argv is a reviewed configured absolute path.  Payload is
         # stdin only, never shell syntax or a remote command argument.
@@ -203,6 +261,14 @@ class OpenSshSupervisor:
     async def tail(self, connection, job_id, fencing_token, cursor, root): return await self._rpc(connection, "tail", {"job_id": job_id, "fencing_token": fencing_token, "cursor": cursor, "root": root})
     async def cancel(self, connection, job_id, fencing_token, grace_seconds, mode, root): return await self._rpc(connection, "cancel", {"job_id": job_id, "fencing_token": fencing_token, "grace_seconds": grace_seconds, "mode": mode, "root": root})
     async def files(self, connection, request): return await self._rpc(connection, "files", request)
+    async def artifact_put(self, connection, request): return await self._rpc(connection, "artifact_put", request)
+    async def artifact_get(self, connection, request): return await self._rpc(connection, "artifact_get", request)
+    async def artifact_transfer_prepare_destination(self, connection, request): return await self._rpc(connection, "artifact_transfer_prepare_destination", request)
+    async def artifact_transfer_prepare_source(self, connection, request): return await self._rpc(connection, "artifact_transfer_prepare_source", request)
+    async def artifact_transfer_receive(self, connection, request): return await self._rpc(connection, "artifact_transfer_receive", request)
+    async def artifact_transfer_status(self, connection, request): return await self._rpc(connection, "artifact_transfer_status", request)
+    async def artifact_transfer_cancel(self, connection, request): return await self._rpc(connection, "artifact_transfer_cancel", request)
+    async def artifact_transfer_cleanup(self, connection, request): return await self._rpc(connection, "artifact_transfer_cleanup", request)
 
 
 class SshExecutionBackend:
@@ -213,6 +279,44 @@ class SshExecutionBackend:
         self.inventory, self.connections, self.supervisor = inventory, connections, supervisor or OpenSshSupervisor()
         self.poll_seconds = poll_seconds
         self._jobs: dict[str, tuple[SshConnection, str, int, str]] = {}
+        self._transfers: dict[str, tuple[SshConnection, Mapping[str, Any], SshConnection, Mapping[str, Any], str]] = {}
+
+    def _local_artifact(self, root_id: Any, relative: Any, *, output: bool) -> Path:
+        roots = getattr(self.inventory, "local_artifact_roots", {})
+        root = roots.get(root_id)
+        if root is None:
+            raise SshTransportError("local artifact root is not configured")
+        if not isinstance(relative, str) or not relative or "\0" in relative:
+            raise SshTransportError("invalid local artifact path")
+        rel = PurePosixPath(relative)
+        if rel.is_absolute() or ".." in rel.parts:
+            raise SshTransportError("local artifact path escapes configured root")
+        root = Path(root).resolve(strict=True)
+        target = root.joinpath(*rel.parts)
+        parent = target.parent.resolve(strict=False)
+        if parent != root and root not in parent.parents:
+            raise SshTransportError("local artifact path symlink escapes configured root")
+        if output:
+            target.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+            parent = target.parent.resolve(strict=True)
+            if parent != root and root not in parent.parents:
+                raise SshTransportError("local artifact path symlink escapes configured root")
+            return target
+        try:
+            resolved = target.resolve(strict=True)
+        except OSError as exc:
+            raise SshTransportError("local artifact source is unavailable") from exc
+        if resolved != root and root not in resolved.parents or not resolved.is_file():
+            raise SshTransportError("local artifact path symlink escapes configured root")
+        return resolved
+
+    @staticmethod
+    def _file_digest(path: Path) -> tuple[int, str]:
+        digest = hashlib.sha256(); size = 0
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                size += len(chunk); digest.update(chunk)
+        return size, digest.hexdigest()
 
     def _job(self, execution_id: str, plan: Mapping[str, Any]) -> tuple[SshConnection, Mapping[str, Any], int]:
         remote = [step for step in plan.get("steps", []) if step.get("transport") == "resource"]
@@ -264,6 +368,8 @@ class SshExecutionBackend:
         return result
 
     async def run(self, *, execution_id: str, plan: Mapping[str, Any], workspace: Path, execution_dir: Path, emit: LogSink, started: StartedSink) -> BackendResult:
+        if plan.get("kind") == "artifact_transfer":
+            return await self._run_artifact_transfer(execution_id, plan, emit, started)
         connection, step, token = self._job(execution_id, plan)
         root = _remote_path(str(plan.get("remote_root", connection.remote_roots[0])), connection.remote_roots)
         remote_workspace = root
@@ -320,7 +426,116 @@ class SshExecutionBackend:
         finally:
             self._jobs.pop(execution_id, None)
 
+    def _transfer_endpoints(self, plan: Mapping[str, Any]):
+        leases = {str(x.get("slot")): x for x in plan.get("selected_leases", [])}
+        source, destination = leases.get("source"), leases.get("destination")
+        if not isinstance(source, Mapping) or not isinstance(destination, Mapping): raise SshTransportError("artifact transfer requires source and destination leases")
+        def endpoint(lease):
+            host = self.inventory.hosts.get(str(lease.get("host_id")))
+            if not isinstance(host, Mapping): raise SshTransportError("artifact transfer lease references unknown host")
+            return self.connections.resolve(str(host.get("connection_ref"))), lease
+        return endpoint(source), endpoint(destination)
+
+    async def _run_artifact_transfer(self, execution_id, plan, emit, started):
+        spec = plan.get("artifact_transfer")
+        if not isinstance(spec, Mapping): raise SshTransportError("artifact transfer plan is malformed")
+        if spec.get("source_local"):
+            return await self._run_local_to_remote(execution_id, plan, spec, emit, started)
+        if spec.get("destination_local"):
+            return await self._run_remote_to_local(execution_id, plan, spec, emit, started)
+        (source_connection, source_lease), (destination_connection, destination_lease) = self._transfer_endpoints(plan)
+        transfer_id = str(spec.get("transfer_id") or "")
+        source_root = spec.get("source_root")
+        destination_root = spec.get("destination_root")
+        if source_root not in source_connection.artifact_roots:
+            raise SshTransportError("source artifact root is not configured for source connection")
+        if destination_root not in destination_connection.artifact_roots:
+            raise SshTransportError("destination artifact root is not configured for destination connection")
+        root_source, root_destination = source_connection.remote_roots[0], destination_connection.remote_roots[0]
+        common = {"transfer_id": transfer_id, "execution_id": execution_id}
+        self._transfers[execution_id] = (source_connection, source_lease, destination_connection, destination_lease, transfer_id)
+        cleanup_targets = []
+        try:
+            destination_key = await self.supervisor.artifact_transfer_prepare_destination(destination_connection, {**common, "root": root_destination, "artifact_root": spec["destination_root"], "path": spec["destination_path"], "fencing_token": int(destination_lease["fencing_token"]), "ssh_keygen_path": destination_connection.ssh_keygen_path})
+            cleanup_targets.append((destination_connection, root_destination, destination_lease))
+            # Once source preparation is requested, a transport failure is
+            # ambiguous: sshd may have started even if its reply was lost.
+            cleanup_targets.append((source_connection, root_source, source_lease))
+            prepared = await self.supervisor.artifact_transfer_prepare_source(source_connection, {**common, "root": root_source, "artifact_root": spec["source_root"], "path": spec["source_path"], "fencing_token": int(source_lease["fencing_token"]), "client_public_key": destination_key["client_public_key"], "transfer_user": source_connection.transfer_user, "bind_address": source_connection.transfer_bind_address, "port": source_connection.transfer_port, "sshd_path": source_connection.sshd_path, "ssh_keygen_path": source_connection.ssh_keygen_path, "supervisor_path": source_connection.supervisor_path})
+            await started({"transfer_id": transfer_id, "source_fencing_token": int(source_lease["fencing_token"]), "destination_fencing_token": int(destination_lease["fencing_token"]), "reattachable": False})
+            await self.supervisor.artifact_transfer_receive(destination_connection, {**common, "root": root_destination, "artifact_root": spec["destination_root"], "path": spec["destination_path"], "fencing_token": int(destination_lease["fencing_token"]), "source_address": prepared["address"], "source_port": prepared["port"], "source_host_key": prepared["host_public_key"], "size": prepared["size"], "sha256": prepared["sha256"], "transfer_user": prepared["transfer_user"], "ssh_path": destination_connection.ssh_path})
+            await emit("stdout", "direct artifact transfer completed\n")
+            return BackendResult(0, summary="artifact transferred directly")
+        finally:
+            cleanup = await asyncio.gather(
+                *(self.supervisor.artifact_transfer_cleanup(connection, {
+                    **common, "root": root, "fencing_token": int(lease["fencing_token"]),
+                }) for connection, root, lease in cleanup_targets),
+                return_exceptions=True,
+            )
+            self._transfers.pop(execution_id, None)
+            if any(
+                isinstance(item, BaseException) or item.get("quiescent") is not True
+                for item in cleanup
+            ):
+                raise ExecutionBackendUncertain(
+                    "artifact transfer cleanup could not prove quiescence"
+                )
+
+    async def _run_local_to_remote(self, execution_id, plan, spec, emit, started):
+        lease = next((x for x in plan.get("selected_leases", []) if x.get("slot") == "destination"), None)
+        if not isinstance(lease, Mapping): raise SshTransportError("artifact transfer requires destination lease")
+        host = self.inventory.hosts.get(str(lease.get("host_id")))
+        if not isinstance(host, Mapping): raise SshTransportError("artifact transfer lease references unknown host")
+        connection = self.connections.resolve(str(host["connection_ref"]))
+        if spec.get("destination_root") not in connection.artifact_roots: raise SshTransportError("destination artifact root is not configured")
+        source = self._local_artifact(spec.get("source_root"), spec.get("source_path"), output=False)
+        size, sha256 = self._file_digest(source)
+        await started({"destination_fencing_token": int(lease["fencing_token"]), "reattachable": False})
+        await self.supervisor.artifact_put(connection, {"root": connection.remote_roots[0], "lease_id": lease["id"], "fencing_token": int(lease["fencing_token"]), "artifact_root": spec["destination_root"], "path": spec["destination_path"], "source_path": str(source), "size": size, "sha256": sha256})
+        await emit("stdout", "artifact transferred to remote host\n")
+        return BackendResult(0, summary="artifact transferred to remote host")
+
+    async def _run_remote_to_local(self, execution_id, plan, spec, emit, started):
+        lease = next((x for x in plan.get("selected_leases", []) if x.get("slot") == "source"), None)
+        if not isinstance(lease, Mapping): raise SshTransportError("artifact transfer requires source lease")
+        host = self.inventory.hosts.get(str(lease.get("host_id")))
+        if not isinstance(host, Mapping): raise SshTransportError("artifact transfer lease references unknown host")
+        connection = self.connections.resolve(str(host["connection_ref"]))
+        if spec.get("source_root") not in connection.artifact_roots: raise SshTransportError("source artifact root is not configured")
+        target = self._local_artifact(spec.get("destination_root"), spec.get("destination_path"), output=True)
+        await started({"source_fencing_token": int(lease["fencing_token"]), "reattachable": False})
+        reply = await self.supervisor.artifact_get(connection, {"root": connection.remote_roots[0], "lease_id": lease["id"], "fencing_token": int(lease["fencing_token"]), "artifact_root": spec["source_root"], "path": spec["source_path"]})
+        encoded = reply.get("data")
+        if not isinstance(encoded, str): raise SshTransportError("remote artifact response is malformed")
+        try: data = base64.b64decode(encoded, validate=True)
+        except (ValueError, base64.binascii.Error) as exc: raise SshTransportError("remote artifact response is malformed") from exc
+        size, sha256 = reply.get("size"), reply.get("sha256")
+        if not isinstance(size, int) or not isinstance(sha256, str) or len(data) != size or hashlib.sha256(data).hexdigest() != sha256:
+            raise SshTransportError("remote artifact verification failed")
+        temporary = target.with_name("." + target.name + ".nerve-transfer-" + os.urandom(8).hex())
+        try:
+            with open(temporary, "xb") as stream:
+                stream.write(data); stream.flush(); os.fsync(stream.fileno())
+            temporary.replace(target)
+        finally:
+            with contextlib.suppress(FileNotFoundError): temporary.unlink()
+        await emit("stdout", "artifact transferred to local root\n")
+        return BackendResult(0, summary="artifact transferred to local root")
+
     async def cancel(self, *, execution_id: str, grace_seconds: int, mode: str) -> bool:
+        # Transfer state is persisted on both workers, so cancellation remains
+        # meaningful after this daemon lost its in-memory process table.
+        transfer = self._transfers.get(execution_id)
+        if transfer:
+            source, source_lease, destination, destination_lease, transfer_id = transfer
+            try:
+                left = await self.supervisor.artifact_transfer_cancel(source, {"root": source.remote_roots[0], "transfer_id": transfer_id, "fencing_token": int(source_lease["fencing_token"])})
+                right = await self.supervisor.artifact_transfer_cancel(destination, {"root": destination.remote_roots[0], "transfer_id": transfer_id, "fencing_token": int(destination_lease["fencing_token"])})
+                return left.get("quiescent") is True and right.get("quiescent") is True
+            except SshTransportError:
+                return False
+        if execution_id not in self._jobs: return False
         job = self._jobs.get(execution_id)
         if not job or mode == "none": return False
         connection, job_id, token, root = job
@@ -329,6 +544,16 @@ class SshExecutionBackend:
         return reply.get("quiescent") is True and reply.get("state") in {"cancelled", "finished"}
 
     async def recover(self, execution: Mapping[str, Any]) -> BackendRecovery:
+        if execution.get("kind") == "artifact_transfer":
+            try:
+                plan = {**execution["plan"], "selected_leases": execution.get("selected_leases") or []}
+                (source, source_lease), (destination, destination_lease) = self._transfer_endpoints(plan)
+                transfer_id = plan["artifact_transfer"]["transfer_id"]
+                _source_status = await self.supervisor.artifact_transfer_status(source, {"root": source.remote_roots[0], "transfer_id": transfer_id, "fencing_token": int(source_lease["fencing_token"])})
+                destination_status = await self.supervisor.artifact_transfer_status(destination, {"root": destination.remote_roots[0], "transfer_id": transfer_id, "fencing_token": int(destination_lease["fencing_token"])})
+            except (SshTransportError, KeyError, ValueError): return BackendRecovery("orphaned")
+            if destination_status.get("state") == "succeeded": return BackendRecovery("finished", BackendResult(0, summary="artifact transferred directly"))
+            return BackendRecovery("orphaned")
         handle = execution.get("backend_handle") or {}; job_id = handle.get("job_id"); token = handle.get("fencing_token")
         if not job_id or token is None: return BackendRecovery("missing")
         try:

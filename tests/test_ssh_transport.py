@@ -4,6 +4,9 @@ import io
 import sys
 import time
 import struct
+import hashlib
+import base64
+import os
 from typing import Any
 from types import SimpleNamespace
 
@@ -12,6 +15,26 @@ import pytest
 from nerve.executions import remote_supervisor
 from nerve.executions.ssh import OpenSshSupervisor, SshConnectionCatalog, SshTransportError
 from nerve.executions.ssh import SshExecutionBackend
+
+
+def _artifact_backend(tmp_path, supervisor):
+    local_root = tmp_path / "local-artifacts"
+    local_root.mkdir()
+    remote_root = tmp_path / "remote"
+    remote_root.mkdir()
+    known = tmp_path / "known_hosts"
+    known.write_text("worker ssh-ed25519 AAAA\n")
+    catalog = SshConnectionCatalog({"ssh_connections": {"worker": {
+        "host": "127.0.0.1", "user": "worker", "known_hosts": str(known),
+        "remote_roots": [str(remote_root)], "artifact_roots": ["artifacts"],
+    }}})
+    inventory = type("Inventory", (), {
+        "hosts": {"worker-1": {"connection_ref": "worker"}},
+        "local_artifact_roots": {"control": local_root},
+    })()
+    return SshExecutionBackend(
+        inventory=inventory, connections=catalog, supervisor=supervisor,
+    ), local_root
 
 
 def test_connection_catalog_requires_pinned_named_connection(tmp_path):
@@ -35,6 +58,15 @@ def test_connection_catalog_rejects_raw_option_injection(tmp_path):
         }}})
 
 
+def test_connection_catalog_rejects_unconfined_artifact_root(tmp_path):
+    known = tmp_path / "known_hosts"; known.write_text("x")
+    with pytest.raises(SshTransportError, match="artifact_roots"):
+        SshConnectionCatalog({"ssh_connections": {"worker": {
+            "host": "x", "user": "x", "known_hosts": str(known),
+            "remote_roots": ["/srv/nerve"], "artifact_roots": ["../escape"],
+        }}})
+
+
 @pytest.mark.parametrize("path", ["relative/supervisor", "/opt/../supervisor", "/opt/./supervisor", "/opt/supervisor/"])
 def test_connection_catalog_requires_a_fixed_normalized_supervisor_path(tmp_path, path):
     known = tmp_path / "known_hosts"; known.write_text("x")
@@ -42,6 +74,24 @@ def test_connection_catalog_requires_a_fixed_normalized_supervisor_path(tmp_path
         SshConnectionCatalog({"ssh_connections": {"worker": {
             "host": "x", "user": "x", "known_hosts": str(known),
             "remote_roots": ["/srv/nerve"], "supervisor_path": path,
+        }}})
+
+
+def test_connection_catalog_defaults_transfer_user_to_connection_user(tmp_path):
+    known = tmp_path / "known_hosts"; known.write_text("x")
+    catalog = SshConnectionCatalog({"ssh_connections": {"worker": {
+        "host": "x", "user": "alice", "known_hosts": str(known), "remote_roots": ["/srv/nerve"],
+    }}})
+    assert catalog.resolve("worker").transfer_user == "alice"
+
+
+@pytest.mark.parametrize("value", ["bad user", "-alpha", ""])
+def test_connection_catalog_validates_transfer_user(tmp_path, value):
+    known = tmp_path / "known_hosts"; known.write_text("x")
+    with pytest.raises(SshTransportError, match="transfer_user"):
+        SshConnectionCatalog({"ssh_connections": {"worker": {
+            "host": "x", "user": "alice", "known_hosts": str(known),
+            "remote_roots": ["/srv/nerve"], "transfer_user": value,
         }}})
 
 
@@ -114,6 +164,33 @@ def test_remote_supervisor_files_are_fenced_relative_and_text_only(tmp_path):
         remote_supervisor._files({**request, "action": "read", "path": "../secret"})
 
 
+def test_remote_supervisor_artifact_put_is_fenced_confined_and_atomic(tmp_path):
+    payload = b"artifact\x00bytes"
+    request = {
+        "root": str(tmp_path), "artifact_root": "approved-artifacts",
+        "lease_id": "lease-a", "fencing_token": 7, "path": "nested/result.bin",
+        "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+    result = remote_supervisor._artifact_put(request, payload)
+    target = tmp_path / "approved-artifacts" / "nested" / "result.bin"
+    assert result["sha256"] == request["sha256"] and target.read_bytes() == payload
+    assert not list(target.parent.glob(".result.bin.nerve-transfer-*"))
+    with pytest.raises(ValueError, match="escapes"):
+        remote_supervisor._artifact_put({**request, "path": "../outside"}, payload)
+    with pytest.raises(ValueError, match="checksum"):
+        remote_supervisor._artifact_put({**request, "sha256": "0" * 64}, payload)
+    with pytest.raises(PermissionError, match="stale"):
+        remote_supervisor._artifact_put({**request, "fencing_token": 6}, payload)
+
+
+def test_artifact_frame_allows_binary_only_for_the_fixed_put_operation():
+    payload = b"x"
+    request, received = remote_supervisor._decode_frame(
+        OpenSshSupervisor._frame({"version": 1, "operation": "artifact_put"}, payload)
+    )
+    assert request["operation"] == "artifact_put" and received == payload
+
+
 def test_remote_supervisor_monitor_records_success_and_failure_exit_codes(tmp_path):
     for argv, expected_state, expected_exit_code in (
         ([sys.executable, "-c", "raise SystemExit(0)"], "succeeded", 0),
@@ -133,6 +210,41 @@ def test_remote_supervisor_monitor_records_success_and_failure_exit_codes(tmp_pa
             raise AssertionError("remote monitor did not persist a terminal state")
         assert status["state"] == expected_state
         assert status["exit_code"] == expected_exit_code
+
+
+def test_remote_supervisor_artifact_transfer_receive_uses_transfer_user_in_ssh_argv(tmp_path, monkeypatch):
+    transfer_id = "transfer-abc"
+    directory = remote_supervisor._transfer_dir(tmp_path, transfer_id)
+    payload = b"artifact-data"
+    client_key = directory / "client_key"; client_key.write_text("secret")
+    remote_supervisor._transfer_save(directory, {
+        "role": "source", "state": "serving", "fencing_token": 7,
+        "process_group": 1234, "client_key": str(client_key),
+    })
+    captured = {}
+
+    class Process:
+        pid = os.getpid()
+
+        def wait(self):
+            return 0
+
+    def fake_popen(*args, **kwargs):
+        captured["argv"] = args[0]
+        kwargs["stdout"].write(payload)
+        return Process()
+
+    monkeypatch.setattr(remote_supervisor.subprocess, "Popen", fake_popen)
+    request = {
+        "root": str(tmp_path), "artifact_root": "artifacts", "path": "result.bin",
+        "transfer_id": transfer_id, "fencing_token": 7, "source_address": "192.0.2.55", "source_port": 32456,
+        "source_host_key": "ssh-ed25519 KEY", "ssh_path": "/usr/bin/ssh", "transfer_user": "builder",
+        "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+    response = remote_supervisor._artifact_transfer_receive(request)
+    assert response["ok"] is True
+    assert "builder@192.0.2.55" in captured["argv"]
+    assert all("nerve-transfer@" not in str(item) for item in map(str, captured["argv"]))
 
 
 def test_remote_supervisor_preserves_remote_account_identity(tmp_path, monkeypatch):
@@ -221,6 +333,333 @@ async def test_ssh_backend_treats_legacy_finished_state_as_terminal(tmp_path):
     )
     assert result.exit_code is None
     assert result.summary == "legacy finished"
+
+
+@pytest.mark.asyncio
+async def test_ssh_backend_rejects_unconfigured_artifact_roots_before_transfer_rpc(tmp_path):
+    known_source = tmp_path / "source_known_hosts"; known_source.write_text("worker ssh-ed25519 AAAA\n")
+    known_destination = tmp_path / "destination_known_hosts"; known_destination.write_text("worker ssh-ed25519 AAAA\n")
+    catalog = SshConnectionCatalog({"ssh_connections": {
+        "source": {
+            "host": "127.0.0.1", "user": "root", "known_hosts": str(known_source),
+            "remote_roots": [str(tmp_path / "source")], "artifact_roots": ["source-artifacts"],
+        },
+        "destination": {
+            "host": "127.0.0.1", "user": "root", "known_hosts": str(known_destination),
+            "remote_roots": [str(tmp_path / "destination")], "artifact_roots": ["destination-artifacts"],
+        },
+    }})
+
+    async def never(*_args, **_kwargs):
+        raise AssertionError("artifact transfer RPC should not be called")
+
+    supervisor = type("Supervisor", (), {
+        "artifact_transfer_prepare_destination": never,
+        "artifact_transfer_prepare_source": never,
+        "artifact_transfer_receive": never,
+        "artifact_transfer_status": never,
+        "artifact_transfer_cancel": never,
+        "artifact_transfer_cleanup": never,
+    })()
+
+    backend = SshExecutionBackend(
+        inventory=type("inventory", (), {
+            "hosts": {
+                "1": {"connection_ref": "source"},
+                "2": {"connection_ref": "destination"},
+            },
+        })(),
+        connections=catalog,
+        supervisor=supervisor,
+    )
+    plan = {
+        "kind": "artifact_transfer",
+        "selected_leases": [
+            {"slot": "source", "host_id": "1", "fencing_token": 7, "id": "lease-source"},
+            {"slot": "destination", "host_id": "2", "fencing_token": 7, "id": "lease-destination"},
+        ],
+        "artifact_transfer": {
+            "transfer_id": "transfer-invalid",
+            "source_root": "invalid-root",
+            "destination_root": "destination-artifacts",
+            "source_path": "payload.bin",
+            "destination_path": "payload.bin",
+        },
+    }
+
+    async def emit(_stream: str, _text: str) -> None:
+        return None
+
+    async def started(_payload: dict[str, Any]) -> None:
+        return None
+
+    with pytest.raises(SshTransportError, match="source artifact root"):
+        await backend.run(
+            execution_id="exec-transfer-invalid",
+            plan=plan,
+            workspace=tmp_path,
+            execution_dir=tmp_path,
+            emit=emit,
+            started=started,
+        )
+
+
+@pytest.mark.asyncio
+async def test_ssh_backend_artifact_transfer_orchestrates_two_slots_and_addresses_and_cleanup(tmp_path):
+    known_source = tmp_path / "source_known_hosts"; known_source.write_text("worker ssh-ed25519 AAAA\n")
+    known_destination = tmp_path / "destination_known_hosts"; known_destination.write_text("worker ssh-ed25519 AAAA\n")
+    catalog = SshConnectionCatalog({"ssh_connections": {
+        "source": {
+            "host": "127.0.0.1", "user": "root", "known_hosts": str(known_source),
+            "remote_roots": [str(tmp_path / "source")], "artifact_roots": ["source-artifacts"],
+            "transfer_user": "source-transfer",
+        },
+        "destination": {
+            "host": "127.0.0.1", "user": "root", "known_hosts": str(known_destination),
+            "remote_roots": [str(tmp_path / "destination")], "artifact_roots": ["destination-artifacts"],
+        },
+    }})
+    calls: list[tuple[str, Any]] = []
+
+    class Supervisor:
+        async def artifact_transfer_prepare_destination(self, connection, request):
+            calls.append(("prepare_destination", connection.name, request["artifact_root"]))
+            return {"client_public_key": "CLIENT_KEY"}
+
+        async def artifact_transfer_prepare_source(self, connection, request):
+            calls.append(("prepare_source", connection.name, request["transfer_user"], request["bind_address"]))
+            return {
+                "address": "10.10.10.10",
+                "port": 40123,
+                "host_public_key": "HOST_KEY",
+                "size": 3,
+                "sha256": hashlib.sha256(b"abc").hexdigest(),
+                "transfer_user": request["transfer_user"],
+            }
+
+        async def artifact_transfer_receive(self, connection, request):
+            calls.append(("receive", connection.name, request["source_address"], request["transfer_user"]))
+            return {"ok": True}
+
+        async def artifact_transfer_cleanup(self, connection, request):
+            calls.append(("cleanup", connection.name, request["transfer_id"]))
+            return {"ok": True, "quiescent": True}
+
+    backend = SshExecutionBackend(
+        inventory=type("inventory", (), {
+            "hosts": {
+                "1": {"connection_ref": "source"},
+                "2": {"connection_ref": "destination"},
+            },
+        })(),
+        connections=catalog,
+        supervisor=Supervisor(),
+    )
+    plan = {
+        "kind": "artifact_transfer",
+        "selected_leases": [
+            {"slot": "source", "host_id": "1", "fencing_token": 11, "id": "lease-source"},
+            {"slot": "destination", "host_id": "2", "fencing_token": 13, "id": "lease-destination"},
+        ],
+        "artifact_transfer": {
+            "transfer_id": "transfer-dual",
+            "source_root": "source-artifacts",
+            "source_path": "input.bin",
+            "destination_root": "destination-artifacts",
+            "destination_path": "output.bin",
+        },
+    }
+    started_calls = []
+
+    async def emit(_stream: str, _text: str) -> None:
+        return None
+
+    async def started(payload: dict[str, Any]) -> None:
+        started_calls.append(payload)
+
+    result = await backend.run(
+        execution_id="exec-transfer-dual", plan=plan, workspace=tmp_path,
+        execution_dir=tmp_path, emit=emit, started=started,
+    )
+    assert result.exit_code == 0
+    assert started_calls == [{"transfer_id": "transfer-dual", "source_fencing_token": 11, "destination_fencing_token": 13, "reattachable": False}]
+    assert calls[0][0] == "prepare_destination"
+    assert calls[1][0] == "prepare_source"
+    assert calls[2][0] == "receive"
+    assert calls[2][2] == "10.10.10.10"
+    assert calls[2][3] == "source-transfer"
+    assert [entry[0] for entry in calls if entry[0] == "cleanup"] == ["cleanup", "cleanup"]
+
+
+@pytest.mark.asyncio
+async def test_ssh_backend_cancel_artifact_transfer_returns_false_when_not_quiescent(tmp_path):
+    known_source = tmp_path / "source_known_hosts"; known_source.write_text("worker ssh-ed25519 AAAA\n")
+    known_destination = tmp_path / "destination_known_hosts"; known_destination.write_text("worker ssh-ed25519 AAAA\n")
+    catalog = SshConnectionCatalog({"ssh_connections": {
+        "source": {
+            "host": "127.0.0.1", "user": "root", "known_hosts": str(known_source),
+            "remote_roots": [str(tmp_path / "source")], "artifact_roots": ["source-artifacts"],
+        },
+        "destination": {
+            "host": "127.0.0.1", "user": "root", "known_hosts": str(known_destination),
+            "remote_roots": [str(tmp_path / "destination")], "artifact_roots": ["destination-artifacts"],
+        },
+    }})
+
+    async def artifact_transfer_cancel(*_args, **_kwargs):
+        return {"ok": True, "quiescent": False}
+
+    backend = SshExecutionBackend(
+        inventory=type("inventory", (), {
+            "hosts": {
+                "1": {"connection_ref": "source"},
+                "2": {"connection_ref": "destination"},
+            },
+        })(),
+        connections=catalog,
+        supervisor=type("Supervisor", (), {"artifact_transfer_cancel": artifact_transfer_cancel})(),
+    )
+    backend._transfers["exec-transfer-cancel"] = (
+        catalog.resolve("source"), {"fencing_token": 11},
+        catalog.resolve("destination"), {"fencing_token": 13},
+        "transfer-dual",
+    )
+
+    assert await backend.cancel(execution_id="exec-transfer-cancel", grace_seconds=0, mode="terminate") is False
+
+
+@pytest.mark.asyncio
+async def test_ssh_backend_recover_incomplete_artifact_transfer_is_orphaned(tmp_path):
+    known_source = tmp_path / "source_known_hosts"; known_source.write_text("worker ssh-ed25519 AAAA\n")
+    known_destination = tmp_path / "destination_known_hosts"; known_destination.write_text("worker ssh-ed25519 AAAA\n")
+    catalog = SshConnectionCatalog({"ssh_connections": {
+        "source": {
+            "host": "127.0.0.1", "user": "root", "known_hosts": str(known_source),
+            "remote_roots": [str(tmp_path / "source")], "artifact_roots": ["source-artifacts"],
+        },
+        "destination": {
+            "host": "127.0.0.1", "user": "root", "known_hosts": str(known_destination),
+            "remote_roots": [str(tmp_path / "destination")], "artifact_roots": ["destination-artifacts"],
+        },
+    }})
+
+    async def artifact_transfer_status(_self, connection, request):
+        if connection.name == "source":
+            return {"state": "serving"}
+        return {"state": "prepared"}
+
+    backend = SshExecutionBackend(
+        inventory=type("inventory", (), {
+            "hosts": {
+                "1": {"connection_ref": "source"},
+                "2": {"connection_ref": "destination"},
+            },
+        })(),
+        connections=catalog,
+        supervisor=type("Supervisor", (), {"artifact_transfer_status": artifact_transfer_status})(),
+    )
+    recovered = await backend.recover({
+        "kind": "artifact_transfer",
+        "id": "exec-transfer-recover",
+        "plan": {
+            "kind": "artifact_transfer",
+            "artifact_transfer": {
+                "transfer_id": "transfer-dual",
+                "source_root": "source-artifacts",
+                "source_path": "input.bin",
+                "destination_root": "destination-artifacts",
+                "destination_path": "output.bin",
+            },
+        },
+        "selected_leases": [
+            {"slot": "source", "host_id": "1", "fencing_token": 11, "id": "lease-source"},
+            {"slot": "destination", "host_id": "2", "fencing_token": 13, "id": "lease-destination"},
+        ],
+    })
+    assert recovered.state == "orphaned"
+
+
+@pytest.mark.asyncio
+async def test_artifact_transfer_local_to_remote_uses_one_leased_destination(tmp_path):
+    calls = []
+
+    class Supervisor:
+        async def artifact_put(self, connection, request):
+            calls.append((connection.name, request))
+            return {"ok": True}
+
+    backend, local_root = _artifact_backend(tmp_path, Supervisor())
+    payload = b"local payload"
+    (local_root / "input.bin").write_bytes(payload)
+    started = []
+    result = await backend.run(
+        execution_id="exec-local-upload",
+        plan={
+            "kind": "artifact_transfer",
+            "selected_leases": [{
+                "slot": "destination", "host_id": "worker-1",
+                "fencing_token": 3, "id": "lease-destination",
+            }],
+            "artifact_transfer": {
+                "source_local": True, "destination_local": False,
+                "source_root": "control", "source_path": "input.bin",
+                "destination_root": "artifacts", "destination_path": "output.bin",
+            },
+        },
+        workspace=tmp_path, execution_dir=tmp_path,
+        emit=lambda *_args: __import__("asyncio").sleep(0),
+        started=lambda value: (__import__("asyncio").sleep(0, result=started.append(value))),
+    )
+    assert result.exit_code == 0
+    assert started == [{"destination_fencing_token": 3, "reattachable": False}]
+    assert calls[0][1]["source_path"] == str(local_root / "input.bin")
+    assert calls[0][1]["sha256"] == hashlib.sha256(payload).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_artifact_transfer_remote_to_local_verifies_and_atomically_installs(tmp_path):
+    payload = b"remote payload"
+
+    class Supervisor:
+        async def artifact_get(self, _connection, request):
+            assert request["path"] == "input.bin"
+            return {
+                "ok": True, "size": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "data": base64.b64encode(payload).decode("ascii"),
+            }
+
+    backend, local_root = _artifact_backend(tmp_path, Supervisor())
+    result = await backend.run(
+        execution_id="exec-local-download",
+        plan={
+            "kind": "artifact_transfer",
+            "selected_leases": [{
+                "slot": "source", "host_id": "worker-1",
+                "fencing_token": 4, "id": "lease-source",
+            }],
+            "artifact_transfer": {
+                "source_local": False, "destination_local": True,
+                "source_root": "artifacts", "source_path": "input.bin",
+                "destination_root": "control", "destination_path": "nested/output.bin",
+            },
+        },
+        workspace=tmp_path, execution_dir=tmp_path,
+        emit=lambda *_args: __import__("asyncio").sleep(0),
+        started=lambda _value: __import__("asyncio").sleep(0),
+    )
+    assert result.exit_code == 0
+    assert (local_root / "nested/output.bin").read_bytes() == payload
+    assert not list((local_root / "nested").glob(".output.bin.nerve-transfer-*"))
+
+
+def test_local_artifact_rejects_symlink_escape(tmp_path):
+    backend, local_root = _artifact_backend(tmp_path, object())
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (local_root / "link").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(SshTransportError, match="symlink escapes"):
+        backend._local_artifact("control", "link/output.bin", output=True)
 
 
 @pytest.mark.asyncio

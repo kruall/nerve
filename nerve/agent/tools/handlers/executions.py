@@ -9,6 +9,7 @@ import logging
 from nerve.agent.tools.registry import ToolContext, ToolResult, ToolSpec
 from nerve.agent.tools.schemas import (
     EXECUTION_CANCEL_SCHEMA,
+    ARTIFACT_TRANSFER_SCHEMA,
     EXECUTION_KIND_DESCRIBE_SCHEMA,
     EXECUTION_KIND_LIST_SCHEMA,
     EXECUTION_KIND_START_SCHEMA,
@@ -142,6 +143,17 @@ async def _ydb_handler(ctx: ToolContext, args: dict, kind: str) -> ToolResult:
 async def ydb_make_handler(ctx: ToolContext, args: dict) -> ToolResult:
     return await _ydb_handler(ctx, args, "ydb_make")
 
+async def artifact_transfer_handler(ctx: ToolContext, args: dict) -> ToolResult:
+    service = _service(ctx)
+    if service is None: return ToolResult.text("Execution lifecycle service is unavailable.", is_error=True)
+    try:
+        row = await service.start_artifact_transfer(session_id=ctx.session_id, source=args.get("source", {}), destination=args.get("destination", {}), auto_continue=bool(args.get("detached", False)))
+        if not args.get("detached", False): row = await service.join_execution(execution_id=str(row["id"]), session_id=ctx.session_id)
+    except Exception as exc:
+        logger.warning("artifact transfer rejected (%s)", type(exc).__name__)
+        return ToolResult.text("Could not start direct artifact transfer.", is_error=True)
+    return _json({"kind": "artifact_transfer", "execution": public_execution(row)})
+
 
 async def ydb_test_handler(ctx: ToolContext, args: dict) -> ToolResult:
     return await _ydb_handler(ctx, args, "ydb_test")
@@ -260,6 +272,7 @@ async def execution_list_handler(ctx: ToolContext, args: dict) -> ToolResult:
 
 
 EXECUTION_SPECS = [
+    ToolSpec("artifact_transfer", "Copy one confined artifact directly between two leased remote pools; Nerve never relays bytes.", ARTIFACT_TRANSFER_SCHEMA, artifact_transfer_handler),
     ToolSpec("ydb_make", "Synchronize a configured YDB worktree to the session's reviewed builder and run ya make.", YDB_MAKE_SCHEMA, ydb_make_handler),
     ToolSpec("ydb_test", "Synchronize a configured YDB worktree to the session's reviewed builder and run ya tests.", YDB_TEST_SCHEMA, ydb_test_handler),
     ToolSpec("ydb_file_list", "List bounded paths in this session's synchronized YDB checkout.", YDB_FILE_LIST_SCHEMA, ydb_file_list_handler),

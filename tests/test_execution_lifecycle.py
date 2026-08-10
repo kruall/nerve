@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 
-from nerve.executions.backend import BackendRecovery, BackendResult, LocalExecutionBackend
+from nerve.executions.backend import BackendRecovery, BackendResult, ExecutionBackendUncertain, LocalExecutionBackend
 from nerve.executions.public import public_execution
 from nerve.executions.service import ExecutionService, _bind_session_reservation_slot
 
@@ -153,6 +153,41 @@ async def test_ydb_test_plan_does_not_reject_test_owned_error_text(
     plan = service._start_serialized.await_args.kwargs["plan"]
     assert plan["result"]["required_output"] == ["GOOD", "Ok"]
     assert plan["result"]["forbidden_output"] == []
+
+
+@pytest.mark.asyncio
+async def test_artifact_transfer_builds_one_or_two_resource_slots(db, owner, tmp_path):
+    inventory = SimpleNamespace(local_artifact_roots={"control": tmp_path})
+    service = ExecutionService(
+        db=db, engine=_engine(), workspace=tmp_path, catalog=SimpleNamespace(),
+        resource_manager=SimpleNamespace(inventory=inventory),
+    )
+    service._start_serialized = AsyncMock(return_value={"id": "exec-transfer"})
+
+    await service.start_artifact_transfer(
+        session_id=owner,
+        source={"host": "localhost", "artifact_root": "control", "path": "a.bin"},
+        destination={"pool": "workers", "artifact_root": "artifacts", "path": "b.bin"},
+        auto_continue=False,
+    )
+    plan = service._start_serialized.await_args.kwargs["plan"]
+    assert plan["resources"] == {"destination": "workers"}
+    assert plan["artifact_transfer"]["source_local"] is True
+
+    await service.start_artifact_transfer(
+        session_id=owner,
+        source={"pool": "builders", "artifact_root": "artifacts", "path": "a.bin"},
+        destination={"pool": "workers", "artifact_root": "artifacts", "path": "b.bin"},
+    )
+    plan = service._start_serialized.await_args.kwargs["plan"]
+    assert plan["resources"] == {"source": "builders", "destination": "workers"}
+
+    with pytest.raises(ValueError, match="localhost-to-localhost"):
+        await service.start_artifact_transfer(
+            session_id=owner,
+            source={"host": "localhost", "artifact_root": "control", "path": "a.bin"},
+            destination={"host": "localhost", "artifact_root": "control", "path": "b.bin"},
+        )
 
 
 @pytest.mark.asyncio
@@ -539,6 +574,47 @@ async def test_service_acquires_persists_and_releases_resource_leases(
         execution_id=execution_id,
         leases=[{"id": "lease-1", "host_id": "host-1", "state": "acquired"}],
     )
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_uncertain_remote_cleanup_quarantines_instead_of_releasing(
+    db, owner, tmp_path, broadcast_stub,
+):
+    class ResourcePlan(StubPlan):
+        def as_dict(self, *, redact_secrets=True):
+            data = super().as_dict(redact_secrets=redact_secrets)
+            data["resources"] = {"source": "sources", "destination": "destinations"}
+            return data
+
+    class Backend(ControlledBackend):
+        async def run(self, *, execution_id, plan, workspace, execution_dir, emit, started):
+            await started({"transfer_id": "transfer-a", "reattachable": False})
+            raise ExecutionBackendUncertain("cleanup is ambiguous")
+
+    leases = SimpleNamespace(
+        acquire=AsyncMock(return_value=[
+            {"id": "lease-source", "host_id": "source", "slot": "source"},
+            {"id": "lease-destination", "host_id": "destination", "slot": "destination"},
+        ]),
+        release=AsyncMock(),
+        quarantine=AsyncMock(),
+    )
+    service = ExecutionService(
+        db=db, engine=_engine(), workspace=tmp_path, catalog=SimpleNamespace(),
+        backend=Backend(), resource_manager=leases, execution_root=tmp_path / "runs",
+    )
+    await service.initialize()
+    execution_id = (await service.start(session_id=owner, plan=ResourcePlan()))["id"]
+
+    async def terminal():
+        row = await db.get_execution(execution_id)
+        return row if row["status"] == "failed" else None
+
+    row = await _eventually(terminal)
+    assert row["result"]["error"] == "remote_quiescence_unknown"
+    leases.quarantine.assert_awaited_once()
+    leases.release.assert_not_awaited()
     await service.shutdown()
 
 

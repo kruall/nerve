@@ -28,9 +28,26 @@ async def test_v49_database_applies_later_migrations(tmp_path):
         await db.execute(
             "CREATE TABLE executions (id TEXT PRIMARY KEY, session_id TEXT, created_at TEXT)"
         )
+        # V49 already includes the V45 resource queue. Keep this synthetic
+        # fixture minimal, but structurally valid for later ALTER migrations.
+        await db.execute(
+            """CREATE TABLE resource_lease_requests (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT NOT NULL UNIQUE,
+                execution_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                slot TEXT NOT NULL,
+                pool TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                state TEXT NOT NULL,
+                lease_id TEXT,
+                requested_at TEXT NOT NULL,
+                settled_at TEXT
+            )"""
+        )
         await db.commit()
 
-        assert await runner.run_migrations(db) == 51
+        assert await runner.run_migrations(db) == 52
         async with db.execute(
             "SELECT name FROM sqlite_master "
             "WHERE type='table' AND name='session_resource_reservations'"
