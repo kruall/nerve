@@ -445,15 +445,18 @@ async def test_stopped_resource_idle_session_releases_every_handle_idempotently(
 async def test_manual_release_rejects_referencing_operations_with_stable_ids(db):
     service = await _handle_service(db)
     handle = (await service.acquire_handles("session-a", [{"pool": "only-a"}]))[0]
+    # Terminal Operations must detach refs before becoming terminal. The
+    # active Operation below is the sole valid ref for this non-shareable
+    # handle, so this test does not construct an invalid post-R10 state.
     await _handle_operation(db, "operation-z", status="failed")
-    assert await db.attach_operation_resource_ref("operation-z", handle["id"])
+    assert await db.list_operation_resource_refs("operation-z") == []
     await _handle_operation(db, "operation-a")
     assert await db.attach_operation_resource_ref("operation-a", handle["id"])
 
     with pytest.raises(ResourceHandleConflictError,
-                       match="referenced by operations: operation-a, operation-z") as exc:
+                       match="referenced by operations: operation-a") as exc:
         await service.release_handle("session-a", handle["id"])
-    assert exc.value.operation_ids == ("operation-a", "operation-z")
+    assert exc.value.operation_ids == ("operation-a",)
     assert (await db.get_session_resource_handle(handle["id"]))["state"] == "active"
     assert await db.list_resource_recovery_intents(state="processing") == []
 

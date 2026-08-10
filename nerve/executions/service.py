@@ -91,6 +91,7 @@ class ExecutionService:
         self.execution_root = execution_root or (self.workspace / ".nerve" / "executions")
         self._tasks: dict[str, asyncio.Task[Any]] = {}
         self._continuations: dict[str, asyncio.Task[Any]] = {}
+        self._compatibility_start_locks: dict[str, asyncio.Lock] = {}
         self._stopping = False
         self._continuations_ready = False
         self._terminal_changed = asyncio.Condition()
@@ -477,7 +478,8 @@ class ExecutionService:
         ):
             raise ValueError("execution owner session is unavailable")
         serialized = plan.as_dict(redact_secrets=False)
-        if handle_ids is not None:
+        explicit_handles = handle_ids is not None
+        if explicit_handles:
             if (isinstance(handle_ids, (str, bytes))
                     or not all(isinstance(handle_id, str) and handle_id for handle_id in handle_ids)):
                 raise ValueError("resource handle ids are invalid")
@@ -497,6 +499,7 @@ class ExecutionService:
             profile_snapshot={**plan.profile.describe(), "source": plan.profile.source},
             completion_target=completion_target,
             auto_continue=auto_continue,
+            legacy_compatibility=not explicit_handles,
         )
 
     async def _start_serialized(
@@ -507,11 +510,44 @@ class ExecutionService:
         profile_snapshot: Mapping[str, Any],
         completion_target: Mapping[str, str] | None = None,
         auto_continue: bool = True,
+        legacy_compatibility: bool = True,
+    ) -> Mapping[str, Any]:
+        if legacy_compatibility:
+            lock = self._compatibility_start_locks.setdefault(session_id, asyncio.Lock())
+            async with lock:
+                return await self._start_serialized_unlocked(
+                    session_id=session_id, plan=plan,
+                    profile_snapshot=profile_snapshot,
+                    completion_target=completion_target,
+                    auto_continue=auto_continue,
+                    legacy_compatibility=True,
+                )
+        return await self._start_serialized_unlocked(
+            session_id=session_id, plan=plan,
+            profile_snapshot=profile_snapshot,
+            completion_target=completion_target,
+            auto_continue=auto_continue,
+            legacy_compatibility=False,
+        )
+
+    async def _start_serialized_unlocked(
+        self,
+        *,
+        session_id: str,
+        plan: Mapping[str, Any],
+        profile_snapshot: Mapping[str, Any],
+        completion_target: Mapping[str, str] | None = None,
+        auto_continue: bool = True,
+        legacy_compatibility: bool = True,
     ) -> Mapping[str, Any]:
         self.recovery_gate.require_ready()
         execution_id = f"exec-{uuid.uuid4().hex[:12]}"
         plan_data = dict(plan)
         plan_data["session_id"] = session_id
+        if legacy_compatibility:
+            # This durable compatibility marker retains R9's one-operation
+            # semantics for callers of the pre-handle start API.
+            plan_data["legacy_resource_handles"] = True
         requests = [
             {"slot": slot, "pool": pool, "mode": "exclusive", "state": "requested"}
             for slot, pool in dict(plan_data.get("resources", {})).items()
@@ -557,6 +593,7 @@ class ExecutionService:
                 completion_target_type=str((completion_target or {}).get("type", "session")),
                 completion_target_id=(completion_target or {}).get("id"),
                 auto_continue=auto_continue,
+                legacy_compatibility=legacy_compatibility,
             )
         except Exception:
             # The compatibility adapter acquired these only for this start.
@@ -1254,4 +1291,8 @@ class ExecutionService:
             session_id=row["session_id"],
             plan=row["plan"],
             profile_snapshot=row["profile_snapshot"],
+            # The presence of retained handles is not the compatibility
+            # boundary: an explicit no-resource operation has an empty set.
+            # Preserve the durable marker chosen by the original start.
+            legacy_compatibility=bool(row["plan"].get("legacy_resource_handles")),
         )

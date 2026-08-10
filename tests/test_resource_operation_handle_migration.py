@@ -24,7 +24,9 @@ async def _schema(db: aiosqlite.Connection) -> dict[str, str]:
         await db.execute(
             "SELECT name, sql FROM sqlite_master WHERE type IN ('table', 'index') "
             "AND (name IN (?, ?, ?, ?, ?) OR name LIKE 'idx_resource_%' "
-            "OR name LIKE 'uq_session_resource_handles_%') ORDER BY name",
+            "OR name LIKE 'uq_session_resource_handles_%' "
+            "OR name IN ('uq_operation_resource_refs_one_active_per_handle', "
+            "'uq_executions_one_active_per_session')) ORDER BY name",
             TABLES,
         )
     ).fetchall()
@@ -43,6 +45,15 @@ async def _apply_through_v52(db: aiosqlite.Connection) -> None:
 async def _apply_through_v57(db: aiosqlite.Connection) -> None:
     for version, module_name in runner.discover_migrations():
         if version > 57:
+            break
+        await importlib.import_module(f"nerve.db.migrations.{module_name}").up(db)
+        await db.execute("INSERT INTO schema_version(version) VALUES (?)", (version,))
+        await db.commit()
+
+
+async def _apply_through_v58(db: aiosqlite.Connection) -> None:
+    for version, module_name in runner.discover_migrations():
+        if version > 58:
             break
         await importlib.import_module(f"nerve.db.migrations.{module_name}").up(db)
         await db.execute("INSERT INTO schema_version(version) VALUES (?)", (version,))
@@ -79,7 +90,7 @@ async def _legacy_snapshot(db: aiosqlite.Connection) -> tuple[tuple, tuple, tupl
 
 
 @pytest.mark.asyncio
-async def test_v058_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp_path):
+async def test_v059_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp_path):
     fresh = await aiosqlite.connect(tmp_path / "fresh.db")
     upgraded = await aiosqlite.connect(tmp_path / "upgrade.db")
     try:
@@ -88,7 +99,7 @@ async def test_v058_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp
         await _legacy_rows(upgraded)
         legacy_before = await _legacy_snapshot(upgraded)
 
-        assert await runner.run_migrations(upgraded) == 58
+        assert await runner.run_migrations(upgraded) == 59
         fresh_schema = await _schema(fresh)
         assert fresh_schema == await _schema(upgraded)
         assert (await (await fresh.execute("SELECT next_ticket FROM resource_wait_allocator")).fetchone())[0] == 1
@@ -104,6 +115,10 @@ async def test_v058_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp
         handle_columns = {row[1] for row in await (await fresh.execute("PRAGMA table_info(session_resource_handles)")).fetchall()}
         assert {"position"} <= ref_columns
         assert {"auto_release_when_session_idle"} <= handle_columns
+        indexes = {row[1] for row in await (await fresh.execute("PRAGMA index_list(operation_resource_refs)")).fetchall()}
+        assert "uq_operation_resource_refs_one_active_per_handle" in indexes
+        execution_indexes = {row[1] for row in await (await fresh.execute("PRAGMA index_list(executions)")).fetchall()}
+        assert "uq_executions_one_active_per_session" not in execution_indexes
     finally:
         await fresh.close()
         await upgraded.close()
@@ -135,6 +150,49 @@ async def test_v058_backfills_deterministic_ref_positions_and_enforces_order_uni
             await db.execute(
                 "INSERT INTO operation_resource_refs(operation_id, handle_id, position, created_at) VALUES ('operation-a', 'handle-d', 0, 'now')",
             )
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_v059_removes_terminal_refs_before_installing_handle_fence(tmp_path):
+    db = await aiosqlite.connect(tmp_path / "terminal-refs.db")
+    try:
+        await _apply_through_v58(db)
+        await db.execute(
+            "INSERT INTO sessions(id, title, created_at, updated_at) VALUES ('s', 's', 'now', 'now')"
+        )
+        for operation_id, status in (("terminal", "failed"), ("active", "running")):
+            await db.execute(
+                """INSERT INTO executions(
+                       id, session_id, kind, profile_version, profile_hash,
+                       profile_snapshot, plan, status, created_at, queued_at, updated_at
+                   ) VALUES (?, 's', 'remote', '1', 'hash', '{}', '{}', ?, 'now', 'now', 'now')""",
+                (operation_id, status),
+            )
+        await db.executemany(
+            """INSERT INTO operation_resource_refs(
+                   operation_id, handle_id, position, created_at
+               ) VALUES (?, 'shared-handle', 0, 'now')""",
+            [("terminal",), ("active",)],
+        )
+        await db.commit()
+
+        migration = importlib.import_module("nerve.db.migrations.v059_concurrent_operation_handles")
+        await migration.up(db)
+
+        refs = await (await db.execute(
+            "SELECT operation_id, handle_id FROM operation_resource_refs ORDER BY operation_id"
+        )).fetchall()
+        assert refs == [("active", "shared-handle")]
+        indexes = {row[1] for row in await (await db.execute(
+            "PRAGMA index_list(operation_resource_refs)"
+        )).fetchall()}
+        assert "uq_operation_resource_refs_one_active_per_handle" in indexes
+        execution_indexes = {row[1] for row in await (await db.execute(
+            "PRAGMA index_list(executions)"
+        )).fetchall()}
+        assert "uq_executions_one_active_per_session" not in execution_indexes
     finally:
         await db.close()
 

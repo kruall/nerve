@@ -26,8 +26,13 @@ class ResourceHandleOwnershipError(PermissionError):
         super().__init__("resource handle does not belong to this session")
 
 
-class ResourceHandleConflictError(RuntimeError):
-    """A retained handle cannot be released while Operations reference it."""
+class ResourceHandleConflictError(ValueError):
+    """A non-shareable retained handle is already referenced by Operations.
+
+    Handle kind/profile metadata currently has no shareability declaration, so
+    all retained handles are non-shareable.  ``operation_ids`` is stable for
+    both start conflicts and manual-release rejection.
+    """
 
     def __init__(self, operation_ids: Sequence[str]) -> None:
         self.operation_ids = tuple(operation_ids)

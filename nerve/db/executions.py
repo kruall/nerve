@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from nerve.utils.time import utc_now_iso
+from nerve.resources import ResourceHandleConflictError
 
 
 ACTIVE_EXECUTION_STATUSES = ("queued", "starting", "running", "cancelling")
@@ -58,12 +59,39 @@ class ExecutionStore:
         completion_target_type: str = "session",
         completion_target_id: str | None = None,
         auto_continue: bool = True,
+        legacy_compatibility: bool = False,
     ) -> dict[str, Any]:
         now = utc_now_iso()
         if len(handle_ids) != len(set(handle_ids)):
             raise ValueError("resource handle ids must be distinct")
         try:
             async with self._atomic():
+                # R9 serialized every session.  Calls that did not opt into
+                # explicit handles retain that behaviour, including races,
+                # while explicit Operations can run beside disjoint explicit
+                # Operations.  The marker is persisted in the plan so this
+                # remains true after a restart.
+                if legacy_compatibility:
+                    async with self.db.execute(
+                        """SELECT id FROM executions WHERE session_id=?
+                           AND status IN ('queued', 'starting', 'running', 'cancelling')
+                           ORDER BY id LIMIT 1""",
+                        (session_id,),
+                    ) as cursor:
+                        conflict = await cursor.fetchone()
+                    if conflict is not None:
+                        raise ValueError("session already owns an active execution")
+                else:
+                    async with self.db.execute(
+                        """SELECT id FROM executions WHERE session_id=?
+                           AND status IN ('queued', 'starting', 'running', 'cancelling')
+                             AND json_extract(plan, '$.legacy_resource_handles') = 1
+                           ORDER BY id LIMIT 1""",
+                        (session_id,),
+                    ) as cursor:
+                        conflict = await cursor.fetchone()
+                    if conflict is not None:
+                        raise ValueError("session already owns an active execution")
                 for position, handle_id in enumerate(handle_ids):
                     async with self.db.execute(
                         """SELECT 1
@@ -79,6 +107,16 @@ class ExecutionStore:
                     ) as cursor:
                         if await cursor.fetchone() is None:
                             raise ValueError("resource handle does not belong to this session")
+                if handle_ids:
+                    marks = ",".join("?" for _ in handle_ids)
+                    async with self.db.execute(
+                        f"SELECT DISTINCT operation_id FROM operation_resource_refs "
+                        f"WHERE handle_id IN ({marks}) ORDER BY operation_id",
+                        tuple(handle_ids),
+                    ) as cursor:
+                        operation_ids = [str(row[0]) async for row in cursor]
+                    if operation_ids:
+                        raise ResourceHandleConflictError(operation_ids)
                 await self.db.execute(
                 """INSERT INTO executions
                    (id, session_id, kind, profile_version, profile_hash,
@@ -99,7 +137,20 @@ class ExecutionStore:
                         (execution_id, handle_id, position, now),
                     )
         except sqlite3.IntegrityError as exc:
-            raise ValueError("session already owns an active execution") from exc
+            # V059's unique handle index is the final arbiter between separate
+            # processes.  Return the same stable conflict with its Operation
+            # ids rather than leaking SQLite's constraint text.
+            if ("uq_operation_resource_refs_one_active_per_handle" in str(exc)
+                    or "operation_resource_refs.handle_id" in str(exc)):
+                marks = ",".join("?" for _ in handle_ids)
+                async with self.db.execute(
+                    f"SELECT DISTINCT operation_id FROM operation_resource_refs "
+                    f"WHERE handle_id IN ({marks}) ORDER BY operation_id",
+                    tuple(handle_ids),
+                ) as cursor:
+                    operation_ids = [str(row[0]) async for row in cursor]
+                raise ResourceHandleConflictError(operation_ids) from exc
+            raise
         row = await self.get_execution(execution_id)
         assert row is not None
         return row
