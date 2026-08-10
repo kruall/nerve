@@ -1002,6 +1002,29 @@ async def test_execution_stop_listener_releases_session_reservation():
 
 
 @pytest.mark.asyncio
+async def test_operator_cancels_only_unleased_queued_execution(db, owner, tmp_path):
+    plan = StubPlan().as_dict(redact_secrets=False)
+    plan["session_id"] = owner
+    await db.create_execution(
+        "exec-orphaned", session_id=owner, kind="test.wait",
+        profile_version="1", profile_hash="hash", profile_snapshot={},
+        plan=plan,
+        resource_requests=[{"slot": "worker", "pool": "builders", "state": "requested"}],
+    )
+    service = ExecutionService(
+        db=db, engine=_engine(), workspace=tmp_path, catalog=SimpleNamespace(),
+        backend=ControlledBackend(), execution_root=tmp_path / "runs",
+    )
+
+    cancelled = await service.cancel_queued_execution(
+        execution_id="exec-orphaned", requested_by="operator", reason="owner confirmed stale",
+    )
+
+    assert cancelled["status"] == "cancelled"
+    assert (await db.get_execution("exec-orphaned"))["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
 async def test_session_archive_invokes_execution_cancellation_hook(db, owner):
     from nerve.agent.sessions import SessionManager
 

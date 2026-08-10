@@ -154,6 +154,17 @@ EXECUTION_CANCEL_SCHEMA = {
     "additionalProperties": False,
 }
 
+EXECUTION_CANCEL_QUEUED_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "execution_id": {"type": "string", "description": "Exact queued execution id to cancel"},
+        "confirm_execution_id": {"type": "string", "description": "Repeat the exact execution id to confirm"},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 500},
+    },
+    "required": ["execution_id", "confirm_execution_id", "reason"],
+    "additionalProperties": False,
+}
+
 EXECUTION_LIST_SCHEMA = {
     "type": "object",
     "properties": {

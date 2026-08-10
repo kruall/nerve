@@ -9,6 +9,7 @@ import logging
 from nerve.agent.tools.registry import ToolContext, ToolResult, ToolSpec
 from nerve.agent.tools.schemas import (
     EXECUTION_CANCEL_SCHEMA,
+    EXECUTION_CANCEL_QUEUED_SCHEMA,
     ARTIFACT_TRANSFER_SCHEMA,
     EXECUTION_KIND_DESCRIBE_SCHEMA,
     EXECUTION_KIND_LIST_SCHEMA,
@@ -289,6 +290,24 @@ async def execution_cancel_handler(ctx: ToolContext, args: dict) -> ToolResult:
     return _json({"execution": public_execution(row)})
 
 
+async def execution_cancel_queued_handler(ctx: ToolContext, args: dict) -> ToolResult:
+    execution_id = str(args.get("execution_id") or "")
+    if execution_id != args.get("confirm_execution_id"):
+        return ToolResult.text("confirm_execution_id must exactly match execution_id", is_error=True)
+    service = _service(ctx)
+    if service is None:
+        return ToolResult.text("Execution lifecycle service is unavailable.", is_error=True)
+    try:
+        row = await service.cancel_queued_execution(
+            execution_id=execution_id,
+            requested_by=f"session:{ctx.session_id}",
+            reason=str(args.get("reason") or ""),
+        )
+    except (KeyError, ValueError) as e:
+        return ToolResult.text(str(e), is_error=True)
+    return _json({"execution": public_execution(row)})
+
+
 async def execution_list_handler(ctx: ToolContext, args: dict) -> ToolResult:
     service = _service(ctx)
     if service is None:
@@ -360,6 +379,12 @@ EXECUTION_SPECS = [
         "Cancel one active execution owned by this session and suppress its pending completion continuation.",
         EXECUTION_CANCEL_SCHEMA,
         execution_cancel_handler,
+    ),
+    ToolSpec(
+        "execution_cancel_queued",
+        "Cancel an exact confirmed queued execution only when no remote lease was selected.",
+        EXECUTION_CANCEL_QUEUED_SCHEMA,
+        execution_cancel_queued_handler,
     ),
     ToolSpec(
         "execution_list",

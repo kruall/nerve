@@ -998,6 +998,29 @@ class ExecutionService:
         assert current is not None
         return self._decorate(current)
 
+    async def cancel_queued_execution(
+        self, *, execution_id: str, requested_by: str, reason: str,
+    ) -> Mapping[str, Any]:
+        """Operator cancellation for a provably not-yet-started queue entry."""
+        row = await self.db.get_execution(execution_id)
+        if row is None:
+            raise KeyError(execution_id)
+        if row.get("status") not in {"queued", "starting"}:
+            raise ValueError("only queued or starting executions may be cancelled this way")
+        if row.get("selected_leases"):
+            raise ValueError("queued cancellation refuses executions with selected leases")
+        if not reason.strip():
+            raise ValueError("queued cancellation requires a reason")
+        accepted = await self.db.request_execution_cancel(execution_id, reason=reason)
+        if not accepted:
+            raise ValueError("queued execution state changed before cancellation")
+        await self.db.cancel_resource_requests(execution_id)
+        await self.db.finalize_execution_cancelled(execution_id)
+        await self._broadcast(execution_id)
+        current = await self.db.get_execution(execution_id)
+        assert current is not None
+        return self._decorate(current)
+
     async def cancel_session(self, session_id: str, *, reason: str = "session stopped") -> bool:
         ids = await self.db.suppress_session_executions(session_id, reason=reason)
         if not ids:
