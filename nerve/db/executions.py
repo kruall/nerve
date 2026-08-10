@@ -54,13 +54,32 @@ class ExecutionStore:
         profile_snapshot: Mapping[str, Any],
         plan: Mapping[str, Any],
         resource_requests: Sequence[Mapping[str, Any]],
+        handle_ids: Sequence[str] = (),
         completion_target_type: str = "session",
         completion_target_id: str | None = None,
         auto_continue: bool = True,
     ) -> dict[str, Any]:
         now = utc_now_iso()
+        if len(handle_ids) != len(set(handle_ids)):
+            raise ValueError("resource handle ids must be distinct")
         try:
-            await self._write(
+            async with self._atomic():
+                for position, handle_id in enumerate(handle_ids):
+                    async with self.db.execute(
+                        """SELECT 1
+                             FROM session_resource_handles AS h
+                             JOIN resource_leases AS l ON l.id=h.lease_id
+                             JOIN resource_hosts AS host ON host.id=h.host_id
+                            WHERE h.id=? AND h.session_id=? AND h.state='active'
+                              AND l.session_id=h.session_id AND l.host_id=h.host_id
+                              AND l.fencing_token=h.fencing_token AND l.state='active'
+                              AND host.enabled=1 AND host.draining=0 AND host.offline=0
+                              AND host.quarantined=0 AND host.permanently_unavailable=0""",
+                        (handle_id, session_id),
+                    ) as cursor:
+                        if await cursor.fetchone() is None:
+                            raise ValueError("resource handle does not belong to this session")
+                await self.db.execute(
                 """INSERT INTO executions
                    (id, session_id, kind, profile_version, profile_hash,
                     profile_snapshot, plan, resource_requests, selected_leases,
@@ -73,7 +92,12 @@ class ExecutionStore:
                     json.dumps(list(resource_requests)), completion_target_type,
                     completion_target_id, int(auto_continue), now, now, now,
                 ),
-            )
+                )
+                for position, handle_id in enumerate(handle_ids):
+                    await self.db.execute(
+                        "INSERT INTO operation_resource_refs(operation_id, handle_id, position, created_at) VALUES (?, ?, ?, ?)",
+                        (execution_id, handle_id, position, now),
+                    )
         except sqlite3.IntegrityError as exc:
             raise ValueError("session already owns an active execution") from exc
         row = await self.get_execution(execution_id)
@@ -183,11 +207,15 @@ class ExecutionStore:
                 params.append(value)
         placeholders = ",".join("?" for _ in expected)
         params.extend([execution_id, *expected])
-        result = await self._write(
-            f"""UPDATE executions SET {', '.join(assignments)}
-                WHERE id = ? AND status IN ({placeholders})""",
-            tuple(params),
-        )
+        statement = f"""UPDATE executions SET {', '.join(assignments)}
+            WHERE id = ? AND status IN ({placeholders})"""
+        if to_status in TERMINAL_EXECUTION_STATUSES:
+            async with self._atomic():
+                result = await self.db.execute(statement, tuple(params))
+                if result.rowcount:
+                    await self.db.execute("DELETE FROM operation_resource_refs WHERE operation_id=?", (execution_id,))
+        else:
+            result = await self._write(statement, tuple(params))
         return (result.rowcount or 0) == 1
 
     async def finish_execution(
@@ -209,8 +237,9 @@ class ExecutionStore:
         now = utc_now_iso()
         expected = tuple(expect)
         placeholders = ",".join("?" for _ in expected)
-        update = await self._write(
-            f"""UPDATE executions
+        async with self._atomic():
+            update = await self.db.execute(
+                f"""UPDATE executions
                 SET status = ?, result = ?, finished_at = ?, updated_at = ?,
                     revision = revision + 1,
                     continuation_state = CASE WHEN auto_continue = 1 THEN 'pending' ELSE 'suppressed' END,
@@ -221,7 +250,9 @@ class ExecutionStore:
                 status, json.dumps(dict(result)), now, now, execution_id,
                 *expected,
             ),
-        )
+            )
+            if update.rowcount:
+                await self.db.execute("DELETE FROM operation_resource_refs WHERE operation_id=?", (execution_id,))
         return (update.rowcount or 0) == 1
 
     async def dismiss_session_execution(
@@ -323,6 +354,7 @@ class ExecutionStore:
                    WHERE execution_id=? AND state='queued'""",
                 (now, execution_id),
             )
+            await self.db.execute("DELETE FROM operation_resource_refs WHERE operation_id=?", (execution_id,))
         return True
 
     async def suppress_session_executions(

@@ -40,6 +40,15 @@ async def _apply_through_v52(db: aiosqlite.Connection) -> None:
         await db.commit()
 
 
+async def _apply_through_v57(db: aiosqlite.Connection) -> None:
+    for version, module_name in runner.discover_migrations():
+        if version > 57:
+            break
+        await importlib.import_module(f"nerve.db.migrations.{module_name}").up(db)
+        await db.execute("INSERT INTO schema_version(version) VALUES (?)", (version,))
+        await db.commit()
+
+
 async def _legacy_rows(db: aiosqlite.Connection) -> None:
     await db.execute(
         "INSERT INTO sessions(id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
@@ -70,7 +79,7 @@ async def _legacy_snapshot(db: aiosqlite.Connection) -> tuple[tuple, tuple, tupl
 
 
 @pytest.mark.asyncio
-async def test_v057_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp_path):
+async def test_v058_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp_path):
     fresh = await aiosqlite.connect(tmp_path / "fresh.db")
     upgraded = await aiosqlite.connect(tmp_path / "upgrade.db")
     try:
@@ -79,7 +88,7 @@ async def test_v057_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp
         await _legacy_rows(upgraded)
         legacy_before = await _legacy_snapshot(upgraded)
 
-        assert await runner.run_migrations(upgraded) == 57
+        assert await runner.run_migrations(upgraded) == 58
         fresh_schema = await _schema(fresh)
         assert fresh_schema == await _schema(upgraded)
         assert (await (await fresh.execute("SELECT next_ticket FROM resource_wait_allocator")).fetchone())[0] == 1
@@ -87,13 +96,47 @@ async def test_v057_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp
         columns = {row[1] for row in await (await fresh.execute("PRAGMA table_info(resource_hosts)")).fetchall()}
         assert {"recovery_generation", "recovery_claimed_generation", "permanently_unavailable", "recovery_claim_state", "recovery_claim_expires_at", "recovery_retry_at"} <= columns
         assert "idx_resource_hosts_recovery_claim" in fresh_schema
-        # V057 only appends recovery columns with defaults; legacy values stay intact.
+        # V057/V058 only append defaulted columns; legacy values stay intact.
         after = await _legacy_snapshot(upgraded)
         assert after[0] == legacy_before[0] and after[2] == legacy_before[2]
         assert after[1][:len(legacy_before[1])] == legacy_before[1]
+        ref_columns = {row[1] for row in await (await fresh.execute("PRAGMA table_info(operation_resource_refs)")).fetchall()}
+        handle_columns = {row[1] for row in await (await fresh.execute("PRAGMA table_info(session_resource_handles)")).fetchall()}
+        assert {"position"} <= ref_columns
+        assert {"auto_release_when_session_idle"} <= handle_columns
     finally:
         await fresh.close()
         await upgraded.close()
+
+
+@pytest.mark.asyncio
+async def test_v058_backfills_deterministic_ref_positions_and_enforces_order_uniqueness(tmp_path):
+    db = await aiosqlite.connect(tmp_path / "v057.db")
+    try:
+        await _apply_through_v57(db)
+        # Foreign-key enforcement is intentionally immaterial to this schema
+        # migration; V058 must deterministically order every historical row.
+        await db.executemany(
+            "INSERT INTO operation_resource_refs(operation_id, handle_id, created_at) VALUES (?, ?, ?)",
+            [
+                ("operation-a", "handle-b", "2000-01-02"),
+                ("operation-a", "handle-c", "2000-01-01"),
+                ("operation-a", "handle-a", "2000-01-01"),
+            ],
+        )
+        await db.commit()
+        migration = importlib.import_module("nerve.db.migrations.v058_ordered_operation_resource_refs")
+        await migration.up(db)
+        rows = await (await db.execute(
+            "SELECT handle_id, position FROM operation_resource_refs WHERE operation_id='operation-a' ORDER BY position",
+        )).fetchall()
+        assert rows == [("handle-a", 0), ("handle-c", 1), ("handle-b", 2)]
+        with pytest.raises(aiosqlite.IntegrityError):
+            await db.execute(
+                "INSERT INTO operation_resource_refs(operation_id, handle_id, position, created_at) VALUES ('operation-a', 'handle-d', 0, 'now')",
+            )
+    finally:
+        await db.close()
 
 
 @pytest.mark.asyncio
@@ -237,8 +280,8 @@ async def test_v53_rejects_invalid_states_and_duplicate_resource_references(tmp_
             ("handle-1", "session-1", "pool-a", "host-1", "lease-1", 1, "active", "now", "now"),
         )
         await db.execute(
-            "INSERT INTO operation_resource_refs(operation_id, handle_id, created_at) VALUES (?, ?, ?)",
-            ("operation-1", "handle-1", "now"),
+            "INSERT INTO operation_resource_refs(operation_id, handle_id, position, created_at) VALUES (?, ?, ?, ?)",
+            ("operation-1", "handle-1", 0, "now"),
         )
         await db.commit()
 
@@ -330,8 +373,8 @@ async def test_v53_enforces_active_lease_and_foreign_keys_and_installs_lookup_in
             )
         with pytest.raises(aiosqlite.IntegrityError):
             await db.execute(
-                """INSERT INTO operation_resource_refs(operation_id, handle_id, created_at)
-                   VALUES ('missing-operation', 'first', 'now')"""
+                """INSERT INTO operation_resource_refs(operation_id, handle_id, position, created_at)
+                   VALUES ('missing-operation', 'first', 1, 'now')"""
             )
         with pytest.raises(aiosqlite.IntegrityError):
             await db.execute(

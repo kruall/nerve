@@ -428,7 +428,7 @@ async def test_stopped_resource_idle_session_releases_every_handle_idempotently(
     service = await _handle_service(db)
     handles = await service.acquire_handles("session-a", [
         {"pool": "only-a"}, {"pool": "only-b"},
-    ])
+    ], auto_release_when_session_idle=True)
     await db.update_session_fields("session-a", {"status": "stopped"})
 
     assert set(await service.release_all_session_handles("session-a")) == {
@@ -520,7 +520,9 @@ async def test_unknown_handle_quiescence_quarantines_host_lease_and_handle(db, m
 @pytest.mark.asyncio
 async def test_resource_live_predicate_covers_resume_pending_and_resuming(db):
     service = await _handle_service(db)
-    handle = (await service.acquire_handles("session-a", [{"pool": "only-a"}]))[0]
+    handle = (await service.acquire_handles(
+        "session-a", [{"pool": "only-a"}], auto_release_when_session_idle=True,
+    ))[0]
     await _handle_operation(db, "resume-operation", status="succeeded")
 
     pending = await db.get_execution("resume-operation")
@@ -541,7 +543,9 @@ async def test_resource_live_predicate_covers_resume_pending_and_resuming(db):
 @pytest.mark.asyncio
 async def test_resource_live_predicate_covers_durable_lease_wait(db):
     service = await _handle_service(db)
-    handle = (await service.acquire_handles("session-a", [{"pool": "only-a"}]))[0]
+    handle = (await service.acquire_handles(
+        "session-a", [{"pool": "only-a"}], auto_release_when_session_idle=True,
+    ))[0]
     await _handle_operation(db, "wait-operation", status="succeeded")
     claimed, _ = await db.claim_execution_continuation("wait-operation")
     assert claimed

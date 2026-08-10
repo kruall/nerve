@@ -808,7 +808,7 @@ class LeaseService:
                 self._wait_continuation_publisher(str(wait["operation_id"]))
         return won
 
-    async def acquire_handles(self, session_id: str, spec: Mapping[str, Any] | Sequence[Mapping[str, Any]]) -> Sequence[Mapping[str, str]]:
+    async def acquire_handles(self, session_id: str, spec: Mapping[str, Any] | Sequence[Mapping[str, Any]], *, auto_release_when_session_idle: bool = False) -> Sequence[Mapping[str, str]]:
         """Retain an all-or-none handle bundle, acquiring only its missing slots.
 
         Existing active handles satisfy matching pool/host requests first.  A
@@ -857,7 +857,8 @@ class LeaseService:
             handles = [
                 {"id": f"handle-{uuid.uuid4().hex}", "session_id": session_id,
                  "pool": pool, "host_id": lease["host_id"], "lease_id": lease["id"],
-                 "fencing_token": lease["fencing_token"]}
+                 "fencing_token": lease["fencing_token"],
+                 "auto_release_when_session_idle": auto_release_when_session_idle}
                 for (pool, _host), lease in zip(missing, leases, strict=True)
             ]
             await self.db.create_session_resource_handles(handles)
@@ -974,6 +975,11 @@ class LeaseService:
             return []
         released: list[str] = []
         for handle in await self.db.list_session_resource_handles(session_id, states=("active",)):
+            # Explicitly acquired handles are retained until their owner calls
+            # release_handle.  Only the compatibility path that converted a
+            # legacy per-operation resource request opts in to idle cleanup.
+            if not handle.get("auto_release_when_session_idle"):
+                continue
             try:
                 if await self.release_handle(session_id, str(handle["id"])):
                     released.append(str(handle["id"]))
@@ -990,6 +996,12 @@ class LeaseService:
             raise ResourceHandleOwnershipError()
         lease = await self.db.get_resource_lease(str(handle["lease_id"]))
         if lease is None or lease["state"] != "active":
+            raise ResourceHandleOwnershipError()
+        host = await self.db.get_resource_host(str(handle["host_id"]))
+        if (host is None or not host["enabled"] or host["draining"] or host["offline"]
+                or host["quarantined"] or host.get("permanently_unavailable")
+                or lease["host_id"] != handle["host_id"]
+                or int(lease["fencing_token"]) != int(handle["fencing_token"])):
             raise ResourceHandleOwnershipError()
         return {**handle, "lease": lease}
 

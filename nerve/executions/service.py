@@ -378,10 +378,11 @@ class ExecutionService:
                 self._track(self._tasks, row["id"], task)
             elif recovery.state == "finished" and recovery.result is not None:
                 await self._finish_from_result(row["id"], row["plan"], recovery.result)
-                await self.resource_manager.release(
-                    execution_id=row["id"],
-                    leases=row.get("selected_leases") or [],
-                )
+                if not self._uses_retained_handles(row):
+                    await self.resource_manager.release(
+                        execution_id=row["id"],
+                        leases=row.get("selected_leases") or [],
+                    )
             else:
                 await self._quarantine_or_release(row, recovery)
                 won = await self.db.finish_execution(
@@ -466,6 +467,7 @@ class ExecutionService:
         self, *, session_id: str, plan: CompiledExecutionPlan,
         completion_target: Mapping[str, str] | None = None,
         auto_continue: bool = True,
+        handle_ids: Sequence[str] | None = None,
     ) -> Mapping[str, Any]:
         self.recovery_gate.require_ready()
         session = await self.db.get_session(session_id)
@@ -475,6 +477,20 @@ class ExecutionService:
         ):
             raise ValueError("execution owner session is unavailable")
         serialized = plan.as_dict(redact_secrets=False)
+        if handle_ids is not None:
+            if (isinstance(handle_ids, (str, bytes))
+                    or not all(isinstance(handle_id, str) and handle_id for handle_id in handle_ids)):
+                raise ValueError("resource handle ids are invalid")
+            if len(set(handle_ids)) != len(handle_ids):
+                raise ValueError("resource handle ids must be distinct")
+            # Resolve before execution creation or backend dispatch. Creation
+            # repeats this check atomically while attaching durable refs.
+            resolved = [await self.resource_manager._resolve_handle_lease(session_id, handle_id)
+                        for handle_id in handle_ids]
+            slots = list(dict(serialized.get("resources", {})))
+            if slots and len(slots) != len(resolved):
+                raise ValueError("resource handle ids must match execution resource slots")
+            serialized["retained_handle_ids"] = list(handle_ids)
         return await self._start_serialized(
             session_id=session_id,
             plan=serialized,
@@ -500,22 +516,63 @@ class ExecutionService:
             {"slot": slot, "pool": pool, "mode": "exclusive", "state": "requested"}
             for slot, pool in dict(plan_data.get("resources", {})).items()
         ]
-        row = await self.db.create_execution(
-            execution_id,
-            session_id=session_id,
-            kind=str(plan_data["kind"]),
-            profile_version=str(plan_data["profile_version"]),
-            profile_hash=str(plan_data["profile_hash"]),
-            profile_snapshot=profile_snapshot,
-            plan=plan_data,
-            resource_requests=requests,
-            completion_target_type=str((completion_target or {}).get("type", "session")),
-            completion_target_id=(completion_target or {}).get("id"),
-            auto_continue=auto_continue,
-        )
+        handle_ids = tuple(plan_data.get("retained_handle_ids", ()))
+        legacy_handle_ids: tuple[str, ...] = ()
+        # Compatibility adapter: callers of the established start API still
+        # provide plan resources, not handles.  Retain those leases at session
+        # scope and dispatch the operation through the resulting handles.
+        acquire_handles = getattr(self.resource_manager, "acquire_handles", None)
+        if not handle_ids and plan_data.get("resources") and callable(acquire_handles):
+            spec = [
+                {"pool": pool, "host": dict(plan_data.get("resource_hosts", {})).get(slot)}
+                for slot, pool in dict(plan_data["resources"]).items()
+            ]
+            existing_handle_ids = {
+                str(handle["id"])
+                for handle in await self.db.list_session_resource_handles(session_id)
+            }
+            acquired = await acquire_handles(
+                session_id, spec, auto_release_when_session_idle=True,
+            )
+            handle_ids = tuple(str(item["id"]) for item in acquired)
+            legacy_handle_ids = tuple(
+                handle_id for handle_id in handle_ids
+                if handle_id not in existing_handle_ids
+            )
+            plan_data = {**plan_data, "retained_handle_ids": list(handle_ids),
+                         "legacy_resource_handles": True}
+        if handle_ids:
+            requests = []
+        try:
+            row = await self.db.create_execution(
+                execution_id,
+                session_id=session_id,
+                kind=str(plan_data["kind"]),
+                profile_version=str(plan_data["profile_version"]),
+                profile_hash=str(plan_data["profile_hash"]),
+                profile_snapshot=profile_snapshot,
+                plan=plan_data,
+                resource_requests=requests,
+                handle_ids=handle_ids,
+                completion_target_type=str((completion_target or {}).get("type", "session")),
+                completion_target_id=(completion_target or {}).get("id"),
+                auto_continue=auto_continue,
+            )
+        except Exception:
+            # The compatibility adapter acquired these only for this start.
+            # Do not leave them retained when its atomic execution insert loses
+            # a race (for example, another active execution in the session).
+            for handle_id in legacy_handle_ids:
+                with contextlib.suppress(Exception):
+                    await self.resource_manager.release_handle(session_id, handle_id)
+            raise
         await self._broadcast(execution_id)
         self._spawn_runner(execution_id)
         return self._decorate(row)
+
+    @staticmethod
+    def _uses_retained_handles(row: Mapping[str, Any]) -> bool:
+        return bool(row.get("plan", {}).get("retained_handle_ids"))
 
     async def _run(self, execution_id: str) -> None:
         row = await self.db.get_execution(execution_id)
@@ -535,8 +592,18 @@ class ExecutionService:
         elif row["status"] != "starting" or row.get("selected_leases"):
             return
         leases: Sequence[Mapping[str, Any]] = []
+        retained_handles = self._uses_retained_handles(row)
         reservation_lease_id: str | None = None
         try:
+            if retained_handles:
+                resolved = [await self.resource_manager._resolve_handle_lease(
+                    row["session_id"], handle_id,
+                ) for handle_id in row["plan"]["retained_handle_ids"]]
+                slots = list(dict(row["plan"].get("resources", {})))
+                leases = [{**item["lease"], **({"slot": slots[index]} if index < len(slots) else {})}
+                          for index, item in enumerate(resolved)]
+                await self._run_with_leases(execution_id, row, leases, None)
+                return
             reservation = row["plan"].get("session_reservation")
             if reservation:
                 await self.db.append_execution_log(
@@ -616,7 +683,7 @@ class ExecutionService:
             current = await self.db.get_execution(execution_id)
             confirmed = bool(current and await self._cancel_with_quiescence(current))
             if not self._stopping:
-                if confirmed:
+                if confirmed and not retained_handles:
                     await self.resource_manager.release(execution_id=execution_id, leases=leases)
                     leases = []
                     await self.db.append_execution_log(execution_id, stream="stdout", text="stage=resource_release quiescence=confirmed\n")
@@ -642,7 +709,7 @@ class ExecutionService:
                 await self._broadcast(execution_id)
                 if won: self._schedule_continuation(execution_id)
         finally:
-            releasable = [lease for lease in leases if str(lease.get("id")) != reservation_lease_id]
+            releasable = ([] if retained_handles else [lease for lease in leases if str(lease.get("id")) != reservation_lease_id])
             if releasable and not self._stopping:
                 with contextlib.suppress(Exception): await self.resource_manager.release(execution_id=execution_id, leases=releasable)
 
@@ -816,10 +883,11 @@ class ExecutionService:
             return
         await self._finish_from_result(row["id"], row["plan"], result)
         try:
-            await self.resource_manager.release(
-                execution_id=row["id"],
-                leases=row.get("selected_leases") or [],
-            )
+            if not self._uses_retained_handles(row):
+                await self.resource_manager.release(
+                    execution_id=row["id"],
+                    leases=row.get("selected_leases") or [],
+                )
         except Exception as exc:
             logger.warning(
                 "Could not release leases after reattaching %s (%s)",
@@ -829,7 +897,7 @@ class ExecutionService:
     async def _recover_and_cancel(self, row: Mapping[str, Any]) -> None:
         confirmed = await self._cancel_with_quiescence(row, recovery_required=True)
         leases = row.get("selected_leases") or []
-        if confirmed:
+        if confirmed and not self._uses_retained_handles(row):
             await self.resource_manager.release(
                 execution_id=row["id"], leases=leases,
             )
@@ -906,7 +974,7 @@ class ExecutionService:
                 execution_id=row["id"], leases=leases,
                 reason="backend state is unknown after daemon restart",
             )
-        else:
+        elif not self._uses_retained_handles(row):
             await self.resource_manager.release(execution_id=row["id"], leases=leases)
 
     def _schedule_continuation(self, execution_id: str) -> None:
@@ -1089,7 +1157,7 @@ class ExecutionService:
             continuation_task.cancel()
         if accepted and row["status"] in ACTIVE_EXECUTION_STATUSES:
             cancelled = await self._cancel_with_quiescence(row)
-            if cancelled and row.get("selected_leases"):
+            if cancelled and row.get("selected_leases") and not self._uses_retained_handles(row):
                 await self.resource_manager.release(
                     execution_id=execution_id, leases=row["selected_leases"],
                 )
@@ -1154,7 +1222,7 @@ class ExecutionService:
             if row is None:
                 continue
             cancelled = await self._cancel_with_quiescence(row)
-            if cancelled and row.get("selected_leases"):
+            if cancelled and row.get("selected_leases") and not self._uses_retained_handles(row):
                 await self.resource_manager.release(execution_id=execution_id, leases=row["selected_leases"])
                 await self.db.append_execution_log(execution_id, stream="stdout", text="stage=resource_release quiescence=confirmed\n")
             if not cancelled and row.get("selected_leases"):

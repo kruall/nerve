@@ -63,8 +63,8 @@ class ResourceStore:
     async def create_session_resource_handle(self, handle: Mapping[str, Any]) -> dict[str, Any]:
         now = utc_now_iso()
         await self._write("""INSERT INTO session_resource_handles
-            (id, session_id, pool, host_id, lease_id, fencing_token, state, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""", (handle["id"], handle["session_id"], handle["pool"], handle["host_id"], handle["lease_id"], handle["fencing_token"], handle.get("state", "active"), now, now))
+            (id, session_id, pool, host_id, lease_id, fencing_token, state, auto_release_when_session_idle, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (handle["id"], handle["session_id"], handle["pool"], handle["host_id"], handle["lease_id"], handle["fencing_token"], handle.get("state", "active"), int(bool(handle.get("auto_release_when_session_idle"))), now, now))
         row = await self.get_session_resource_handle(str(handle["id"])); assert row is not None
         return row
 
@@ -79,10 +79,10 @@ class ResourceStore:
         async with self._atomic():
             for handle in handles:
                 await self.db.execute("""INSERT INTO session_resource_handles
-                    (id, session_id, pool, host_id, lease_id, fencing_token, state, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)""", (
+                    (id, session_id, pool, host_id, lease_id, fencing_token, state, auto_release_when_session_idle, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)""", (
                     handle["id"], handle["session_id"], handle["pool"], handle["host_id"],
-                    handle["lease_id"], handle["fencing_token"], now, now,
+                    handle["lease_id"], handle["fencing_token"], int(bool(handle.get("auto_release_when_session_idle"))), now, now,
                 ))
 
     async def update_session_resource_handle(self, handle_id: str, *, expected_state: str, state: str, release_reason: str | None = None) -> bool:
@@ -97,7 +97,7 @@ class ResourceStore:
     async def delete_session_resource_handle(self, handle_id: str) -> bool:
         return bool((await self._write("DELETE FROM session_resource_handles WHERE id=?", (handle_id,))).rowcount)
 
-    async def attach_operation_resource_ref(self, operation_id: str, handle_id: str) -> bool:
+    async def attach_operation_resource_ref(self, operation_id: str, handle_id: str, *, position: int | None = None) -> bool:
         async with self._atomic():
             await self.db.execute("BEGIN IMMEDIATE")
             async with self.db.execute(
@@ -108,9 +108,9 @@ class ResourceStore:
                     return False
             try:
                 await self.db.execute(
-                    """INSERT INTO operation_resource_refs(operation_id, handle_id, created_at)
-                       VALUES (?, ?, ?)""",
-                    (operation_id, handle_id, utc_now_iso()),
+                    """INSERT INTO operation_resource_refs(operation_id, handle_id, position, created_at)
+                       VALUES (?, ?, COALESCE(?, (SELECT COALESCE(MAX(position), -1)+1 FROM operation_resource_refs WHERE operation_id=?)), ?)""",
+                    (operation_id, handle_id, position, operation_id, utc_now_iso()),
                 )
             except sqlite3.IntegrityError as exc:
                 if "UNIQUE constraint failed: operation_resource_refs" not in str(exc):
@@ -122,7 +122,7 @@ class ResourceStore:
         return (await self._write("DELETE FROM operation_resource_refs WHERE operation_id=?", (operation_id,))).rowcount
 
     async def list_operation_resource_refs(self, operation_id: str) -> list[dict[str, Any]]:
-        async with self.db.execute("SELECT * FROM operation_resource_refs WHERE operation_id=? ORDER BY created_at, handle_id", (operation_id,)) as c:
+        async with self.db.execute("SELECT * FROM operation_resource_refs WHERE operation_id=? ORDER BY position", (operation_id,)) as c:
             return [dict(row) async for row in c]
 
     async def list_handle_operation_refs(self, handle_id: str) -> list[dict[str, Any]]:
