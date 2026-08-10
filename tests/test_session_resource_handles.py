@@ -25,9 +25,9 @@ def _handle(handle_id: str = "handle-a") -> dict:
 async def test_handle_refs_waits_and_recovery_intents_are_durable(db):
     await _operation(db)
     handle = await db.create_session_resource_handle(_handle())
+    assert await db.attach_operation_resource_ref("operation-a", handle["id"])
     assert await db.update_session_resource_handle(handle["id"], expected_state="active", state="releasing")
     assert not await db.update_session_resource_handle(handle["id"], expected_state="active", state="released")
-    assert await db.attach_operation_resource_ref("operation-a", handle["id"])
     assert not await db.attach_operation_resource_ref("operation-a", handle["id"])
     assert [ref["handle_id"] for ref in await db.list_operation_resource_refs("operation-a")] == [handle["id"]]
     assert await db.detach_operation_resource_refs("operation-a") == 1
@@ -148,10 +148,10 @@ async def test_handle_state_cas_and_operation_ref_foreign_ownership(db):
     assert await db.update_session_resource_handle("handle-a", expected_state="quarantined", state="released")
     released = await db.get_session_resource_handle("handle-a")
     assert released is not None and released["state"] == "released"
-    assert await db.attach_operation_resource_ref("operation-a", "handle-a")
+    assert not await db.attach_operation_resource_ref("operation-a", "handle-a")
     refs = await db.list_operation_resource_refs("operation-a")
-    assert refs[0]["operation_id"] == "operation-a" and refs[0]["handle_id"] == "handle-a"
-    assert await db.detach_operation_resource_refs("operation-a") == 1
+    assert refs == []
+    assert await db.detach_operation_resource_refs("operation-a") == 0
     assert await db.detach_operation_resource_refs("operation-a") == 0
 
 

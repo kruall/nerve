@@ -4,7 +4,7 @@ import json
 import pytest
 from types import SimpleNamespace
 from nerve.agent.tools import ToolContext, build_default_registry
-from nerve.resources import (LeaseService, ResourceHandleOwnershipError,
+from nerve.resources import (LeaseService, ResourceHandleConflictError, ResourceHandleOwnershipError,
                              ResourceInventory, ResourceInventoryError,
                              ResourceRecoveryGate, ResourceRecoveryUnavailable)
 
@@ -366,3 +366,231 @@ async def test_handle_list_and_resolution_hide_stale_recovered_lease(db):
     assert await service.list_session_handles("session-a") == []
     with pytest.raises(ResourceHandleOwnershipError, match="does not belong"):
         await service.resolve_handle("session-a", handle["id"])
+
+
+async def _handle_operation(db, operation_id: str, *, status: str = "queued") -> None:
+    await db.create_execution(
+        operation_id, session_id="session-a", kind="remote", profile_version="1",
+        profile_hash="hash", profile_snapshot={}, plan={}, resource_requests=[],
+    )
+    if status != "queued":
+        assert await db.commit_operation_terminal(
+            operation_id=operation_id, status=status, result={"outcome": status},
+        )
+
+
+@pytest.mark.asyncio
+async def test_operation_completion_detaches_refs_but_retains_handle_until_final_cleanup(db):
+    service = await _handle_service(db)
+    handle = (await service.acquire_handles("session-a", [{"pool": "only-a"}]))[0]
+    private = await service._resolve_handle_lease("session-a", handle["id"])
+    await _handle_operation(db, "completed-operation")
+    assert await db.attach_operation_resource_ref("completed-operation", handle["id"])
+
+    assert await db.commit_operation_terminal(
+        operation_id="completed-operation", status="succeeded", result={"ok": True},
+    )
+    assert await db.list_operation_resource_refs("completed-operation") == []
+    assert (await db.get_session_resource_handle(handle["id"]))["state"] == "active"
+    assert (await db.get_resource_lease(private["lease_id"]))["state"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_stopped_session_with_nonterminal_operation_retains_all_handles(db):
+    service = await _handle_service(db)
+    handles = await service.acquire_handles("session-a", [
+        {"pool": "only-a"}, {"pool": "only-b"},
+    ])
+    await _handle_operation(db, "still-running")
+    await db.update_session_fields("session-a", {"status": "stopped"})
+
+    assert await service.release_all_session_handles("session-a") == []
+    assert {item["id"] for item in await service.list_session_handles("session-a")} == {
+        item["id"] for item in handles
+    }
+    assert await db.session_resource_is_live("session-a") is True
+
+
+@pytest.mark.asyncio
+async def test_active_session_durable_state_retains_handles_without_caller_flag(db):
+    service = await _handle_service(db)
+    handle = (await service.acquire_handles("session-a", [{"pool": "only-a"}]))[0]
+    await db.update_session_fields("session-a", {"status": "active"})
+
+    assert await service.release_all_session_handles("session-a") == []
+    assert (await db.get_session_resource_handle(handle["id"]))["state"] == "active"
+    assert await db.session_resource_is_live("session-a") is True
+
+
+@pytest.mark.asyncio
+async def test_stopped_resource_idle_session_releases_every_handle_idempotently(db):
+    service = await _handle_service(db)
+    handles = await service.acquire_handles("session-a", [
+        {"pool": "only-a"}, {"pool": "only-b"},
+    ])
+    await db.update_session_fields("session-a", {"status": "stopped"})
+
+    assert set(await service.release_all_session_handles("session-a")) == {
+        item["id"] for item in handles
+    }
+    assert await service.release_all_session_handles("session-a") == []
+    rows = await db.list_session_resource_handles("session-a")
+    assert {row["state"] for row in rows} == {"released"}
+    assert {lease["state"] for lease in await db.list_resource_leases()
+            if lease["session_id"] == "session-a"} == {"released"}
+
+
+@pytest.mark.asyncio
+async def test_manual_release_rejects_referencing_operations_with_stable_ids(db):
+    service = await _handle_service(db)
+    handle = (await service.acquire_handles("session-a", [{"pool": "only-a"}]))[0]
+    await _handle_operation(db, "operation-z", status="failed")
+    assert await db.attach_operation_resource_ref("operation-z", handle["id"])
+    await _handle_operation(db, "operation-a")
+    assert await db.attach_operation_resource_ref("operation-a", handle["id"])
+
+    with pytest.raises(ResourceHandleConflictError,
+                       match="referenced by operations: operation-a, operation-z") as exc:
+        await service.release_handle("session-a", handle["id"])
+    assert exc.value.operation_ids == ("operation-a", "operation-z")
+    assert (await db.get_session_resource_handle(handle["id"]))["state"] == "active"
+    assert await db.list_resource_recovery_intents(state="processing") == []
+
+
+@pytest.mark.asyncio
+async def test_release_conflict_and_nonactive_retry_create_no_intent(db):
+    service = await _handle_service(db)
+    handle = (await service.acquire_handles("session-a", [{"pool": "only-a"}]))[0]
+    before = await db.list_resource_recovery_intents()
+    await _handle_operation(db, "conflict-operation")
+    assert await db.attach_operation_resource_ref("conflict-operation", handle["id"])
+
+    with pytest.raises(ResourceHandleConflictError):
+        await service.release_handle("session-a", handle["id"])
+    assert await db.list_resource_recovery_intents() == before
+
+    await db.update_session_resource_handle(
+        handle["id"], expected_state="active", state="released",
+    )
+    assert not await service.release_handle("session-a", handle["id"])
+    assert await db.list_resource_recovery_intents() == before
+
+
+@pytest.mark.asyncio
+async def test_attach_after_atomic_begin_release_cannot_reference_handle(db):
+    service = await _handle_service(db)
+    handle = (await service.acquire_handles("session-a", [{"pool": "only-a"}]))[0]
+    intent_id, conflicts = await db.begin_release_handle(
+        "session-a", handle["id"], {
+            "id": "intent-order-release", "payload": {"lease_id": "hidden"},
+        },
+    )
+    assert intent_id == "intent-order-release"
+    assert conflicts == []
+    await _handle_operation(db, "late-operation")
+    assert not await db.attach_operation_resource_ref("late-operation", handle["id"])
+    assert await db.list_operation_resource_refs("late-operation") == []
+    assert (await db.get_session_resource_handle(handle["id"]))["state"] == "releasing"
+
+
+@pytest.mark.asyncio
+async def test_unknown_handle_quiescence_quarantines_host_lease_and_handle(db, monkeypatch):
+    service = await _handle_service(db)
+    handle = (await service.acquire_handles("session-a", [{"pool": "only-a"}]))[0]
+    private = await service._resolve_handle_lease("session-a", handle["id"])
+
+    async def unknown_quiescence(_handle):
+        return False
+
+    monkeypatch.setattr(service, "_reconcile_handle_quiescence", unknown_quiescence)
+    assert await service.release_handle("session-a", handle["id"])
+    assert (await db.get_session_resource_handle(handle["id"]))["state"] == "quarantined"
+    assert (await db.get_resource_lease(private["lease_id"]))["state"] == "quarantined"
+    assert (await db.get_resource_host("host-a"))["quarantined"] == 1
+
+    waiter = asyncio.create_task(service.acquire_handles("session-b", [{"pool": "only-a"}]))
+    await asyncio.sleep(.05)
+    assert not waiter.done(), "a quarantined host must not become allocatable"
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+
+@pytest.mark.asyncio
+async def test_resource_live_predicate_covers_resume_pending_and_resuming(db):
+    service = await _handle_service(db)
+    handle = (await service.acquire_handles("session-a", [{"pool": "only-a"}]))[0]
+    await _handle_operation(db, "resume-operation", status="succeeded")
+
+    pending = await db.get_execution("resume-operation")
+    assert pending is not None and pending["continuation_state"] == "pending"
+    assert await db.session_resource_is_live("session-a") is True
+    assert await service.release_all_session_handles("session-a") == []
+
+    claimed, resuming = await db.claim_execution_continuation("resume-operation")
+    assert claimed and resuming is not None and resuming["continuation_state"] == "claimed"
+    assert await db.session_resource_is_live("session-a") is True
+    assert await service.release_all_session_handles("session-a") == []
+
+    assert await db.settle_execution_continuation("resume-operation", success=True)
+    assert await db.session_resource_is_live("session-a") is False
+    assert await service.release_all_session_handles("session-a") == [handle["id"]]
+
+
+@pytest.mark.asyncio
+async def test_resource_live_predicate_covers_durable_lease_wait(db):
+    service = await _handle_service(db)
+    handle = (await service.acquire_handles("session-a", [{"pool": "only-a"}]))[0]
+    await _handle_operation(db, "wait-operation", status="succeeded")
+    claimed, _ = await db.claim_execution_continuation("wait-operation")
+    assert claimed
+    assert await db.settle_execution_continuation("wait-operation", success=True)
+    await db.create_resource_wait_operation({
+        "id": "durable-wait", "session_id": "session-a", "operation_id": "wait-operation",
+        "request_kind": "pool", "pool": "only-a", "queue_ticket": 1,
+    })
+
+    assert await db.session_resource_is_live("session-a") is True
+    assert await service.release_all_session_handles("session-a") == []
+    assert await db.update_resource_wait_operation(
+        "durable-wait", expected_state="pending", state="cancelled", outcome="cancelled",
+    )
+    assert await db.session_resource_is_live("session-a") is False
+    assert await service.release_all_session_handles("session-a") == [handle["id"]]
+
+
+@pytest.mark.asyncio
+async def test_handle_release_lifecycle_mutations_are_closed_by_recovery_gate(db):
+    service = await _handle_service(db, ready=False)
+    active = LeaseService(
+        db=db, inventory=service.inventory, recovery_gate=ResourceRecoveryGate(),
+    )
+    handle = (await active.acquire_handles("session-a", [{"pool": "only-a"}]))[0]
+
+    with pytest.raises(ResourceRecoveryUnavailable, match="retry shortly"):
+        await service.release_handle("session-a", handle["id"])
+    with pytest.raises(ResourceRecoveryUnavailable, match="retry shortly"):
+        await service.release_all_session_handles("session-a")
+    assert (await db.get_session_resource_handle(handle["id"]))["state"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_manual_handle_release_is_fenced_terminal_and_idempotent(db):
+    service = await _handle_service(db)
+    handle = (await service.acquire_handles("session-a", [{"pool": "only-a"}]))[0]
+    private = await service._resolve_handle_lease("session-a", handle["id"])
+
+    assert await service.release_handle("session-a", handle["id"])
+    assert not await service.release_handle("session-a", handle["id"])
+    released = await db.get_session_resource_handle(handle["id"])
+    assert released is not None
+    assert released["state"] == "released"
+    assert released["released_at"] is not None
+    lease = await db.get_resource_lease(private["lease_id"])
+    assert lease is not None and lease["state"] == "released"
+
+    intents = await db.list_resource_recovery_intents()
+    release_intents = [intent for intent in intents if intent["kind"] == "release"]
+    assert len(release_intents) == 1
+    assert release_intents[0]["state"] == "completed"
+    assert release_intents[0]["handle_id"] == handle["id"]

@@ -25,6 +25,14 @@ class ResourceHandleOwnershipError(PermissionError):
         super().__init__("resource handle does not belong to this session")
 
 
+class ResourceHandleConflictError(RuntimeError):
+    """A retained handle cannot be released while Operations reference it."""
+
+    def __init__(self, operation_ids: Sequence[str]) -> None:
+        self.operation_ids = tuple(operation_ids)
+        super().__init__("resource handle is referenced by operations: " + ", ".join(self.operation_ids))
+
+
 class ResourceRecoveryUnavailable(RuntimeError):
     """The retryable response while durable startup recovery owns the subsystem."""
 
@@ -525,6 +533,102 @@ class LeaseService:
         """Authorize a handle without revealing lease or transport details."""
         handle = await self._resolve_handle_lease(session_id, handle_id)
         return self._opaque_handle(handle)
+
+    async def _session_resource_live(self, session_id: str, *, agent_turn_active: bool = False) -> bool:
+        """One predicate for retained-handle ownership.
+
+        The in-memory turn marker is intentionally supplied by SessionManager;
+        all other liveness is durable so restart/reconciliation cannot discard
+        a handle needed by an Operation or its continuation.
+        """
+        return agent_turn_active or await self.db.session_resource_is_live(session_id)
+
+    async def _reconcile_handle_quiescence(self, handle: Mapping[str, Any]) -> bool:
+        """Establish the fenced durable proof required before releasing a handle.
+
+        Operation completion removes its reference only after the execution
+        supervisor has reconciled the remote process.  The matching active
+        lease/fence is therefore the remaining local proof; a stale, absent,
+        or changed lease is deliberately treated as ambiguous.
+        """
+        lease = await self.db.get_resource_lease(str(handle["lease_id"]))
+        return bool(lease and lease["state"] == "active"
+                    and int(lease["fencing_token"]) == int(handle["fencing_token"]))
+
+    async def release_handle(self, session_id: str, handle_id: str) -> bool:
+        """Release one idle handle, or quarantine it when quiescence is unknown."""
+        self.recovery_gate.require_ready()
+        handle = await self.db.get_session_resource_handle(handle_id)
+        if handle is None or handle["session_id"] != session_id:
+            raise ResourceHandleOwnershipError()
+        if handle["state"] in {"released", "quarantined"}:
+            return False
+        if handle["state"] != "active":
+            return False
+        intent = {
+            "id": f"intent-{uuid.uuid4().hex}", "kind": "release",
+            "session_id": session_id, "handle_id": handle_id,
+            "payload": {"lease_id": handle["lease_id"]},
+        }
+        intent_id, operation_ids = await self.db.begin_release_handle(
+            session_id, handle_id, intent,
+        )
+        if operation_ids:
+            raise ResourceHandleConflictError(operation_ids)
+        if intent_id is None:
+            return False
+        lease = await self.db.get_resource_lease(str(handle["lease_id"]))
+        if not await self._reconcile_handle_quiescence(handle):
+            if lease is not None and lease["state"] in {"active", "revoking"}:
+                await self.quarantine(execution_id=str(lease["execution_id"]), leases=[lease],
+                                      reason="handle release could not prove remote quiescence")
+            else:
+                await self.db.set_resource_host_state(
+                    str(handle["host_id"]), quarantined=True,
+                    reason="handle release could not prove remote quiescence",
+                )
+            await self.db.update_session_resource_handle(
+                handle_id, expected_state="releasing", state="quarantined",
+                release_reason="handle release could not prove remote quiescence",
+            )
+            await self.db.update_resource_recovery_intent(
+                intent_id, expected_state="processing", state="failed",
+            )
+            return True
+        assert lease is not None
+        await self.release(execution_id=str(lease["execution_id"]), leases=[lease])
+        await self.db.update_session_resource_handle(
+            handle_id, expected_state="releasing", state="released",
+        )
+        await self.db.update_resource_recovery_intent(
+            intent_id, expected_state="processing", state="completed",
+        )
+        return True
+
+    async def release_all_session_handles(
+        self, session_id: str, *, agent_turn_active: bool = False,
+    ) -> list[str]:
+        """Release every handle only after the session is resource-idle.
+
+        This is intentionally a reconciliation action rather than a turn-end
+        action.  It is safe to call repeatedly from both stop and archive:
+        terminal handles are ignored, while a newly-live session simply keeps
+        every remaining active handle.  R6 will own waiter outcomes; this
+        method only observes their durable pending state.
+        """
+        self.recovery_gate.require_ready()
+        if await self._session_resource_live(session_id, agent_turn_active=agent_turn_active):
+            return []
+        released: list[str] = []
+        for handle in await self.db.list_session_resource_handles(session_id, states=("active",)):
+            try:
+                if await self.release_handle(session_id, str(handle["id"])):
+                    released.append(str(handle["id"]))
+            except ResourceHandleConflictError:
+                # A concurrent operation attachment wins; its handle remains
+                # retained and the next definitive lifecycle boundary retries.
+                continue
+        return released
 
     async def _resolve_handle_lease(self, session_id: str, handle_id: str) -> Mapping[str, Any]:
         """Trusted execution-only resolution, including the current lease fence."""

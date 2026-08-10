@@ -609,6 +609,7 @@ class AgentEngine:
             ydb_worktree_root=(getattr(self.config, "resources", {}).get("ydb_worktree_root")),
         )
         self.set_execution_service(execution_service)
+        self.sessions._on_final_stop = resource_service.release_all_session_handles
         # Archive is a hard lifecycle boundary for session-owned remote state.
         # The reservation layer quarantines if quiescence cannot be proven.
         previous_archive = self.sessions._on_archive

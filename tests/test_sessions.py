@@ -93,6 +93,26 @@ class TestLifecycleTransitions:
         session = await db.get_session("trans-4")
         assert session["status"] == "stopped"
 
+    async def test_final_resource_cleanup_runs_only_at_stop_or_archive(
+        self, sm: SessionManager,
+    ):
+        calls: list[tuple[str, bool]] = []
+
+        async def cleanup(session_id: str, *, agent_turn_active: bool = False) -> list[str]:
+            calls.append((session_id, agent_turn_active))
+            return []
+
+        sm._on_final_stop = cleanup
+        await sm.get_or_create("trans-resource")
+        await sm.mark_active("trans-resource")
+        await sm.mark_idle("trans-resource")
+        assert calls == []
+
+        await sm.mark_stopped("trans-resource")
+        assert calls == [("trans-resource", False)]
+        await sm.archive_session("trans-resource")
+        assert calls == [("trans-resource", False), ("trans-resource", False)]
+
     async def test_mark_error(self, sm: SessionManager, db: Database):
         await sm.get_or_create("trans-5")
         await sm.mark_error("trans-5", "something broke")

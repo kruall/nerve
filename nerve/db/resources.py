@@ -80,11 +80,25 @@ class ResourceStore:
         return bool((await self._write("DELETE FROM session_resource_handles WHERE id=?", (handle_id,))).rowcount)
 
     async def attach_operation_resource_ref(self, operation_id: str, handle_id: str) -> bool:
-        try:
-            result = await self._write("INSERT INTO operation_resource_refs(operation_id, handle_id, created_at) VALUES (?, ?, ?)", (operation_id, handle_id, utc_now_iso()))
-        except sqlite3.IntegrityError:
-            return False
-        return bool(result.rowcount)
+        async with self._atomic():
+            await self.db.execute("BEGIN IMMEDIATE")
+            async with self.db.execute(
+                "SELECT 1 FROM session_resource_handles WHERE id=? AND state='active'",
+                (handle_id,),
+            ) as c:
+                if await c.fetchone() is None:
+                    return False
+            try:
+                await self.db.execute(
+                    """INSERT INTO operation_resource_refs(operation_id, handle_id, created_at)
+                       VALUES (?, ?, ?)""",
+                    (operation_id, handle_id, utc_now_iso()),
+                )
+            except sqlite3.IntegrityError as exc:
+                if "UNIQUE constraint failed: operation_resource_refs" not in str(exc):
+                    raise
+                return False
+            return True
 
     async def detach_operation_resource_refs(self, operation_id: str) -> int:
         return (await self._write("DELETE FROM operation_resource_refs WHERE operation_id=?", (operation_id,))).rowcount
@@ -92,6 +106,80 @@ class ResourceStore:
     async def list_operation_resource_refs(self, operation_id: str) -> list[dict[str, Any]]:
         async with self.db.execute("SELECT * FROM operation_resource_refs WHERE operation_id=? ORDER BY created_at, handle_id", (operation_id,)) as c:
             return [dict(row) async for row in c]
+
+    async def begin_release_handle(
+        self, session_id: str, handle_id: str, intent: Mapping[str, Any],
+    ) -> tuple[str | None, list[str]]:
+        """Atomically fence an idle handle and record its release intent.
+
+        The immediate transaction makes the active-state/ref check and the
+        state transition one serialization point with operation attachment.
+        A non-empty conflict result is read-only; a non-active handle returns
+        no intent id and performs no intent write.
+        """
+        now = utc_now_iso()
+        async with self._atomic():
+            await self.db.execute("BEGIN IMMEDIATE")
+            async with self.db.execute(
+                """SELECT state FROM session_resource_handles
+                   WHERE id=? AND session_id=?""", (handle_id, session_id),
+            ) as c:
+                handle = await c.fetchone()
+            if handle is None or handle["state"] != "active":
+                return None, []
+
+            async with self.db.execute(
+                """SELECT operation_id FROM operation_resource_refs
+                   WHERE handle_id=? ORDER BY operation_id""", (handle_id,),
+            ) as c:
+                conflicts = [str(row[0]) async for row in c]
+            if conflicts:
+                return None, conflicts
+
+            result = await self.db.execute(
+                """UPDATE session_resource_handles SET state='releasing',
+                       release_reason=NULL, updated_at=?
+                   WHERE id=? AND session_id=? AND state='active'""",
+                (now, handle_id, session_id),
+            )
+            if result.rowcount != 1:
+                return None, []
+            await self.db.execute(
+                """INSERT INTO resource_recovery_intents
+                   (id, kind, session_id, handle_id, operation_id, payload_json,
+                    state, created_at, updated_at)
+                   VALUES (?, 'release', ?, ?, ?, ?, 'processing', ?, ?)""",
+                (intent["id"], session_id, handle_id, intent.get("operation_id"),
+                 json.dumps(intent.get("payload", {})), now, now),
+            )
+            return str(intent["id"]), []
+
+    async def session_resource_is_live(self, session_id: str) -> bool:
+        """Durable portion of the single retained-resource liveness predicate.
+
+        ``pending`` and ``claimed`` are respectively resume-pending and
+        resuming.  A pending resource wait is included independently so a
+        durable lease acquisition cannot be released merely because its
+        execution transition is between states.
+        """
+        async with self.db.execute(
+            """SELECT EXISTS(
+                 SELECT 1 FROM sessions
+                  WHERE id=? AND status='active'
+                 UNION ALL
+                 SELECT 1 FROM executions
+                  WHERE session_id=? AND (
+                    status IN ('queued','starting','running','cancelling')
+                    OR continuation_state IN ('pending','claimed')
+                  )
+                 UNION ALL
+                 SELECT 1 FROM resource_wait_operations
+                  WHERE session_id=? AND state='pending'
+               )""",
+            (session_id, session_id, session_id),
+        ) as c:
+            row = await c.fetchone()
+        return bool(row[0])
 
     async def get_resource_wait_operation(self, wait_id: str) -> dict[str, Any] | None:
         async with self.db.execute("SELECT * FROM resource_wait_operations WHERE id=?", (wait_id,)) as c:
