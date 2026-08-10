@@ -68,6 +68,7 @@ from nerve.agent.tools import init_tools
 from nerve.config import NerveConfig, RESUME_QUEUE_FILE, load_mcp_servers
 from nerve.db import Database
 from nerve.executions import ExecutionCatalog, ExecutionService, LeaseService, ResourceInventory
+from nerve.resources import ResourceRecoveryGate
 from nerve.observability.langfuse import attributes as lf_attrs
 from nerve.skills.manager import SkillManager
 
@@ -587,7 +588,8 @@ class AgentEngine:
         # ready, and before the gateway begins accepting tool calls.
         inventory = ResourceInventory(self.db, getattr(self.config, "resources", {}))
         await inventory.initialize()
-        resource_service = LeaseService(db=self.db, inventory=inventory)
+        recovery_gate = ResourceRecoveryGate(ready=False)
+        resource_service = LeaseService(db=self.db, inventory=inventory, recovery_gate=recovery_gate)
         self.resource_service = resource_service
         # Remote execution is opt-in: deployments without reviewed named SSH
         # connections retain the shell-free local backend.
@@ -603,6 +605,7 @@ class AgentEngine:
             catalog=self.execution_catalog,
             resource_manager=resource_service,
             backend=backend,
+            recovery_gate=recovery_gate,
             ydb_worktree_root=(getattr(self.config, "resources", {}).get("ydb_worktree_root")),
         )
         self.set_execution_service(execution_service)

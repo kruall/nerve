@@ -30,6 +30,7 @@ from nerve.executions.catalog import CompiledExecutionPlan, ExecutionCatalog
 from nerve.executions.public import public_execution
 from nerve.executions.ydb import snapshot as ydb_snapshot, validate_worktree
 from nerve.executions.spin import validate_request as validate_spin_request
+from nerve.resources import ResourceRecoveryGate
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,7 @@ class ExecutionService:
         resource_manager: ResourceLeaseManager | None = None,
         execution_root: Path | None = None,
         ydb_worktree_root: Path | None = None,
+        recovery_gate: ResourceRecoveryGate | None = None,
     ) -> None:
         self.db = db
         self.engine = engine
@@ -83,6 +85,9 @@ class ExecutionService:
         self.catalog = catalog
         self.backend = backend or LocalExecutionBackend()
         self.resource_manager = resource_manager or NoResourceLeaseManager()
+        self.recovery_gate = recovery_gate or getattr(
+            self.resource_manager, "recovery_gate", ResourceRecoveryGate(),
+        )
         self.execution_root = execution_root or (self.workspace / ".nerve" / "executions")
         self._tasks: dict[str, asyncio.Task[Any]] = {}
         self._continuations: dict[str, asyncio.Task[Any]] = {}
@@ -93,6 +98,7 @@ class ExecutionService:
 
     async def start_ydb(self, *, session_id: str, kind: str, worktree: str, args: list[str], build_type: str = "relwithdebinfo", publish: Mapping[str, Any] | None = None, auto_continue: bool = True) -> Mapping[str, Any]:
         """Start the two reviewed YDB commands; callers choose neither host nor SSH."""
+        self.recovery_gate.require_ready()
         if kind not in {"ydb_make", "ydb_test"} or build_type not in {"debug", "relwithdebinfo", "release", "profile"} or not all(isinstance(x, str) and "\0" not in x for x in args):
             raise ValueError("invalid YDB operation")
         publish_path: PurePosixPath | None = None
@@ -164,6 +170,7 @@ class ExecutionService:
             raise
 
     async def start_spin_verify(self, *, session_id: str, model: Any, profile: Any = "exhaustive", timeout_seconds: Any = 60, memory_mb: Any = 512, max_depth: Any = 100_000, hash_bits: Any = 24, property_name: Any = None, auto_continue: bool = True) -> Mapping[str, Any]:
+        self.recovery_gate.require_ready()
         spec = validate_spin_request(model=model, profile=profile, timeout_seconds=timeout_seconds, memory_mb=memory_mb, max_depth=max_depth, hash_bits=hash_bits, property_name=property_name)
         run_id = "spin-" + uuid.uuid4().hex
         # ``spin -run`` performs generator, compiler, and verifier lifecycle
@@ -179,11 +186,13 @@ class ExecutionService:
         return await self._start_serialized(session_id=session_id, plan=plan, profile_snapshot={"kind":"spin_verify_remote","title":"remote SPIN verification","source":"built-in reviewed SPIN operation"}, auto_continue=auto_continue)
 
     async def start_spin_replay(self, *, session_id: str, run_id: Any, auto_continue: bool = True) -> Mapping[str, Any]:
+        self.recovery_gate.require_ready()
         if not isinstance(run_id, str) or not run_id.startswith("spin-") or not run_id[5:].isalnum(): raise ValueError("invalid SPIN run id")
         plan = {"kind":"spin_replay_remote", "profile_version":"1", "profile_hash":"built-in-spin-remote-v1", "resources":{"session":"ydb-builders"}, "session_reservation":{"pool":"ydb-builders", "worktree":"spin:" + session_id}, "spin":{"run_id":run_id, "retention_seconds":86400}, "steps":[{"id":"spin", "transport":"resource", "resource_slot":"session", "executable":"/usr/bin/spin", "argv":[{"type":"literal", "value":x} for x in ["-t", "-p", "-g", "-l", "model.pml"]], "cwd":"workspace"}], "result":{"success_exit_codes":[0]}, "timeout_seconds":30, "cancellation":{"mode":"terminate", "grace_seconds":10, "run_cleanup":False}}
         return await self._start_serialized(session_id=session_id, plan=plan, profile_snapshot={"kind":"spin_replay_remote","title":"remote SPIN replay","source":"built-in reviewed SPIN operation"}, auto_continue=auto_continue)
 
     async def start_artifact_transfer(self, *, session_id: str, source: Mapping[str, Any], destination: Mapping[str, Any], auto_continue: bool = True) -> Mapping[str, Any]:
+        self.recovery_gate.require_ready()
         """Persist a fenced remote/local transfer plan; endpoints have no coordinates."""
         def endpoint(value: Mapping[str, Any], name: str) -> tuple[str, str, str, bool, str | None]:
             if not isinstance(value, Mapping):
@@ -241,6 +250,7 @@ class ExecutionService:
         args: Any, timeout_seconds: Any = 3600,
         auto_continue: bool = True,
     ) -> Mapping[str, Any]:
+        self.recovery_gate.require_ready()
         """Run one literal argv command on an exclusively leased resource host."""
         if not isinstance(pool, str) or not pool or "\x00" in pool:
             raise ValueError("resource command pool is invalid")
@@ -304,6 +314,7 @@ class ExecutionService:
             return await inspect(session_id=session_id, reservation=reservation, operation=operation, arguments=arguments)
 
     async def release_ydb_host(self, *, session_id: str) -> bool:
+        self.recovery_gate.require_ready()
         release = getattr(self.resource_manager, "release_session_reservation", None)
         if not callable(release):
             raise ValueError("YDB host release is unavailable")
@@ -317,10 +328,19 @@ class ExecutionService:
 
     async def initialize(self, *, dispatch_continuations: bool = True) -> None:
         """Reconcile active rows and recover only unclaimed outbox items."""
-        self.execution_root.mkdir(parents=True, exist_ok=True)
+        if not self.recovery_gate.ready:
+            await self.recovery_gate.open(
+                self.resource_manager, self, dispatch_continuations=dispatch_continuations,
+            )
+            return
         initialize_resources = getattr(self.resource_manager, "initialize", None)
         if callable(initialize_resources):
             await initialize_resources()
+        await self._recover_startup(dispatch_continuations=dispatch_continuations)
+
+    async def _recover_startup(self, *, dispatch_continuations: bool = True) -> None:
+        """Run only while the shared recovery gate excludes normal handlers."""
+        self.execution_root.mkdir(parents=True, exist_ok=True)
         for row in await self.db.list_terminal_executions():
             if await self._has_active_selected_lease(row):
                 continue
@@ -444,6 +464,7 @@ class ExecutionService:
         completion_target: Mapping[str, str] | None = None,
         auto_continue: bool = True,
     ) -> Mapping[str, Any]:
+        self.recovery_gate.require_ready()
         session = await self.db.get_session(session_id)
         if (
             not session or session.get("status") == "archived"
@@ -468,6 +489,7 @@ class ExecutionService:
         completion_target: Mapping[str, str] | None = None,
         auto_continue: bool = True,
     ) -> Mapping[str, Any]:
+        self.recovery_gate.require_ready()
         execution_id = f"exec-{uuid.uuid4().hex[:12]}"
         plan_data = dict(plan)
         plan_data["session_id"] = session_id
@@ -1054,6 +1076,7 @@ class ExecutionService:
         return await self.db.tail_execution_logs(execution_id, limit=limit, before=before)
 
     async def cancel_execution(self, *, execution_id: str, requested_by: str, reason: str | None):
+        self.recovery_gate.require_ready()
         row = await self.db.get_execution(execution_id)
         if row is None:
             raise KeyError(execution_id)
@@ -1093,6 +1116,7 @@ class ExecutionService:
         self, *, execution_id: str, requested_by: str, reason: str,
     ) -> Mapping[str, Any]:
         """Operator cancellation for a provably not-yet-started queue entry."""
+        self.recovery_gate.require_ready()
         row = await self.db.get_execution(execution_id)
         if row is None:
             raise KeyError(execution_id)
@@ -1115,6 +1139,7 @@ class ExecutionService:
         return self._decorate(current)
 
     async def cancel_session(self, session_id: str, *, reason: str = "session stopped") -> bool:
+        self.recovery_gate.require_ready()
         ids = await self.db.suppress_session_executions(session_id, reason=reason)
         if not ids:
             return False

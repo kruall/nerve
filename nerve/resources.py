@@ -6,6 +6,7 @@ accepted here: a future SSH transport resolves the named trusted connection.
 from __future__ import annotations
 import asyncio
 import contextlib
+import json
 from pathlib import Path
 import uuid
 from collections.abc import Mapping, Sequence
@@ -15,6 +16,48 @@ from nerve.utils.time import utc_now_iso
 
 
 class ResourceInventoryError(ValueError): pass
+
+
+class ResourceRecoveryUnavailable(RuntimeError):
+    """The retryable response while durable startup recovery owns the subsystem."""
+
+    def __init__(self) -> None:
+        super().__init__("resource recovery is in progress; retry shortly")
+
+
+class ResourceRecoveryGate:
+    """One exclusive startup owner for resource intents and execution recovery."""
+
+    def __init__(self, *, ready: bool = True) -> None:
+        self._ready = ready
+        self._lock = asyncio.Lock()
+        self._recovery_task: asyncio.Task[Any] | None = None
+
+    @property
+    def ready(self) -> bool:
+        return self._ready
+
+    def require_ready(self) -> None:
+        if not self._ready and asyncio.current_task() is not self._recovery_task:
+            raise ResourceRecoveryUnavailable()
+
+    async def open(self, resources: Any, executions: Any, *, dispatch_continuations: bool) -> None:
+        async with self._lock:
+            if self._ready:
+                return
+            self._recovery_task = asyncio.current_task()
+            try:
+                await resources._recover_startup()
+                for intent in await resources.db.list_resource_recovery_intents():
+                    if intent["state"] in {"prepared", "processing"}:
+                        await resources._replay_recovery_intent(intent)
+                await resources._start_reconcile_loop()
+                # Reattachment can issue fresh backend calls.  The durable
+                # intent replay is complete now, so open before it can run.
+                self._ready = True
+                await executions._recover_startup(dispatch_continuations=dispatch_continuations)
+            finally:
+                self._recovery_task = None
 
 
 class ResourceInventory:
@@ -78,8 +121,10 @@ class ResourceInventory:
 
 
 class LeaseService:
-    def __init__(self, *, db: Any, inventory: ResourceInventory):
+    def __init__(self, *, db: Any, inventory: ResourceInventory,
+                 recovery_gate: ResourceRecoveryGate | None = None):
         self.db, self.inventory = db, inventory
+        self.recovery_gate = recovery_gate or ResourceRecoveryGate()
         raw = getattr(inventory, "config", {})
         self.ttl_seconds = max(5, int(raw.get("lease_ttl_seconds", 90)))
         self.poll_seconds = max(0.01, float(raw.get("queue_poll_seconds", 0.25)))
@@ -171,6 +216,7 @@ class LeaseService:
         reason: str = "session reservation cleanup",
     ) -> bool:
         """Release only after quiescence; uncertainty deliberately quarantines."""
+        self.recovery_gate.require_ready()
         reservation = await self.db.get_session_resource_reservation(session_id)
         if reservation is None:
             return bool(await self.db.cancel_resource_requests(
@@ -203,11 +249,50 @@ class LeaseService:
         )
 
     async def initialize(self) -> None:
+        await self._recover_startup()
+        await self._start_reconcile_loop()
+
+    async def _recover_startup(self) -> None:
         await self.cancel_orphaned_queued_session_reservations()
         await self.release_idle_recovered_session_reservations()
         await self.reconcile_expired()
+
+    async def _start_reconcile_loop(self) -> None:
         if self._reconciler is None:
             self._reconciler = asyncio.create_task(self._reconcile_loop())
+
+    async def _replay_recovery_intent(self, intent: Mapping[str, Any]) -> None:
+        """Terminally resolve an interrupted intent; ambiguity quarantines first."""
+        intent_id = str(intent["id"])
+        if intent["state"] == "prepared" and not await self.db.update_resource_recovery_intent(
+            intent_id, expected_state="prepared", state="processing",
+        ):
+            return
+        try:
+            payload = json.loads(str(intent.get("payload_json") or "{}"))
+        except (TypeError, ValueError):
+            payload = {}
+        lease_ids = {str(x) for x in payload.get("lease_ids", []) if x}
+        if payload.get("lease_id"):
+            lease_ids.add(str(payload["lease_id"]))
+        if intent.get("handle_id"):
+            handle = await self.db.get_session_resource_handle(str(intent["handle_id"]))
+            if handle:
+                lease_ids.add(str(handle["lease_id"]))
+        operation_id = intent.get("operation_id")
+        leases = [lease for lease in await self.db.list_resource_leases()
+                  if str(lease["id"]) in lease_ids or (
+                      operation_id is not None and str(lease["execution_id"]) == str(operation_id)
+                  )]
+        # No crash-interrupted remote action proves quiescence. Quarantine all
+        # live associated leases before making the durable intent terminal.
+        for lease in leases:
+            if lease["state"] in {"active", "revoking"}:
+                await self.quarantine(execution_id=str(lease["execution_id"]), leases=[lease],
+                                      reason="startup recovery intent has ambiguous remote quiescence")
+        await self.db.update_resource_recovery_intent(
+            intent_id, expected_state="processing", state="failed" if leases else "completed",
+        )
 
     async def shutdown(self) -> None:
         if self._reconciler is not None:
@@ -277,6 +362,7 @@ class LeaseService:
             await self.db.cancel_resource_requests(execution_id)
 
     async def acquire(self, *, execution_id: str, session_id: str, requests: Sequence[Mapping[str, Any]]) -> Sequence[Mapping[str, Any]]:
+        self.recovery_gate.require_ready()
         if not requests:
             return []
         normalized = []
@@ -332,6 +418,7 @@ class LeaseService:
         )
 
     async def release(self, *, execution_id: str, leases: Sequence[Mapping[str, Any]]) -> None:
+        self.recovery_gate.require_ready()
         for lease in leases:
             await self.db.release_resource_lease(lease_id=str(lease.get("id")), execution_id=execution_id, fencing_token=int(lease.get("fencing_token", -1)))
         await self.db.settle_resource_bundles(execution_id)
