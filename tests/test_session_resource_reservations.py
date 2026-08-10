@@ -55,6 +55,22 @@ async def test_session_resource_reservation_cleanup_releases_when_idle(db, tmp_p
 
 
 @pytest.mark.asyncio
+async def test_session_reservation_cleanup_cancels_queued_request_without_lease(db):
+    service = await _service(db)
+    await db.create_session("session-a")
+    execution_id = service._reservation_execution_id("session-a")
+    await db.enqueue_resource_bundle(
+        bundle_id="bundle-session-a",
+        execution_id=execution_id,
+        session_id="session-a",
+        requests=[{"id": "request-session-a", "slot": "session", "pool": "builders"}],
+    )
+
+    assert await service.cleanup_session_reservation("session-a")
+    assert await db.list_resource_requests() == []
+
+
+@pytest.mark.asyncio
 async def test_session_commands_serialize_and_uncertain_cleanup_quarantines(db, tmp_path):
     service = await _service(db)
     await db.create_session("session-a")

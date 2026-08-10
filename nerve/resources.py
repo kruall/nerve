@@ -162,7 +162,11 @@ class LeaseService:
     ) -> bool:
         """Release only after quiescence; uncertainty deliberately quarantines."""
         reservation = await self.db.get_session_resource_reservation(session_id)
-        if reservation is None or reservation["state"] != "active":
+        if reservation is None:
+            return bool(await self.db.cancel_resource_requests(
+                self._reservation_execution_id(session_id),
+            ))
+        if reservation["state"] != "active":
             return False
         lock = self._session_locks.setdefault(session_id, asyncio.Lock())
         uncertain = lock.locked() or not remote_quiescence_confirmed
