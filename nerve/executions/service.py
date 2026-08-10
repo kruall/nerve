@@ -547,6 +547,9 @@ class ExecutionService:
         completion_target: Mapping[str, str] | None = None,
         auto_continue: bool = True,
         handle_ids: Sequence[str] | None = None,
+        execution_id: str | None = None,
+        parent_operation_id: str | None = None,
+        stage_run_id: str | None = None,
     ) -> Mapping[str, Any]:
         self.recovery_gate.require_ready()
         session = await self.db.get_session(session_id)
@@ -578,6 +581,9 @@ class ExecutionService:
             completion_target=completion_target,
             auto_continue=auto_continue,
             legacy_compatibility=not explicit_handles,
+            execution_id=execution_id,
+            parent_operation_id=parent_operation_id,
+            stage_run_id=stage_run_id,
         )
 
     async def _start_serialized(
@@ -589,6 +595,9 @@ class ExecutionService:
         completion_target: Mapping[str, str] | None = None,
         auto_continue: bool = True,
         legacy_compatibility: bool = True,
+        execution_id: str | None = None,
+        parent_operation_id: str | None = None,
+        stage_run_id: str | None = None,
     ) -> Mapping[str, Any]:
         if legacy_compatibility:
             lock = self._compatibility_start_locks.setdefault(session_id, asyncio.Lock())
@@ -599,6 +608,8 @@ class ExecutionService:
                     completion_target=completion_target,
                     auto_continue=auto_continue,
                     legacy_compatibility=True,
+                    execution_id=execution_id, parent_operation_id=parent_operation_id,
+                    stage_run_id=stage_run_id,
                 )
         return await self._start_serialized_unlocked(
             session_id=session_id, plan=plan,
@@ -606,6 +617,8 @@ class ExecutionService:
             completion_target=completion_target,
             auto_continue=auto_continue,
             legacy_compatibility=False,
+            execution_id=execution_id, parent_operation_id=parent_operation_id,
+            stage_run_id=stage_run_id,
         )
 
     async def _start_serialized_unlocked(
@@ -617,9 +630,12 @@ class ExecutionService:
         completion_target: Mapping[str, str] | None = None,
         auto_continue: bool = True,
         legacy_compatibility: bool = True,
+        execution_id: str | None = None,
+        parent_operation_id: str | None = None,
+        stage_run_id: str | None = None,
     ) -> Mapping[str, Any]:
         self.recovery_gate.require_ready()
-        execution_id = f"exec-{uuid.uuid4().hex[:12]}"
+        execution_id = execution_id or f"exec-{uuid.uuid4().hex[:12]}"
         plan_data = dict(plan)
         plan_data["session_id"] = session_id
         if legacy_compatibility:
@@ -636,7 +652,11 @@ class ExecutionService:
         # provide plan resources, not handles.  Retain those leases at session
         # scope and dispatch the operation through the resulting handles.
         acquire_handles = getattr(self.resource_manager, "acquire_handles", None)
-        if not handle_ids and plan_data.get("resources") and callable(acquire_handles):
+        # ``retained_handle_ids: []`` is an explicit zero-slot operation.  It
+        # must never fall through to the pre-handle adapter: only callers that
+        # omitted handles altogether retain the legacy allocation behaviour.
+        if (legacy_compatibility and not handle_ids and plan_data.get("resources")
+                and callable(acquire_handles)):
             spec = [
                 {"pool": pool, "host": dict(plan_data.get("resource_hosts", {})).get(slot)}
                 for slot, pool in dict(plan_data["resources"]).items()
@@ -658,7 +678,7 @@ class ExecutionService:
         if handle_ids:
             requests = []
         try:
-            row = await self.db.create_execution(
+            created_row = await self.db.create_execution(
                 execution_id,
                 session_id=session_id,
                 kind=str(plan_data["kind"]),
@@ -672,6 +692,9 @@ class ExecutionService:
                 completion_target_id=(completion_target or {}).get("id"),
                 auto_continue=auto_continue,
                 legacy_compatibility=legacy_compatibility,
+                parent_operation_id=parent_operation_id,
+                stage_run_id=stage_run_id,
+                return_created=True,
             )
         except Exception:
             # The compatibility adapter acquired these only for this start.
@@ -681,8 +704,13 @@ class ExecutionService:
                 with contextlib.suppress(Exception):
                     await self.resource_manager.release_handle(session_id, handle_id)
             raise
-        await self._broadcast(execution_id)
-        self._spawn_runner(execution_id)
+        row, created = created_row
+        # A deterministic child may already be committed when a process dies
+        # before its caller observes the result.  Reconcile/link it, but do
+        # not emit a second dispatch or runner task.
+        if created:
+            await self._broadcast(execution_id)
+            self._spawn_runner(execution_id)
         return self._decorate(row)
 
     @staticmethod

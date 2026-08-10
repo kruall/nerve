@@ -90,7 +90,7 @@ async def _legacy_snapshot(db: aiosqlite.Connection) -> tuple[tuple, tuple, tupl
 
 
 @pytest.mark.asyncio
-async def test_v060_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp_path):
+async def test_v061_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp_path):
     fresh = await aiosqlite.connect(tmp_path / "fresh.db")
     upgraded = await aiosqlite.connect(tmp_path / "upgrade.db")
     try:
@@ -99,7 +99,7 @@ async def test_v060_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp
         await _legacy_rows(upgraded)
         legacy_before = await _legacy_snapshot(upgraded)
 
-        assert await runner.run_migrations(upgraded) == 60
+        assert await runner.run_migrations(upgraded) == 61
         fresh_schema = await _schema(fresh)
         assert fresh_schema == await _schema(upgraded)
         assert (await (await fresh.execute("SELECT next_ticket FROM resource_wait_allocator")).fetchone())[0] == 1
@@ -119,6 +119,15 @@ async def test_v060_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp
         assert "uq_operation_resource_refs_one_active_per_handle" in indexes
         execution_indexes = {row[1] for row in await (await fresh.execute("PRAGMA index_list(executions)")).fetchall()}
         assert "uq_executions_one_active_per_session" not in execution_indexes
+        execution_columns = {row[1] for row in await (await fresh.execute("PRAGMA table_info(executions)")).fetchall()}
+        workflow_columns = {row[1] for row in await (await fresh.execute("PRAGMA table_info(preset_workflows)")).fetchall()}
+        assert {"parent_operation_id", "private_operation"} <= execution_columns
+        assert {"parent_operation_id", "allocation_state"} <= workflow_columns
+        assert {"idx_executions_parent_operation", "uq_preset_workflows_parent_operation"} <= {
+            row[1] for row in await (await fresh.execute("PRAGMA index_list(executions)")).fetchall()
+        } | {
+            row[1] for row in await (await fresh.execute("PRAGMA index_list(preset_workflows)")).fetchall()
+        }
     finally:
         await fresh.close()
         await upgraded.close()

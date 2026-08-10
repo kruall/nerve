@@ -39,7 +39,12 @@ class WorkflowPresetService:
         # died.  Never replay that ambiguous request; expose it as a durable
         # delivery failure, while still replaying rows that were never claimed.
         await self.db.fail_claimed_preset_workflow_completions_on_restart()
-        for row in await self.db.active_preset_workflows(): self._schedule(row["id"])
+        # An allocation intent has no replay-safe proof of which handles a
+        # provider retained.  Terminalize it before considering dispatch.
+        await self.db.fail_unfinalized_preset_workflows_on_restart()
+        for row in await self.db.active_preset_workflows():
+            if row.get("allocation_state", "finalized") == "finalized":
+                self._schedule(row["id"])
         # A process can stop after the atomic terminal transition but before it
         # claims the outbox.  Resume delivery without ever re-running a stage.
         for row in await self.db.pending_preset_workflow_completions():
@@ -55,7 +60,57 @@ class WorkflowPresetService:
         preset = plan.preset
         snapshot = {"preset": preset.describe(), "inputs": dict(plan.inputs), "preset_hash": plan.preset_hash}
         workflow_id = f"wfp-{uuid.uuid4().hex[:12]}"
-        row = await self.db.create_preset_workflow(workflow_id, session_id=session_id, plan=snapshot, preset_hash=plan.preset_hash, spec_hash=_hash(snapshot))
+        # The parent is deliberately created before any stage can request a
+        # resource.  It is the durable, private owner for the workflow's
+        # eventual retained-handle manifest; a restart therefore has one
+        # stable identity to reconcile rather than recreating ownership.
+        # Persist allocation intent before requesting any resource.  This
+        # makes ownership/recovery visible before a provider can retain a
+        # handle, and the final ref handoff is one database transaction.
+        manifest: dict[str, list[str]] = {}
+        allocation: list[tuple[str, list[dict[str, str]]]] = []
+        for stage in snapshot["preset"].get("stages", []):
+            if stage.get("runner") == "execution":
+                raw = stage.get("spec") or {}
+                resources = dict(raw.get("resources", {}))
+                manifest[str(stage["id"])] = []
+                allocation.append((str(stage["id"]), [{"pool": pool} for pool in resources.values()]))
+        parent_operation_id = f"workflow-parent-{workflow_id}"
+        row = await self.db.create_preset_workflow_with_parent_operation(
+            workflow_id, parent_operation_id, session_id=session_id,
+            plan=snapshot, preset_hash=plan.preset_hash, spec_hash=_hash(snapshot),
+            parent_plan={"workflow_id": workflow_id, "stage_handle_manifest": manifest,
+                         "allocation_intent": {stage_id: spec for stage_id, spec in allocation}},
+            allocation_state="pending",
+        )
+        handle_ids: list[str] = []
+        acquired_new: list[str] = []
+        try:
+            existing = {str(item["id"]) for item in await self.db.list_session_resource_handles(session_id)}
+            for stage_id, spec in allocation:
+                if spec:
+                    acquired = await self.executions.resource_manager.acquire_handles(session_id, spec)
+                    subset = [str(item["id"]) for item in acquired]
+                    manifest[stage_id] = subset
+                    handle_ids.extend(handle for handle in subset if handle not in handle_ids)
+                    acquired_new.extend(handle for handle in subset if handle not in existing)
+            row = await self.db.finalize_preset_workflow_parent_allocation(
+                workflow_id, parent_plan={"workflow_id": workflow_id, "stage_handle_manifest": manifest,
+                                          "allocation_intent": {stage_id: spec for stage_id, spec in allocation}},
+                handle_ids=tuple(handle_ids),
+            )
+        except Exception:
+            for handle_id in acquired_new:
+                try:
+                    await self.executions.resource_manager.release_handle(session_id, handle_id)
+                except Exception:
+                    logger.exception("failed releasing workflow allocation handle=%s", handle_id)
+            await self.db.terminalize_preset_workflow(
+                workflow_id, to_status="blocked", expect=("queued",),
+                result={"outcome": "blocked", "error": "allocation_failed"},
+            )
+            await self._changed(workflow_id)
+            raise
         self._schedule(workflow_id); await self._broadcast(row); return row
 
     async def _changed(self, workflow_id: str) -> None:
@@ -79,11 +134,17 @@ class WorkflowPresetService:
 
     async def cancel(self, workflow_id: str, *, reason: str) -> bool:
         """Cancel exactly one workflow; chat cards must not affect siblings."""
-        changed = await self.db.transition_preset_workflow(workflow_id, to_status="cancelling")
+        changed = await self.db.request_cancel_preset_workflow(workflow_id, reason=reason)
         if not changed:
             return False
         for stage in await self.db.list_stage_runs(workflow_id):
             if stage["status"] not in ACTIVE_STAGE_RUNS:
+                continue
+            # Childless queued/starting intents were settled by the workflow
+            # CAS above.  Never hand an absent id to an adapter, and never
+            # leave such a stage in cancelling where reconciliation cannot
+            # make progress.
+            if not stage.get("child_id"):
                 continue
             await self.db.transition_stage_run(stage["id"], to_status="cancelling")
             if stage.get("child_type") == "execution":
@@ -127,14 +188,34 @@ class WorkflowPresetService:
                 workflow = await self.db.get_preset_workflow(workflow_id)
                 if not workflow or workflow["status"] not in ("queued", "running", "cancelling"): return
                 if workflow["status"] == "cancelling":
+                    # Do not release the private parent (or publish the final
+                    # outbox result) while a cancelled child might still own
+                    # backend work.  Reconciliation is the durable boundary.
+                    active = next((s for s in await self.db.list_stage_runs(workflow_id)
+                                   if s["status"] in ACTIVE_STAGE_RUNS), None)
+                    if active:
+                        if not await self._reconcile_child(active):
+                            await asyncio.sleep(.15)
+                        continue
                     await self._terminal(workflow, "cancelled", {"outcome":"cancelled"}); return
-                if workflow["status"] == "queued": await self.db.transition_preset_workflow(workflow_id, to_status="running", expect=("queued",)); await self._changed(workflow_id); workflow = await self.db.get_preset_workflow(workflow_id)
+                if workflow["status"] == "queued":
+                    if not await self.db.transition_preset_workflow(workflow_id, to_status="running", expect=("queued",)):
+                        continue
+                    await self._changed(workflow_id)
+                    workflow = await self.db.get_preset_workflow(workflow_id)
                 stages = await self.db.list_stage_runs(workflow_id)
+                done = {s["stage_id"]:s for s in stages if s["status"] == "succeeded"}
                 active = next((s for s in stages if s["status"] in ACTIVE_STAGE_RUNS), None)
                 if active:
+                    # ``starting`` is the durable dispatch intent.  A crash
+                    # before the child transaction commits leaves no child to
+                    # reconcile; replay this exact stage, whose deterministic
+                    # execution id makes the dispatch idempotent.
+                    if active["status"] == "starting" and not active.get("child_id"):
+                        await self._launch_stage(workflow, active["spec"], done, active["id"])
+                        continue
                     if await self._reconcile_child(active): continue
                     await asyncio.sleep(.15); continue
-                done = {s["stage_id"]:s for s in stages if s["status"] == "succeeded"}
                 preset = workflow["plan"]["preset"]; next_stage = next((s for s in preset["stages"] if s["id"] not in {x["stage_id"] for x in stages} and all(d in done for d in s.get("depends_on", []))), None)
                 if next_stage is None:
                     failed = next((s for s in stages if s["status"] in TERMINAL_STAGE_RUNS and s["status"] != "succeeded"), None)
@@ -173,10 +254,27 @@ class WorkflowPresetService:
 
     async def _dispatch(self, workflow: Mapping[str, Any], stage: Mapping[str, Any], done: Mapping[str, Mapping[str, Any]]) -> None:
         sid=f"wfs-{uuid.uuid4().hex[:12]}"; await self.db.create_stage_run(sid, workflow_id=workflow["id"], stage_id=stage["id"], runner=stage["runner"], spec=stage, spec_hash=_hash(stage)); await self.db.transition_stage_run(sid, to_status="starting", expect=("queued",)); await self._changed(workflow["id"])
+        await self._launch_stage(workflow, stage, done, sid)
+
+    async def _launch_stage(self, workflow: Mapping[str, Any], stage: Mapping[str, Any], done: Mapping[str, Mapping[str, Any]], sid: str) -> None:
         artifacts={k:v.get("artifact") for k,v in done.items() if v.get("artifact") is not None}
+        # Cancellation can win after dispatch creates the stage row but before
+        # this coroutine invokes an adapter.  Close that late intent locally;
+        # execution starts additionally re-check the stage inside their DB
+        # transaction.
+        current_workflow = await self.db.get_preset_workflow(workflow["id"])
+        current_stage = await self.db.get_stage_run(sid)
+        if (not current_workflow or current_workflow["status"] != "running"
+                or not current_stage or current_stage["status"] != "starting"):
+            await self.db.transition_stage_run(
+                sid, to_status="cancelled", expect=("starting",),
+                result={"outcome": "cancelled", "reason": "workflow cancellation raced dispatch"},
+            )
+            await self._changed(workflow["id"])
+            return
         try:
             if stage["runner"] == "execution":
-                raw=stage["spec"]; plan=self.executions.catalog.compile(raw["kind"], raw.get("arguments", {}), raw.get("resources", {})); child=await self.executions.start(session_id=workflow["observer_session_id"], plan=plan, completion_target={"type":"workflow","id":workflow["id"]}); await self.db.transition_stage_run(sid,to_status="running",expect=("starting",),child_type="execution",child_id=child["id"])
+                raw=stage["spec"]; plan=self.executions.catalog.compile(raw["kind"], raw.get("arguments", {}), raw.get("resources", {})); handles=tuple(workflow["parent_plan"]["stage_handle_manifest"][stage["id"]]) if workflow.get("parent_plan") else tuple((await self.db.get_execution(workflow["parent_operation_id"]))["plan"]["stage_handle_manifest"][stage["id"]]); child=await self.executions.start(session_id=workflow["observer_session_id"], plan=plan, handle_ids=handles, completion_target={"type":"workflow","id":workflow["id"]}, execution_id=f"workflow-child-{workflow['id']}-{stage['id']}", parent_operation_id=workflow.get("parent_operation_id"), stage_run_id=sid)
             else:
                 if self.agent_runs is None: raise RuntimeError("agent runner is unavailable")
                 # The resolver pins all mutable model inputs before invoking the adapter.
@@ -189,7 +287,16 @@ class WorkflowPresetService:
         finally: await self._changed(workflow["id"])
 
     async def _reconcile_child(self, stage: Mapping[str, Any]) -> bool:
-        child = await (self.executions.get_execution(execution_id=stage["child_id"]) if stage.get("child_type")=="execution" else self.agent_runs.get_run(stage["child_id"]))
+        # A starting row with no linked child is an intent, not an agent run.
+        # The drive loop re-dispatches it; never dereference an absent adapter.
+        if not stage.get("child_id"):
+            return False
+        if stage.get("child_type") == "execution":
+            child = await self.executions.get_execution(execution_id=stage["child_id"])
+        elif stage.get("child_type") == "agent" and self.agent_runs is not None:
+            child = await self.agent_runs.get_run(stage["child_id"])
+        else:
+            return False
         if not child: return False
         status = child.get("status"); mapping={"succeeded":"succeeded","done":"succeeded","failed":"failed","cancelled":"cancelled","killed":"cancelled","lost":"lost","budget_exhausted":"failed"}
         if status not in mapping: return False
@@ -208,6 +315,11 @@ class WorkflowPresetService:
             else: result={"response": response}
         elif not isinstance(result, Mapping):
             result={"result": result}
+        if stage.get("child_type") == "execution":
+            # The stage transition is deliberately after the durable return of
+            # refs.  A restart will retry this idempotent restoration.
+            if not await self.db.restore_workflow_child_handles(stage["id"]):
+                return False
         await self.db.transition_stage_run(stage["id"],to_status=mapping[status],expect=("running","cancelling"),result=result,artifact=artifact); await self._changed(stage["workflow_id"]); return True
 
     async def _terminal(self, workflow: Mapping[str, Any], status: str, result: Mapping[str, Any]) -> None:

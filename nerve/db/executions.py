@@ -60,12 +60,103 @@ class ExecutionStore:
         completion_target_id: str | None = None,
         auto_continue: bool = True,
         legacy_compatibility: bool = False,
-    ) -> dict[str, Any]:
+        parent_operation_id: str | None = None,
+        stage_run_id: str | None = None,
+        return_created: bool = False,
+    ) -> Any:
         now = utc_now_iso()
         if len(handle_ids) != len(set(handle_ids)):
             raise ValueError("resource handle ids must be distinct")
         try:
             async with self._atomic():
+                # Deterministic workflow children may be retried after a
+                # process crash.  Their durable row is the idempotency record.
+                async with self.db.execute("SELECT * FROM executions WHERE id=?", (execution_id,)) as cursor:
+                    existing = await cursor.fetchone()
+                if existing is not None:
+                    existing_row = _decode_execution(existing)
+                    if (existing_row["session_id"] != session_id
+                            or existing_row.get("parent_operation_id") != parent_operation_id
+                            or existing_row.get("plan") != dict(plan)
+                            or existing_row.get("completion_target_type") != completion_target_type
+                            or existing_row.get("completion_target_id") != completion_target_id):
+                        raise ValueError("execution id is already in use with a different immutable plan")
+                    async with self.db.execute(
+                        "SELECT handle_id FROM operation_resource_refs WHERE operation_id=? ORDER BY position",
+                        (execution_id,),
+                    ) as refs:
+                        existing_handles = [str(row[0]) async for row in refs]
+                    if existing_handles != list(handle_ids):
+                        raise ValueError("execution id is already in use with different handles")
+                    if stage_run_id is not None:
+                        async with self.db.execute(
+                            "SELECT workflow_id, stage_id, runner, status, child_type, child_id FROM workflow_stage_runs WHERE id=?",
+                            (stage_run_id,),
+                        ) as cursor:
+                            stage = await cursor.fetchone()
+                        if (stage is None or stage["runner"] != "execution"
+                                or stage["status"] not in ("starting", "running")
+                                or (stage["child_id"] not in (None, execution_id))
+                                or (stage["child_type"] not in (None, "execution"))):
+                            raise ValueError("workflow stage does not match existing execution")
+                        async with self.db.execute(
+                            "SELECT 1 FROM preset_workflows WHERE id=? AND parent_operation_id=? AND observer_session_id=?",
+                            (stage["workflow_id"], parent_operation_id, session_id),
+                        ) as cursor:
+                            if await cursor.fetchone() is None:
+                                raise ValueError("workflow stage does not belong to parent")
+                        if stage["status"] == "starting":
+                            await self.db.execute(
+                                """UPDATE workflow_stage_runs SET status='running', child_type='execution', child_id=?,
+                                   started_at=COALESCE(started_at, ?), updated_at=?, revision=revision+1
+                                   WHERE id=? AND status='starting' AND child_id IS NULL""",
+                                (execution_id, now, now, stage_run_id),
+                            )
+                    return (existing_row, False) if return_created else existing_row
+                # A workflow child borrows its handles from its private parent.
+                # Validate the exact ordered subset while the move is made; the
+                # unique handle index then remains true throughout the handoff.
+                if parent_operation_id is not None:
+                    async with self.db.execute(
+                        "SELECT session_id, private_operation, status, plan FROM executions WHERE id=?",
+                        (parent_operation_id,),
+                    ) as cursor:
+                        parent = await cursor.fetchone()
+                    if (parent is None or parent["session_id"] != session_id
+                            or not parent["private_operation"]
+                            or parent["status"] not in ACTIVE_EXECUTION_STATUSES):
+                        raise ValueError("workflow parent operation is unavailable")
+                    async with self.db.execute(
+                        "SELECT handle_id FROM operation_resource_refs WHERE operation_id=? ORDER BY position",
+                        (parent_operation_id,),
+                    ) as cursor:
+                        parent_handles = [str(row[0]) async for row in cursor]
+                    if not set(handle_ids) <= set(parent_handles):
+                        raise ValueError("workflow child handles are not owned by parent")
+                    if stage_run_id is not None:
+                        async with self.db.execute(
+                            "SELECT workflow_id, stage_id, runner, status FROM workflow_stage_runs WHERE id=?", (stage_run_id,)
+                        ) as cursor:
+                            stage = await cursor.fetchone()
+                        if (stage is None or stage["runner"] != "execution"
+                                or stage["status"] != "starting"):
+                            raise ValueError("workflow stage is unavailable")
+                        async with self.db.execute(
+                            "SELECT 1 FROM preset_workflows WHERE id=? AND parent_operation_id=? AND observer_session_id=?",
+                            (stage["workflow_id"], parent_operation_id, session_id),
+                        ) as cursor:
+                            if await cursor.fetchone() is None:
+                                raise ValueError("workflow stage does not belong to parent")
+                        manifest = json.loads(parent["plan"]).get("stage_handle_manifest", {})
+                        if list(manifest.get(stage["stage_id"], ())) != list(handle_ids):
+                            raise ValueError("workflow child handles do not match manifest")
+                    # Remove before inserting the child inside this transaction.
+                    if handle_ids:
+                        marks = ",".join("?" for _ in handle_ids)
+                        await self.db.execute(
+                            f"DELETE FROM operation_resource_refs WHERE operation_id=? AND handle_id IN ({marks})",
+                            (parent_operation_id, *handle_ids),
+                        )
                 # R9 serialized every session.  Calls that did not opt into
                 # explicit handles retain that behaviour, including races,
                 # while explicit Operations can run beside disjoint explicit
@@ -75,6 +166,7 @@ class ExecutionStore:
                     async with self.db.execute(
                         """SELECT id FROM executions WHERE session_id=?
                            AND status IN ('queued', 'starting', 'running', 'cancelling')
+                           AND private_operation = 0
                            ORDER BY id LIMIT 1""",
                         (session_id,),
                     ) as cursor:
@@ -85,6 +177,7 @@ class ExecutionStore:
                     async with self.db.execute(
                         """SELECT id FROM executions WHERE session_id=?
                            AND status IN ('queued', 'starting', 'running', 'cancelling')
+                             AND private_operation = 0
                              AND json_extract(plan, '$.legacy_resource_handles') = 1
                            ORDER BY id LIMIT 1""",
                         (session_id,),
@@ -122,19 +215,26 @@ class ExecutionStore:
                    (id, session_id, kind, profile_version, profile_hash,
                     profile_snapshot, plan, resource_requests, selected_leases,
                     completion_target_type, completion_target_id, auto_continue,
-                    status, created_at, queued_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, 'queued', ?, ?, ?)""",
+                    parent_operation_id, status, created_at, queued_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, 'queued', ?, ?, ?)""",
                 (
                     execution_id, session_id, kind, profile_version, profile_hash,
                     json.dumps(dict(profile_snapshot)), json.dumps(dict(plan)),
                     json.dumps(list(resource_requests)), completion_target_type,
-                    completion_target_id, int(auto_continue), now, now, now,
+                    completion_target_id, int(auto_continue), parent_operation_id, now, now, now,
                 ),
                 )
                 for position, handle_id in enumerate(handle_ids):
                     await self.db.execute(
                         "INSERT INTO operation_resource_refs(operation_id, handle_id, position, created_at) VALUES (?, ?, ?, ?)",
                         (execution_id, handle_id, position, now),
+                    )
+                if stage_run_id is not None:
+                    await self.db.execute(
+                        """UPDATE workflow_stage_runs SET status='running', child_type='execution', child_id=?,
+                           started_at=COALESCE(started_at, ?), updated_at=?, revision=revision+1
+                           WHERE id=? AND status='starting'""",
+                        (execution_id, now, now, stage_run_id),
                     )
         except sqlite3.IntegrityError as exc:
             # V059's unique handle index is the final arbiter between separate
@@ -153,7 +253,7 @@ class ExecutionStore:
             raise
         row = await self.get_execution(execution_id)
         assert row is not None
-        return row
+        return (row, True) if return_created else row
 
     async def get_execution(self, execution_id: str) -> dict[str, Any] | None:
         async with self.db.execute(
@@ -169,7 +269,7 @@ class ExecutionStore:
         include_terminal: bool = True,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
-        where = "session_id = ? AND dismissed_at IS NULL"
+        where = "session_id = ? AND dismissed_at IS NULL AND private_operation = 0"
         params: list[Any] = [session_id]
         if not include_terminal:
             placeholders = ",".join("?" for _ in ACTIVE_EXECUTION_STATUSES)
@@ -186,7 +286,7 @@ class ExecutionStore:
     async def list_active_executions(self) -> list[dict[str, Any]]:
         placeholders = ",".join("?" for _ in ACTIVE_EXECUTION_STATUSES)
         async with self.db.execute(
-            f"""SELECT * FROM executions WHERE status IN ({placeholders})
+            f"""SELECT * FROM executions WHERE private_operation = 0 AND status IN ({placeholders})
                 ORDER BY created_at ASC, id ASC""",
             ACTIVE_EXECUTION_STATUSES,
         ) as cursor:
@@ -215,7 +315,8 @@ class ExecutionStore:
         async with self.db.execute(
             f"""SELECT session_id, status, COUNT(*) AS count
                 FROM executions
-                WHERE session_id IN ({id_marks}) AND status IN ({state_marks})
+                WHERE session_id IN ({id_marks}) AND private_operation = 0
+                  AND status IN ({state_marks})
                 GROUP BY session_id, status""",
             (*ids, *ACTIVE_EXECUTION_STATUSES),
         ) as cursor:
@@ -450,7 +551,7 @@ class ExecutionStore:
                    WHERE session_id = ? AND (
                        status IN ('queued', 'starting', 'running', 'cancelling')
                        OR continuation_state IN ('pending', 'claimed')
-                   )""",
+                   ) AND private_operation = 0""",
                 (session_id,),
             ) as cursor:
                 ids = [str(row[0]) async for row in cursor]
@@ -462,7 +563,7 @@ class ExecutionStore:
                        cancel_reason = ?, cancel_requested_at = COALESCE(cancel_requested_at, ?),
                        continuation_state = 'suppressed', updated_at = ?,
                        revision = revision + 1
-                   WHERE session_id = ? AND (
+                   WHERE session_id = ? AND private_operation = 0 AND (
                        status IN ('queued', 'starting', 'running', 'cancelling')
                        OR continuation_state IN ('pending', 'claimed')
                    )""",
