@@ -228,6 +228,109 @@ class LeaseService:
             raise
         return {**reservation, "lease": lease}
 
+    async def migrate_legacy_session_reservations(self) -> None:
+        """Adopt only a provably-live R13 reservation into one R14 handle.
+
+        This adapter is deliberately conservative: a stale reservation is not
+        evidence that its remote process stopped.  It is quarantined instead
+        of being released or silently replaced with a fresh lineage.
+        """
+        for reservation in await self.db.list_active_session_resource_reservations():
+            # R14 owns only the reviewed YDB compatibility path.  SPIN and
+            # artifact-transfer reservations keep their existing lifecycle.
+            if reservation["pool"] != "ydb-builders":
+                continue
+            session_id, lease_id = str(reservation["session_id"]), str(reservation["lease_id"])
+            lease = await self.db.get_resource_lease(lease_id)
+            host = await self.db.get_resource_host(str(reservation["host_id"]))
+            valid = bool(lease and lease["state"] == "active"
+                         and lease["session_id"] == session_id
+                         and lease["host_id"] == reservation["host_id"]
+                         and lease["pool"] == reservation["pool"]
+                         and host is not None
+                         and host["enabled"]
+                         and not host["draining"]
+                         and not host["offline"]
+                         and not host["quarantined"]
+                         and not host.get("permanently_unavailable")
+                         and int(host["fencing_token"]) == int(lease["fencing_token"]))
+            session_handles = [handle for handle in await self.db.list_session_resource_handles(session_id)
+                               if handle["pool"] == reservation["pool"]]
+            existing = next((handle for handle in session_handles
+                             if str(handle["lease_id"]) == lease_id), None)
+            if valid and session_handles:
+                valid = (len(session_handles) == 1
+                         and existing is not None
+                         and existing["state"] == "active"
+                         and existing["session_id"] == session_id
+                         and existing["host_id"] == reservation["host_id"]
+                         and existing["pool"] == reservation["pool"]
+                         and str(existing["lease_id"]) == lease_id
+                         and int(existing["fencing_token"]) == int(lease["fencing_token"])
+                         and existing["worktree_identity"] == reservation["worktree_identity"])
+            if valid:
+                operations = await self.db.list_session_executions(
+                    session_id, include_terminal=False,
+                )
+                if any(operation["status"] not in {"queued", "starting"}
+                       or not isinstance(operation.get("plan"), Mapping)
+                       or not operation["plan"].get("session_reservation")
+                       for operation in operations):
+                    valid = False
+                else:
+                    handle = existing or {"id": "handle-legacy-" + lease_id}
+                    if await self.db.adopt_legacy_ydb_reservation(
+                        reservation=reservation, lease=lease, handle=handle,
+                    ):
+                        continue
+                    valid = False
+            reason = "legacy session reservation has unproven active lease lineage"
+            if lease is not None and lease["state"] in {"active", "revoking"}:
+                await self.quarantine(execution_id=str(lease["execution_id"]), leases=[lease], reason=reason)
+            else:
+                await self.db.set_resource_host_state(
+                    str(reservation["host_id"]), quarantined=True, reason=reason,
+                )
+                await self.db.settle_session_resource_reservation(
+                    session_id=session_id, state="quarantined", reason=reason,
+                )
+
+    async def acquire_ydb_handle(self, *, session_id: str, worktree: str | Path) -> Mapping[str, Any]:
+        """Get the one session-pinned YDB builder handle for a checkout."""
+        identity = self.canonical_worktree_identity(worktree)
+        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            await self.migrate_legacy_session_reservations()
+            handles = [handle for handle in await self._active_session_handles(session_id)
+                       if handle["pool"] == "ydb-builders"]
+            if handles:
+                handle = handles[0]
+                if handle.get("worktree_identity") != identity:
+                    raise ResourceInventoryError("session reservation is pinned to a different worktree")
+                return self._opaque_handle(handle)
+            acquired = await self._acquire_handles_unlocked(
+                session_id, [{"pool": "ydb-builders"}],
+                auto_release_when_session_idle=True,
+            )
+            handle = acquired[0]
+            if not await self.db.set_session_resource_handle_worktree(
+                str(handle["id"]), worktree_identity=identity,
+            ):
+                raise ResourceInventoryError("could not pin YDB session handle")
+            return handle
+
+    @contextlib.asynccontextmanager
+    async def use_active_ydb_handle(self, *, session_id: str):
+        """Serialize YDB inspection/commands and resolve its private lease."""
+        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            handles = [handle for handle in await self._active_session_handles(session_id)
+                       if handle["pool"] == "ydb-builders"]
+            if len(handles) != 1:
+                raise ResourceInventoryError("no active YDB session handle")
+            resolved = await self._resolve_handle_lease(session_id, str(handles[0]["id"]))
+            yield {**resolved, "lease": resolved["lease"]}
+
     @contextlib.asynccontextmanager
     async def use_session_reservation(
         self, *, session_id: str, pool: str, worktree: str | Path,
@@ -294,6 +397,7 @@ class LeaseService:
 
     async def _recover_startup(self) -> None:
         await self.cancel_orphaned_queued_session_reservations()
+        await self.migrate_legacy_session_reservations()
         await self.release_idle_recovered_session_reservations()
         await self.reconcile_expired()
 
@@ -394,10 +498,19 @@ class LeaseService:
     async def reconcile_expired(self) -> Sequence[Mapping[str, Any]]:
         # Expiry is evidence that ownership is stale, never that the remote is
         # stopped.  REVOKING remains covered by the global unique index.
-        # A durable session reservation intentionally outlives an individual
-        # command.  Renew it after restart as well as during normal service.
+        # Retained handles intentionally outlive an individual command. Renew
+        # their original lease lineage; legacy reservations are included only
+        # until the startup adapter has adopted or quarantined them.
+        renewed: set[str] = set()
         for reservation in await self.db.list_active_session_resource_reservations():
             lease = await self.db.get_resource_lease(reservation["lease_id"])
+            if lease is not None:
+                await self.heartbeat(execution_id=lease["execution_id"], lease=lease)
+                renewed.add(str(lease["id"]))
+        for handle in await self.db.list_session_resource_handles_for_reconciliation():
+            if str(handle["lease_id"]) in renewed:
+                continue
+            lease = await self.db.get_resource_lease(str(handle["lease_id"]))
             if lease is not None:
                 await self.heartbeat(execution_id=lease["execution_id"], lease=lease)
         return await self.db.revoke_expired_resource_leases()
@@ -842,6 +955,15 @@ class LeaseService:
         return won
 
     async def acquire_handles(self, session_id: str, spec: Mapping[str, Any] | Sequence[Mapping[str, Any]], *, auto_release_when_session_idle: bool = False) -> Sequence[Mapping[str, str]]:
+        """Retain handles while serializing allocations for this session."""
+        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            return await self._acquire_handles_unlocked(
+                session_id, spec,
+                auto_release_when_session_idle=auto_release_when_session_idle,
+            )
+
+    async def _acquire_handles_unlocked(self, session_id: str, spec: Mapping[str, Any] | Sequence[Mapping[str, Any]], *, auto_release_when_session_idle: bool = False) -> Sequence[Mapping[str, str]]:
         """Retain an all-or-none handle bundle, acquiring only its missing slots.
 
         Existing active handles satisfy matching pool/host requests first.  A
@@ -1141,8 +1263,11 @@ class LeaseService:
         current = await self.db.get_resource_host(host_id)
         assert current is not None
         return current
-    async def recover_host(self, *, host_id: str, requested_by: str) -> Mapping[str, Any]:
+    async def recover_host(self, *, host_id: str, requested_by: str,
+                           remote_quiescence_confirmed: bool | None = None) -> Mapping[str, Any]:
         """Manual recovery is the same fenced path as periodic reconciliation."""
+        if remote_quiescence_confirmed:
+            return await self.db.recover_resource_host(host_id)
         result = await self._recover_host_once(host_id)
         if result is None:
             raise ResourceInventoryError("remote supervisor did not prove host quiescence")

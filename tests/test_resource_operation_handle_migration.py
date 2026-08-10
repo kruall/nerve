@@ -90,7 +90,7 @@ async def _legacy_snapshot(db: aiosqlite.Connection) -> tuple[tuple, tuple, tupl
 
 
 @pytest.mark.asyncio
-async def test_v059_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp_path):
+async def test_v060_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp_path):
     fresh = await aiosqlite.connect(tmp_path / "fresh.db")
     upgraded = await aiosqlite.connect(tmp_path / "upgrade.db")
     try:
@@ -99,7 +99,7 @@ async def test_v059_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp
         await _legacy_rows(upgraded)
         legacy_before = await _legacy_snapshot(upgraded)
 
-        assert await runner.run_migrations(upgraded) == 59
+        assert await runner.run_migrations(upgraded) == 60
         fresh_schema = await _schema(fresh)
         assert fresh_schema == await _schema(upgraded)
         assert (await (await fresh.execute("SELECT next_ticket FROM resource_wait_allocator")).fetchone())[0] == 1
@@ -114,7 +114,7 @@ async def test_v059_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp
         ref_columns = {row[1] for row in await (await fresh.execute("PRAGMA table_info(operation_resource_refs)")).fetchall()}
         handle_columns = {row[1] for row in await (await fresh.execute("PRAGMA table_info(session_resource_handles)")).fetchall()}
         assert {"position"} <= ref_columns
-        assert {"auto_release_when_session_idle"} <= handle_columns
+        assert {"auto_release_when_session_idle", "worktree_identity"} <= handle_columns
         indexes = {row[1] for row in await (await fresh.execute("PRAGMA index_list(operation_resource_refs)")).fetchall()}
         assert "uq_operation_resource_refs_one_active_per_handle" in indexes
         execution_indexes = {row[1] for row in await (await fresh.execute("PRAGMA index_list(executions)")).fetchall()}

@@ -171,6 +171,7 @@ async def test_ydb_test_plan_does_not_reject_test_owned_error_text(
     service = ExecutionService(
         db=db, engine=_engine(), workspace=tmp_path, catalog=SimpleNamespace(),
         execution_root=tmp_path / "runs",
+        resource_manager=SimpleNamespace(acquire_ydb_handle=AsyncMock(return_value={"id": "ydb-handle"})),
     )
     service._start_serialized = AsyncMock(return_value={"id": "exec-ydb"})
 
@@ -193,7 +194,8 @@ async def test_ydb_make_publishes_one_confined_output_with_explicit_build_type(
         "snapshot_id": "a" * 40, "head": "b" * 40, "pack": b"pack",
     })
     service = ExecutionService(db=db, engine=_engine(), workspace=tmp_path,
-                               catalog=SimpleNamespace(), execution_root=tmp_path / "runs")
+                               catalog=SimpleNamespace(), execution_root=tmp_path / "runs",
+                               resource_manager=SimpleNamespace(acquire_ydb_handle=AsyncMock(return_value={"id": "ydb-handle"})))
     service._start_serialized = AsyncMock(return_value={"id": "exec-ydb"})
 
     await service.start_ydb(session_id=owner, kind="ydb_make", worktree=str(worktree),
@@ -389,7 +391,7 @@ async def test_ydb_host_release_refuses_active_execution(db, owner, tmp_path):
         plan={},
         resource_requests=[],
     )
-    manager = SimpleNamespace(release_session_reservation=AsyncMock(return_value=True))
+    manager = SimpleNamespace(release_handle=AsyncMock(return_value=True))
     service = ExecutionService(
         db=db, engine=_engine(), workspace=tmp_path, catalog=SimpleNamespace(),
         resource_manager=manager,
@@ -397,7 +399,19 @@ async def test_ydb_host_release_refuses_active_execution(db, owner, tmp_path):
 
     with pytest.raises(ValueError, match="execution is active"):
         await service.release_ydb_host(session_id=owner)
-    manager.release_session_reservation.assert_not_awaited()
+    manager.release_handle.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ydb_host_release_returns_false_when_no_handle_exists(db, owner, tmp_path):
+    manager = SimpleNamespace(release_handle=AsyncMock(return_value=True))
+    service = ExecutionService(
+        db=db, engine=_engine(), workspace=tmp_path, catalog=SimpleNamespace(),
+        resource_manager=manager,
+    )
+
+    assert await service.release_ydb_host(session_id=owner) is False
+    manager.release_handle.assert_not_awaited()
 
 
 @pytest.mark.asyncio

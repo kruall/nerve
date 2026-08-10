@@ -60,11 +60,17 @@ class ResourceStore:
         async with self.db.execute(f"SELECT * FROM session_resource_handles WHERE session_id=?{marks} ORDER BY created_at, id", (session_id, *(states or ()))) as c:
             return [_row(row) async for row in c]
 
+    async def list_session_resource_handles_for_reconciliation(self) -> list[dict[str, Any]]:
+        async with self.db.execute(
+            "SELECT * FROM session_resource_handles WHERE state='active' ORDER BY created_at, id"
+        ) as c:
+            return [_row(row) async for row in c]
+
     async def create_session_resource_handle(self, handle: Mapping[str, Any]) -> dict[str, Any]:
         now = utc_now_iso()
         await self._write("""INSERT INTO session_resource_handles
-            (id, session_id, pool, host_id, lease_id, fencing_token, state, auto_release_when_session_idle, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (handle["id"], handle["session_id"], handle["pool"], handle["host_id"], handle["lease_id"], handle["fencing_token"], handle.get("state", "active"), int(bool(handle.get("auto_release_when_session_idle"))), now, now))
+            (id, session_id, pool, host_id, lease_id, fencing_token, state, auto_release_when_session_idle, worktree_identity, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (handle["id"], handle["session_id"], handle["pool"], handle["host_id"], handle["lease_id"], handle["fencing_token"], handle.get("state", "active"), int(bool(handle.get("auto_release_when_session_idle"))), handle.get("worktree_identity"), now, now))
         row = await self.get_session_resource_handle(str(handle["id"])); assert row is not None
         return row
 
@@ -79,11 +85,102 @@ class ResourceStore:
         async with self._atomic():
             for handle in handles:
                 await self.db.execute("""INSERT INTO session_resource_handles
-                    (id, session_id, pool, host_id, lease_id, fencing_token, state, auto_release_when_session_idle, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)""", (
+                    (id, session_id, pool, host_id, lease_id, fencing_token, state, auto_release_when_session_idle, worktree_identity, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)""", (
                     handle["id"], handle["session_id"], handle["pool"], handle["host_id"],
-                    handle["lease_id"], handle["fencing_token"], int(bool(handle.get("auto_release_when_session_idle"))), now, now,
+                    handle["lease_id"], handle["fencing_token"], int(bool(handle.get("auto_release_when_session_idle"))), handle.get("worktree_identity"), now, now,
                 ))
+
+    async def set_session_resource_handle_worktree(self, handle_id: str, *, worktree_identity: str) -> bool:
+        result = await self._write(
+            "UPDATE session_resource_handles SET worktree_identity=?, updated_at=? WHERE id=? AND state='active'",
+            (worktree_identity, utc_now_iso(), handle_id),
+        )
+        return bool(result.rowcount)
+
+    async def adopt_legacy_reservation_execution_handle(self, *, operation_id: str, handle_id: str) -> bool:
+        """Atomically move an unstarted legacy YDB operation onto its handle."""
+        async with self._atomic():
+            async with self.db.execute(
+                "SELECT plan FROM executions WHERE id=? AND status IN ('queued', 'starting')",
+                (operation_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+            if row is None:
+                return False
+            try:
+                plan = json.loads(row["plan"])
+            except (TypeError, ValueError):
+                return False
+            if not isinstance(plan, dict) or not plan.get("session_reservation"):
+                return False
+            plan.pop("session_reservation", None)
+            plan["retained_handle_ids"] = [handle_id]
+            plan["ydb_session_handle"] = True
+            result = await self.db.execute(
+                "UPDATE executions SET plan=?, updated_at=?, revision=revision+1 WHERE id=? AND status IN ('queued', 'starting')",
+                (json.dumps(plan), utc_now_iso(), operation_id),
+            )
+            if not result.rowcount:
+                return False
+            await self.db.execute(
+                "INSERT OR IGNORE INTO operation_resource_refs(operation_id, handle_id, position, created_at) VALUES (?, ?, 0, ?)",
+                (operation_id, handle_id, utc_now_iso()),
+            )
+            return True
+
+    async def adopt_legacy_ydb_reservation(
+        self, *, reservation: Mapping[str, Any], lease: Mapping[str, Any], handle: Mapping[str, Any],
+    ) -> bool:
+        """Atomically retain a legacy YDB lineage, refs, and reservation settlement."""
+        now = utc_now_iso()
+        session_id = str(reservation["session_id"])
+        async with self._atomic():
+            async with self.db.execute(
+                "SELECT id, plan, status FROM executions WHERE session_id=? AND status IN ('queued', 'starting')",
+                (session_id,),
+            ) as cursor:
+                operations = [dict(row) async for row in cursor]
+            converted: list[tuple[str, str]] = []
+            for operation in operations:
+                try:
+                    plan = json.loads(operation["plan"])
+                except (TypeError, ValueError):
+                    return False
+                if not isinstance(plan, dict) or not plan.get("session_reservation"):
+                    continue
+                plan.pop("session_reservation", None)
+                plan["retained_handle_ids"] = [str(handle["id"])]
+                plan["ydb_session_handle"] = True
+                converted.append((str(operation["id"]), json.dumps(plan)))
+            async with self.db.execute("SELECT id FROM session_resource_handles WHERE id=?", (handle["id"],)) as cursor:
+                exists = await cursor.fetchone()
+            if exists is None:
+                await self.db.execute(
+                    """INSERT INTO session_resource_handles
+                       (id, session_id, pool, host_id, lease_id, fencing_token, state,
+                        auto_release_when_session_idle, worktree_identity, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?)""",
+                    (handle["id"], session_id, reservation["pool"], reservation["host_id"],
+                     lease["id"], lease["fencing_token"], reservation["worktree_identity"], now, now),
+                )
+            for operation_id, plan in converted:
+                result = await self.db.execute(
+                    "UPDATE executions SET plan=?, updated_at=?, revision=revision+1 WHERE id=? AND status IN ('queued','starting')",
+                    (plan, now, operation_id),
+                )
+                if result.rowcount != 1:
+                    return False
+                await self.db.execute(
+                    "INSERT INTO operation_resource_refs(operation_id, handle_id, position, created_at) VALUES (?, ?, 0, ?)",
+                    (operation_id, handle["id"], now),
+                )
+            result = await self.db.execute(
+                """UPDATE session_resource_reservations SET state='released', released_at=?, quarantine_reason=NULL
+                   WHERE session_id=? AND state='active' AND lease_id=? AND host_id=? AND pool=?""",
+                (now, session_id, reservation["lease_id"], reservation["host_id"], reservation["pool"]),
+            )
+            return result.rowcount == 1
 
     async def update_session_resource_handle(self, handle_id: str, *, expected_state: str, state: str, release_reason: str | None = None) -> bool:
         if state not in {"active", "releasing", "released", "quarantined"}:

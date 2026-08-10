@@ -115,7 +115,23 @@ class ExecutionService:
                 raise ValueError("invalid YDB publish output path")
             publish_path = path
         top = validate_worktree(worktree, self.ydb_worktree_root)
-        snap = ydb_snapshot(top)
+        acquire_ydb_handle = getattr(self.resource_manager, "acquire_ydb_handle", None)
+        if not callable(acquire_ydb_handle):
+            raise ValueError("YDB retained handles are unavailable")
+        existing_ydb_handles = {
+            str(handle["id"])
+            for handle in await self.db.list_session_resource_handles(session_id, states=("active",))
+            if handle["pool"] == "ydb-builders"
+        }
+        ydb_handle = await acquire_ydb_handle(session_id=session_id, worktree=top)
+        created_ydb_handle = str(ydb_handle["id"]) not in existing_ydb_handles
+        try:
+            snap = ydb_snapshot(top)
+        except BaseException:
+            if created_ydb_handle:
+                with contextlib.suppress(Exception):
+                    await self.resource_manager.release_handle(session_id, str(ydb_handle["id"]))
+            raise
         output_dir = ".nerve-ydb-output"
         published = (None if publish_path is None else {
             # ``ya`` output is not part of its source checkout.  Keep it in a
@@ -144,6 +160,12 @@ class ExecutionService:
         except BaseException:
             with contextlib.suppress(OSError):
                 pack_path.unlink()
+            # Only unwind the compatibility handle created by this failed
+            # start.  A pre-existing YDB handle is session-owned and must not
+            # be released merely because a later operation could not start.
+            if created_ydb_handle:
+                with contextlib.suppress(Exception):
+                    await self.resource_manager.release_handle(session_id, str(ydb_handle["id"]))
             raise
 
         snap["pack_path"] = str(pack_path)
@@ -153,7 +175,7 @@ class ExecutionService:
         argv = ["make", "--build", build_type, "--output", output_dir] + (["-tA"] if test else []) + list(args)
         plan = {"kind": kind, "profile_version": "1", "profile_hash": "built-in-ydb-v1",
                 "arguments": {"args": list(args), "build_type": build_type}, "resources": {"session": "ydb-builders"},
-                "session_reservation": {"pool": "ydb-builders", "worktree": str(top)},
+                "retained_handle_ids": [str(ydb_handle["id"])], "ydb_session_handle": True,
                 "ydb_snapshot": snap,
                 **({"ydb_publish": published} if published else {}),
                 "steps": [{"id": "ydb", "transport": "resource", "resource_slot": "session", "executable": "./ya", "argv": [{"type": "literal", "value": x} for x in argv], "cwd": "workspace"}],
@@ -167,7 +189,8 @@ class ExecutionService:
                 "timeout_seconds": 86400, "cancellation": {"mode": "interrupt", "grace_seconds": 10, "run_cleanup": False}}
         try:
             return await self._start_serialized(session_id=session_id, plan=plan,
-                profile_snapshot={"kind": kind, "title": kind, "source": "built-in reviewed YDB operation"}, auto_continue=auto_continue)
+                profile_snapshot={"kind": kind, "title": kind, "source": "built-in reviewed YDB operation"},
+                auto_continue=auto_continue, legacy_compatibility=False)
         except BaseException:
             with contextlib.suppress(OSError):
                 pack_path.unlink()
@@ -311,24 +334,27 @@ class ExecutionService:
 
     async def inspect_ydb_files(self, *, session_id: str, operation: str, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
         inspect = getattr(self.backend, "inspect_ydb_files", None)
-        use = getattr(self.resource_manager, "use_active_session_reservation", None)
+        use = getattr(self.resource_manager, "use_active_ydb_handle", None)
         if not callable(inspect) or not callable(use):
             raise ValueError("YDB remote file inspection is unavailable")
-        async with use(session_id=session_id) as reservation:
-            return await inspect(session_id=session_id, reservation=reservation, operation=operation, arguments=arguments)
+        async with use(session_id=session_id) as handle:
+            # Backend's internal argument retains its established shape; it is
+            # never a public tool response and contains no new handle data.
+            return await inspect(session_id=session_id, reservation=handle, operation=operation, arguments=arguments)
 
     async def release_ydb_host(self, *, session_id: str) -> bool:
         self.recovery_gate.require_ready()
-        release = getattr(self.resource_manager, "release_session_reservation", None)
-        if not callable(release):
-            raise ValueError("YDB host release is unavailable")
-        active = await self.db.list_session_executions(
-            session_id, include_terminal=False, limit=1,
-        )
+        active = await self.db.list_session_executions(session_id, include_terminal=False, limit=1)
         if active:
             raise ValueError("YDB host cannot be released while an execution is active")
-        return await release(session_id=session_id, remote_quiescence_confirmed=True,
-                             reason="owner explicitly released YDB session host")
+        release = getattr(self.resource_manager, "release_handle", None)
+        if not callable(release):
+            raise ValueError("YDB host release is unavailable")
+        handles = [handle for handle in await self.db.list_session_resource_handles(session_id, states=("active",))
+                   if handle["pool"] == "ydb-builders"]
+        if len(handles) != 1:
+            return False
+        return await release(session_id, str(handles[0]["id"]))
 
     async def initialize(self, *, dispatch_continuations: bool = True) -> None:
         """Reconcile active rows and recover only unclaimed outbox items."""
@@ -656,7 +682,16 @@ class ExecutionService:
                 slots = list(dict(row["plan"].get("resources", {})))
                 leases = [{**item["lease"], **({"slot": slots[index]} if index < len(slots) else {})}
                           for index, item in enumerate(resolved)]
-                await self._run_with_leases(execution_id, row, leases, None)
+                if row["plan"].get("ydb_session_handle"):
+                    use = getattr(self.resource_manager, "use_active_ydb_handle", None)
+                    if not callable(use):
+                        raise ValueError("YDB retained handles are unavailable")
+                    async with use(session_id=row["session_id"]) as held:
+                        if str(held["id"]) not in row["plan"]["retained_handle_ids"]:
+                            raise ValueError("YDB session handle changed")
+                        await self._run_with_leases(execution_id, row, leases, held)
+                else:
+                    await self._run_with_leases(execution_id, row, leases, None)
                 return
             reservation = row["plan"].get("session_reservation")
             if reservation:

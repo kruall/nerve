@@ -10,7 +10,10 @@ from nerve.resources import LeaseService, ResourceInventory, ResourceInventoryEr
 CONFIG = {
     "connections": ["lab"],
     "hosts": [{"id": "builder-1", "connection_ref": "lab"}],
-    "pools": [{"id": "builders", "members": ["builder-1"]}],
+    "pools": [
+        {"id": "builders", "members": ["builder-1"]},
+        {"id": "ydb-builders", "members": ["builder-1"]},
+    ],
 }
 
 
@@ -159,11 +162,11 @@ async def test_session_resource_reservation_cleanup_after_recovery_quarantines(d
 
 
 @pytest.mark.asyncio
-async def test_startup_releases_idle_session_reservation_from_before_restart(db, tmp_path):
+async def test_startup_migrates_idle_session_reservation_to_the_same_retained_lineage(db, tmp_path):
     first = await _service(db)
     await db.create_session("session-a")
     reservation = await first.reserve_for_session(
-        session_id="session-a", pool="builders", worktree=tmp_path,
+        session_id="session-a", pool="ydb-builders", worktree=tmp_path,
     )
 
     recovered = await _service(db)
@@ -172,15 +175,120 @@ async def test_startup_releases_idle_session_reservation_from_before_restart(db,
     settled = await db.get_session_resource_reservation("session-a")
     assert settled is not None and settled["state"] == "released"
     lease = await db.get_resource_lease(reservation["lease_id"])
-    assert lease is not None and lease["state"] == "released"
+    assert lease is not None and lease["state"] == "active"
+    handles = await db.list_session_resource_handles("session-a", states=("active",))
+    assert [(handle["lease_id"], handle["worktree_identity"]) for handle in handles] == [
+        (reservation["lease_id"], str(tmp_path.resolve())),
+    ]
 
 
 @pytest.mark.asyncio
-async def test_startup_keeps_recovered_reservation_for_active_execution(db, tmp_path):
+async def test_startup_quarantines_legacy_reservation_when_host_fence_is_stale(db, tmp_path):
+    service = await _service(db)
+    await db.create_session("session-a")
+    reservation = await service.reserve_for_session(
+        session_id="session-a", pool="ydb-builders", worktree=tmp_path,
+    )
+    await db.db.execute(
+        "UPDATE resource_hosts SET fencing_token=fencing_token+1 WHERE id=?",
+        (reservation["host_id"],),
+    )
+    await db.db.commit()
+
+    restarted = await _service(db)
+    await restarted.initialize()
+
+    settled = await db.get_session_resource_reservation("session-a")
+    lease = await db.get_resource_lease(reservation["lease_id"])
+    assert settled is not None and settled["state"] == "quarantined"
+    assert lease is not None and lease["state"] == "quarantined"
+    assert (await db.get_resource_host(reservation["host_id"]))["quarantined"] == 1
+    assert await db.list_session_resource_handles("session-a", states=("active",)) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("host_state", "permanent_loss"),
+    [
+        ({"enabled": 0}, False),
+        ({"draining": 1}, False),
+        ({"offline": 1}, False),
+        ({"quarantined": 1}, False),
+        ({}, True),
+    ],
+    ids=["disabled", "draining", "offline", "quarantined", "permanent-loss"],
+)
+async def test_startup_quarantines_legacy_reservation_for_unavailable_host(
+    db, tmp_path, host_state, permanent_loss,
+):
+    service = await _service(db)
+    await db.create_session("session-a")
+    reservation = await service.reserve_for_session(
+        session_id="session-a", pool="ydb-builders", worktree=tmp_path,
+    )
+    restarted = await _service(db)
+    if permanent_loss:
+        await restarted.permanently_lose_host(
+            host_id=reservation["host_id"],
+            confirm_host_id=reservation["host_id"],
+            requested_by="test",
+        )
+    else:
+        columns = ", ".join(f"{column}=?" for column in host_state)
+        await db.db.execute(
+            f"UPDATE resource_hosts SET {columns} WHERE id=?",
+            (*host_state.values(), reservation["host_id"]),
+        )
+        await db.db.commit()
+
+    await restarted.migrate_legacy_session_reservations()
+
+    settled = await db.get_session_resource_reservation("session-a")
+    lease = await db.get_resource_lease(reservation["lease_id"])
+    host = await db.get_resource_host(reservation["host_id"])
+    assert settled is not None and settled["state"] == "quarantined"
+    assert lease is not None and lease["state"] == "quarantined"
+    assert host is not None and host["quarantined"] == 1
+    if permanent_loss:
+        assert host["enabled"] == 0 and host["permanently_unavailable"] == 1
+    assert await db.list_session_resource_handles("session-a", states=("active",)) == []
+
+
+@pytest.mark.asyncio
+async def test_startup_quarantines_legacy_reservation_when_existing_handle_worktree_differs(db, tmp_path):
+    service = await _service(db)
+    await db.create_session("session-a")
+    reservation = await service.reserve_for_session(
+        session_id="session-a", pool="ydb-builders", worktree=tmp_path,
+    )
+    await db.create_session_resource_handle({
+        "id": "handle-mismatched-worktree",
+        "session_id": "session-a",
+        "pool": "ydb-builders",
+        "host_id": reservation["host_id"],
+        "lease_id": reservation["lease_id"],
+        "fencing_token": reservation["lease"]["fencing_token"],
+        "worktree_identity": str((tmp_path / "other").resolve()),
+    })
+
+    restarted = await _service(db)
+    await restarted.initialize()
+
+    settled = await db.get_session_resource_reservation("session-a")
+    lease = await db.get_resource_lease(reservation["lease_id"])
+    handle = await db.get_session_resource_handle("handle-mismatched-worktree")
+    assert settled is not None and settled["state"] == "quarantined"
+    assert lease is not None and lease["state"] == "quarantined"
+    assert handle is not None and handle["state"] == "quarantined"
+    assert await db.list_session_resource_handles("session-a", states=("active",)) == []
+
+
+@pytest.mark.asyncio
+async def test_startup_quarantines_running_ydb_reservation(db, tmp_path):
     first = await _service(db)
     await db.create_session("session-a")
     reservation = await first.reserve_for_session(
-        session_id="session-a", pool="builders", worktree=tmp_path,
+        session_id="session-a", pool="ydb-builders", worktree=tmp_path,
     )
     await db.create_execution(
         "exec-active", session_id="session-a", kind="test", profile_version="1",
@@ -191,9 +299,65 @@ async def test_startup_keeps_recovered_reservation_for_active_execution(db, tmp_
     await recovered.initialize()
 
     settled = await db.get_session_resource_reservation("session-a")
-    assert settled is not None and settled["state"] == "active"
+    assert settled is not None and settled["state"] == "quarantined"
     lease = await db.get_resource_lease(reservation["lease_id"])
-    assert lease is not None and lease["state"] == "active"
+    assert lease is not None and lease["state"] == "quarantined"
+    handles = await db.list_session_resource_handles("session-a", states=("active",))
+    assert await db.list_session_resource_handles("session-a", states=("active",)) == []
+
+
+@pytest.mark.asyncio
+async def test_ydb_handle_reuses_pinned_lineage_across_restart(db, tmp_path):
+    first = await _service(db)
+    await db.create_session("session-a")
+    handle = await first.acquire_ydb_handle(session_id="session-a", worktree=tmp_path)
+    before = await db.get_session_resource_handle(handle["id"])
+
+    restarted = await _service(db)
+    await restarted.initialize()
+    reused = await restarted.acquire_ydb_handle(session_id="session-a", worktree=tmp_path)
+    after = await db.get_session_resource_handle(reused["id"])
+
+    assert reused["id"] == handle["id"]
+    assert (after["host_id"], after["lease_id"], after["fencing_token"]) == (
+        before["host_id"], before["lease_id"], before["fencing_token"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_ydb_handle_acquisition_is_serialized_without_deadlock(db, tmp_path):
+    service = await _service(db)
+    await db.create_session("session-a")
+
+    first, second = await asyncio.wait_for(asyncio.gather(
+        service.acquire_ydb_handle(session_id="session-a", worktree=tmp_path),
+        service.acquire_ydb_handle(session_id="session-a", worktree=tmp_path),
+    ), timeout=1)
+
+    assert first["id"] == second["id"]
+    handles = await db.list_session_resource_handles("session-a", states=("active",))
+    assert len(handles) == 1 and handles[0]["pool"] == "ydb-builders"
+
+
+@pytest.mark.asyncio
+async def test_startup_quarantines_legacy_reservation_without_active_lineage(db, tmp_path):
+    service = await _service(db)
+    await db.create_session("session-a")
+    reservation = await service.reserve_for_session(
+        session_id="session-a", pool="ydb-builders", worktree=tmp_path,
+    )
+    await db.release_resource_lease(
+        lease_id=reservation["lease_id"], execution_id=reservation["lease"]["execution_id"],
+        fencing_token=reservation["lease"]["fencing_token"],
+    )
+
+    restarted = await _service(db)
+    await restarted.initialize()
+
+    settled = await db.get_session_resource_reservation("session-a")
+    assert settled is not None and settled["state"] == "quarantined"
+    assert (await db.get_resource_host("builder-1"))["quarantined"] == 1
+    assert await db.list_session_resource_handles("session-a", states=("active",)) == []
 
 
 @pytest.mark.asyncio
