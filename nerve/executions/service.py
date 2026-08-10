@@ -99,6 +99,37 @@ class ExecutionService:
         if callable(register_wait_publisher):
             register_wait_publisher(self._schedule_continuation)
 
+    async def _acquire_ydb_session_handle(
+        self, *, session_id: str, worktree: str | Path,
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any], bool]:
+        """Acquire or validate the private session-pinned builder handle.
+
+        Reviewed wrappers deliberately do not expose resource handles in their
+        public schemas.  They still persist the exact session-owned handle and
+        host selected here, so the runner can reject an owner, lease, host, or
+        fence change before it dispatches a backend operation.
+        """
+        acquire = getattr(self.resource_manager, "acquire_ydb_handle", None)
+        resolve = getattr(self.resource_manager, "_resolve_handle_lease", None)
+        if not callable(acquire) or not callable(resolve):
+            raise ValueError("YDB retained handles are unavailable")
+        existing = {
+            str(handle["id"])
+            for handle in await self.db.list_session_resource_handles(
+                session_id, states=("active",),
+            )
+            if handle["pool"] == "ydb-builders"
+        }
+        handle = await acquire(session_id=session_id, worktree=worktree)
+        try:
+            resolved = await resolve(session_id, str(handle["id"]))
+        except BaseException:
+            if str(handle["id"]) not in existing:
+                with contextlib.suppress(Exception):
+                    await self.resource_manager.release_handle(session_id, str(handle["id"]))
+            raise
+        return handle, resolved, str(handle["id"]) not in existing
+
     async def start_ydb(self, *, session_id: str, kind: str, worktree: str, args: list[str], build_type: str = "relwithdebinfo", publish: Mapping[str, Any] | None = None, auto_continue: bool = True) -> Mapping[str, Any]:
         """Start the two reviewed YDB commands; callers choose neither host nor SSH."""
         self.recovery_gate.require_ready()
@@ -114,16 +145,9 @@ class ExecutionService:
                 raise ValueError("invalid YDB publish output path")
             publish_path = path
         top = validate_worktree(worktree, self.ydb_worktree_root)
-        acquire_ydb_handle = getattr(self.resource_manager, "acquire_ydb_handle", None)
-        if not callable(acquire_ydb_handle):
-            raise ValueError("YDB retained handles are unavailable")
-        existing_ydb_handles = {
-            str(handle["id"])
-            for handle in await self.db.list_session_resource_handles(session_id, states=("active",))
-            if handle["pool"] == "ydb-builders"
-        }
-        ydb_handle = await acquire_ydb_handle(session_id=session_id, worktree=top)
-        created_ydb_handle = str(ydb_handle["id"]) not in existing_ydb_handles
+        ydb_handle, resolved_handle, created_ydb_handle = await self._acquire_ydb_session_handle(
+            session_id=session_id, worktree=top,
+        )
         try:
             snap = ydb_snapshot(top)
         except BaseException:
@@ -174,7 +198,9 @@ class ExecutionService:
         argv = ["make", "--build", build_type, "--output", output_dir] + (["-tA"] if test else []) + list(args)
         plan = {"kind": kind, "profile_version": "1", "profile_hash": "built-in-ydb-v1",
                 "arguments": {"args": list(args), "build_type": build_type}, "resources": {"session": "ydb-builders"},
-                "retained_handle_ids": [str(ydb_handle["id"])], "ydb_session_handle": True,
+                "retained_handle_ids": [str(ydb_handle["id"])],
+                "resource_hosts": {"session": str(resolved_handle["host_id"])},
+                "ydb_session_handle": True,
                 "ydb_snapshot": snap,
                 **({"ydb_publish": published} if published else {}),
                 "steps": [{"id": "ydb", "transport": "resource", "resource_slot": "session", "executable": "./ya", "argv": [{"type": "literal", "value": x} for x in argv], "cwd": "workspace"}],
@@ -193,6 +219,9 @@ class ExecutionService:
         except BaseException:
             with contextlib.suppress(OSError):
                 pack_path.unlink()
+            if created_ydb_handle:
+                with contextlib.suppress(Exception):
+                    await self.resource_manager.release_handle(session_id, str(ydb_handle["id"]))
             raise
 
     async def start_spin_verify(self, *, session_id: str, model: Any, profile: Any = "exhaustive", timeout_seconds: Any = 60, memory_mb: Any = 512, max_depth: Any = 100_000, hash_bits: Any = 24, property_name: Any = None, auto_continue: bool = True) -> Mapping[str, Any]:
@@ -208,14 +237,32 @@ class ExecutionService:
         if spec["property_name"]:
             args.extend(["-N", spec["property_name"]])
         args.append("model.pml")
-        plan = {"kind":"spin_verify_remote", "profile_version":"1", "profile_hash":"built-in-spin-remote-v1", "arguments":{k:v for k,v in spec.items() if k != "model"}, "resources":{"session":"ydb-builders"}, "session_reservation":{"pool":"ydb-builders", "worktree":"spin:" + session_id}, "spin":{**spec, "run_id":run_id, "retention_seconds":86400}, "steps":[{"id":"spin", "transport":"resource", "resource_slot":"session", "executable":"/usr/bin/spin", "argv":[{"type":"literal", "value":x} for x in args], "cwd":"workspace"}], "result":{"success_exit_codes":[0]}, "timeout_seconds":spec["timeout_seconds"], "cancellation":{"mode":"terminate", "grace_seconds":10, "run_cleanup":False}}
-        return await self._start_serialized(session_id=session_id, plan=plan, profile_snapshot={"kind":"spin_verify_remote","title":"remote SPIN verification","source":"built-in reviewed SPIN operation"}, auto_continue=auto_continue)
+        handle, resolved, created = await self._acquire_ydb_session_handle(
+            session_id=session_id, worktree="spin:" + session_id,
+        )
+        plan = {"kind":"spin_verify_remote", "profile_version":"1", "profile_hash":"built-in-spin-remote-v1", "arguments":{k:v for k,v in spec.items() if k != "model"}, "resources":{"session":"ydb-builders"}, "retained_handle_ids":[str(handle["id"])], "resource_hosts":{"session":str(resolved["host_id"])}, "ydb_session_handle":True, "spin":{**spec, "run_id":run_id, "retention_seconds":86400}, "steps":[{"id":"spin", "transport":"resource", "resource_slot":"session", "executable":"/usr/bin/spin", "argv":[{"type":"literal", "value":x} for x in args], "cwd":"workspace"}], "result":{"success_exit_codes":[0]}, "timeout_seconds":spec["timeout_seconds"], "cancellation":{"mode":"terminate", "grace_seconds":10, "run_cleanup":False}}
+        try:
+            return await self._start_serialized(session_id=session_id, plan=plan, profile_snapshot={"kind":"spin_verify_remote","title":"remote SPIN verification","source":"built-in reviewed SPIN operation"}, auto_continue=auto_continue)
+        except BaseException:
+            if created:
+                with contextlib.suppress(Exception):
+                    await self.resource_manager.release_handle(session_id, str(handle["id"]))
+            raise
 
     async def start_spin_replay(self, *, session_id: str, run_id: Any, auto_continue: bool = True) -> Mapping[str, Any]:
         self.recovery_gate.require_ready()
         if not isinstance(run_id, str) or not run_id.startswith("spin-") or not run_id[5:].isalnum(): raise ValueError("invalid SPIN run id")
-        plan = {"kind":"spin_replay_remote", "profile_version":"1", "profile_hash":"built-in-spin-remote-v1", "resources":{"session":"ydb-builders"}, "session_reservation":{"pool":"ydb-builders", "worktree":"spin:" + session_id}, "spin":{"run_id":run_id, "retention_seconds":86400}, "steps":[{"id":"spin", "transport":"resource", "resource_slot":"session", "executable":"/usr/bin/spin", "argv":[{"type":"literal", "value":x} for x in ["-t", "-p", "-g", "-l", "model.pml"]], "cwd":"workspace"}], "result":{"success_exit_codes":[0]}, "timeout_seconds":30, "cancellation":{"mode":"terminate", "grace_seconds":10, "run_cleanup":False}}
-        return await self._start_serialized(session_id=session_id, plan=plan, profile_snapshot={"kind":"spin_replay_remote","title":"remote SPIN replay","source":"built-in reviewed SPIN operation"}, auto_continue=auto_continue)
+        handle, resolved, created = await self._acquire_ydb_session_handle(
+            session_id=session_id, worktree="spin:" + session_id,
+        )
+        plan = {"kind":"spin_replay_remote", "profile_version":"1", "profile_hash":"built-in-spin-remote-v1", "resources":{"session":"ydb-builders"}, "retained_handle_ids":[str(handle["id"])], "resource_hosts":{"session":str(resolved["host_id"])}, "ydb_session_handle":True, "spin":{"run_id":run_id, "retention_seconds":86400}, "steps":[{"id":"spin", "transport":"resource", "resource_slot":"session", "executable":"/usr/bin/spin", "argv":[{"type":"literal", "value":x} for x in ["-t", "-p", "-g", "-l", "model.pml"]], "cwd":"workspace"}], "result":{"success_exit_codes":[0]}, "timeout_seconds":30, "cancellation":{"mode":"terminate", "grace_seconds":10, "run_cleanup":False}}
+        try:
+            return await self._start_serialized(session_id=session_id, plan=plan, profile_snapshot={"kind":"spin_replay_remote","title":"remote SPIN replay","source":"built-in reviewed SPIN operation"}, auto_continue=auto_continue)
+        except BaseException:
+            if created:
+                with contextlib.suppress(Exception):
+                    await self.resource_manager.release_handle(session_id, str(handle["id"]))
+            raise
 
     async def start_artifact_transfer(self, *, session_id: str, source: Mapping[str, Any], destination: Mapping[str, Any], auto_continue: bool = True) -> Mapping[str, Any]:
         self.recovery_gate.require_ready()

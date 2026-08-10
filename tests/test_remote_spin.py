@@ -15,15 +15,50 @@ def test_spin_validation_rejects_unsafe_source_and_invalid_limits():
 
 
 @pytest.mark.asyncio
-async def test_spin_plan_pins_replay_to_session_reservation(db, tmp_path):
-    service = ExecutionService(db=db, engine=SimpleNamespace(), workspace=tmp_path, catalog=SimpleNamespace(), execution_root=tmp_path / "runs")
+async def test_spin_plan_pins_replay_to_session_retained_handle(db, tmp_path):
+    resources = SimpleNamespace(
+        acquire_ydb_handle=AsyncMock(return_value={"id": "ydb-handle"}),
+        _resolve_handle_lease=AsyncMock(return_value={
+            "id": "ydb-handle", "host_id": "builder-1",
+            "lease": {"id": "lease-1", "fencing_token": 7},
+        }),
+        release_handle=AsyncMock(),
+    )
+    service = ExecutionService(db=db, engine=SimpleNamespace(), workspace=tmp_path,
+                               catalog=SimpleNamespace(), execution_root=tmp_path / "runs",
+                               resource_manager=resources)
     service._start_serialized = AsyncMock(return_value={"id": "e"})
     await service.start_spin_verify(session_id="s-1", model="init { skip }")
     plan = service._start_serialized.await_args.kwargs["plan"]
-    assert plan["session_reservation"] == {"pool": "ydb-builders", "worktree": "spin:s-1"}
+    assert plan["retained_handle_ids"] == ["ydb-handle"]
+    assert plan["resource_hosts"] == {"session": "builder-1"}
+    assert "session_reservation" not in plan
     assert plan["steps"][0]["executable"] == "/usr/bin/spin"
     await service.start_spin_replay(session_id="s-1", run_id=plan["spin"]["run_id"])
-    assert service._start_serialized.await_args.kwargs["plan"]["session_reservation"] == plan["session_reservation"]
+    replay = service._start_serialized.await_args.kwargs["plan"]
+    assert replay["retained_handle_ids"] == plan["retained_handle_ids"]
+    assert replay["resource_hosts"] == plan["resource_hosts"]
+    assert resources.acquire_ydb_handle.await_count == 2
+    assert resources.release_handle.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_spin_failed_start_releases_only_a_new_session_handle(db, tmp_path):
+    resources = SimpleNamespace(
+        acquire_ydb_handle=AsyncMock(return_value={"id": "new-handle"}),
+        _resolve_handle_lease=AsyncMock(return_value={
+            "id": "new-handle", "host_id": "builder-1",
+            "lease": {"id": "lease-1", "fencing_token": 7},
+        }),
+        release_handle=AsyncMock(),
+    )
+    service = ExecutionService(db=db, engine=SimpleNamespace(), workspace=tmp_path,
+                               catalog=SimpleNamespace(), execution_root=tmp_path / "runs",
+                               resource_manager=resources)
+    service._start_serialized = AsyncMock(side_effect=RuntimeError("no row"))
+    with pytest.raises(RuntimeError, match="no row"):
+        await service.start_spin_verify(session_id="s-1", model="init { skip }")
+    resources.release_handle.assert_awaited_once_with("s-1", "new-handle")
 
 
 def test_remote_spin_prepare_is_fenced_and_retained(tmp_path, monkeypatch):

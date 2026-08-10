@@ -171,7 +171,11 @@ async def test_ydb_test_plan_does_not_reject_test_owned_error_text(
     service = ExecutionService(
         db=db, engine=_engine(), workspace=tmp_path, catalog=SimpleNamespace(),
         execution_root=tmp_path / "runs",
-        resource_manager=SimpleNamespace(acquire_ydb_handle=AsyncMock(return_value={"id": "ydb-handle"})),
+        resource_manager=SimpleNamespace(
+            acquire_ydb_handle=AsyncMock(return_value={"id": "ydb-handle"}),
+            _resolve_handle_lease=AsyncMock(return_value={"id": "ydb-handle", "host_id": "builder-1", "lease": {"id": "lease-1", "fencing_token": 7}}),
+            release_handle=AsyncMock(),
+        ),
     )
     service._start_serialized = AsyncMock(return_value={"id": "exec-ydb"})
 
@@ -180,6 +184,8 @@ async def test_ydb_test_plan_does_not_reject_test_owned_error_text(
     )
 
     plan = service._start_serialized.await_args.kwargs["plan"]
+    assert plan["retained_handle_ids"] == ["ydb-handle"]
+    assert plan["resource_hosts"] == {"session": "builder-1"}
     assert plan["result"]["required_output"] == ["GOOD", "Ok"]
     assert plan["result"]["forbidden_output"] == []
 
@@ -195,7 +201,11 @@ async def test_ydb_make_publishes_one_confined_output_with_explicit_build_type(
     })
     service = ExecutionService(db=db, engine=_engine(), workspace=tmp_path,
                                catalog=SimpleNamespace(), execution_root=tmp_path / "runs",
-                               resource_manager=SimpleNamespace(acquire_ydb_handle=AsyncMock(return_value={"id": "ydb-handle"})))
+                               resource_manager=SimpleNamespace(
+                                   acquire_ydb_handle=AsyncMock(return_value={"id": "ydb-handle"}),
+                                   _resolve_handle_lease=AsyncMock(return_value={"id": "ydb-handle", "host_id": "builder-1", "lease": {"id": "lease-1", "fencing_token": 7}}),
+                                   release_handle=AsyncMock(),
+                               ))
     service._start_serialized = AsyncMock(return_value={"id": "exec-ydb"})
 
     await service.start_ydb(session_id=owner, kind="ydb_make", worktree=str(worktree),
@@ -217,6 +227,35 @@ async def test_ydb_make_publishes_one_confined_output_with_explicit_build_type(
     with pytest.raises(ValueError, match="publish output path"):
         await service.start_ydb(session_id=owner, kind="ydb_make", worktree=str(worktree),
                                 args=[], publish={"output_path": "../secret"})
+
+
+@pytest.mark.asyncio
+async def test_ydb_failed_start_releases_only_a_new_session_handle(
+    db, owner, tmp_path, monkeypatch,
+):
+    worktree = tmp_path / "ydb"
+    monkeypatch.setattr("nerve.executions.service.validate_worktree", lambda *_args: worktree)
+    monkeypatch.setattr("nerve.executions.service.ydb_snapshot", lambda _top: {
+        "snapshot_id": "a" * 40, "head": "b" * 40, "pack": b"pack",
+    })
+    resources = SimpleNamespace(
+        acquire_ydb_handle=AsyncMock(return_value={"id": "new-handle"}),
+        _resolve_handle_lease=AsyncMock(return_value={
+            "id": "new-handle", "host_id": "builder-1",
+            "lease": {"id": "lease-1", "fencing_token": 7},
+        }),
+        release_handle=AsyncMock(),
+    )
+    service = ExecutionService(db=db, engine=_engine(), workspace=tmp_path,
+                               catalog=SimpleNamespace(), execution_root=tmp_path / "runs",
+                               resource_manager=resources)
+    service._start_serialized = AsyncMock(side_effect=RuntimeError("no row"))
+
+    with pytest.raises(RuntimeError, match="no row"):
+        await service.start_ydb(session_id=owner, kind="ydb_make",
+                                worktree=str(worktree), args=[])
+
+    resources.release_handle.assert_awaited_once_with(owner, "new-handle")
 
 
 @pytest.mark.asyncio
