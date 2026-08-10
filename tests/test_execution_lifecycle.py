@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import pytest_asyncio
@@ -158,6 +158,7 @@ async def test_ydb_test_plan_does_not_reject_test_owned_error_text(
 @pytest.mark.asyncio
 async def test_artifact_transfer_builds_one_or_two_resource_slots(db, owner, tmp_path):
     inventory = SimpleNamespace(local_artifact_roots={"control": tmp_path})
+    inventory.members = lambda pool: [pool + "-host"]
     service = ExecutionService(
         db=db, engine=_engine(), workspace=tmp_path, catalog=SimpleNamespace(),
         resource_manager=SimpleNamespace(inventory=inventory),
@@ -188,6 +189,31 @@ async def test_artifact_transfer_builds_one_or_two_resource_slots(db, owner, tmp
             source={"host": "localhost", "artifact_root": "control", "path": "a.bin"},
             destination={"host": "localhost", "artifact_root": "control", "path": "b.bin"},
         )
+
+
+@pytest.mark.asyncio
+async def test_artifact_transfer_validates_remote_endpoint_before_start(db, owner, tmp_path):
+    inventory = SimpleNamespace(local_artifact_roots={"control": tmp_path})
+    inventory.members = lambda _pool: ["host"]
+    backend = _engine()
+    backend.validate_artifact_endpoint = Mock(
+        side_effect=ValueError("artifact root is not configured"),
+    )
+    service = ExecutionService(
+        db=db, engine=backend, workspace=tmp_path, catalog=SimpleNamespace(),
+        backend=backend,
+        resource_manager=SimpleNamespace(inventory=inventory),
+    )
+    service._start_serialized = AsyncMock(return_value={"id": "must-not-start"})
+
+    with pytest.raises(ValueError, match="artifact root is not configured"):
+        await service.start_artifact_transfer(
+            session_id=owner,
+            source={"host": "localhost", "artifact_root": "control", "path": "a.bin"},
+            destination={"pool": "workers", "artifact_root": "missing", "path": "b.bin"},
+        )
+
+    service._start_serialized.assert_not_awaited()
 
 
 @pytest.mark.asyncio

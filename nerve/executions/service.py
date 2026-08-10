@@ -166,6 +166,17 @@ class ExecutionService:
         for local, root in ((source_local, sr), (destination_local, dr)):
             if local and root not in local_roots:
                 raise ValueError("artifact transfer local artifact root is not configured")
+        validate_remote = getattr(self.backend, "validate_artifact_endpoint", None)
+        for local, pool, root in (
+            (source_local, sp, sr), (destination_local, dp, dr),
+        ):
+            if not local:
+                if callable(validate_remote):
+                    validate_remote(pool, root)
+                else:
+                    # Even backends without an endpoint-specific validator must
+                    # reject unknown pools before durable queue state is made.
+                    self.resource_manager.inventory.members(pool)
         resources = ({"destination": dp} if source_local else {"source": sp} if destination_local else {"source": sp, "destination": dp})
         plan = {"kind": "artifact_transfer", "profile_version": "1", "profile_hash": "built-in-artifact-transfer-v1",
                 "resources": resources, "artifact_transfer": {"transfer_id": "transfer-" + uuid.uuid4().hex, "source_path": sx, "source_root": sr, "source_local": source_local, "destination_path": dx, "destination_root": dr, "destination_local": destination_local},

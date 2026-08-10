@@ -31,6 +31,7 @@ def _artifact_backend(tmp_path, supervisor):
     inventory = type("Inventory", (), {
         "hosts": {"worker-1": {"connection_ref": "worker"}},
         "local_artifact_roots": {"control": local_root},
+        "members": lambda _self, pool: ["worker-1"] if pool == "workers" else [],
     })()
     return SshExecutionBackend(
         inventory=inventory, connections=catalog, supervisor=supervisor,
@@ -189,6 +190,14 @@ def test_artifact_frame_allows_binary_only_for_the_fixed_put_operation():
         OpenSshSupervisor._frame({"version": 1, "operation": "artifact_put"}, payload)
     )
     assert request["operation"] == "artifact_put" and received == payload
+
+
+def test_artifact_endpoint_validation_rejects_unknown_root_before_lease(tmp_path):
+    backend, _local_root = _artifact_backend(tmp_path, SimpleNamespace())
+
+    backend.validate_artifact_endpoint("workers", "artifacts")
+    with pytest.raises(SshTransportError, match="not configured for every host"):
+        backend.validate_artifact_endpoint("workers", "missing")
 
 
 def test_remote_supervisor_monitor_records_success_and_failure_exit_codes(tmp_path):

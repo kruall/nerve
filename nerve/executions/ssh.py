@@ -281,6 +281,19 @@ class SshExecutionBackend:
         self._jobs: dict[str, tuple[SshConnection, str, int, str]] = {}
         self._transfers: dict[str, tuple[SshConnection, Mapping[str, Any], SshConnection, Mapping[str, Any], str]] = {}
 
+    def validate_artifact_endpoint(self, pool: str, artifact_root: str) -> None:
+        """Reject unusable reviewed endpoints before an execution can queue."""
+        members = self.inventory.members(pool)
+        if not members:
+            raise SshTransportError("artifact transfer pool has no hosts")
+        for host_id in members:
+            host = self.inventory.hosts.get(host_id, {})
+            connection = self.connections.resolve(host.get("connection_ref"))
+            if artifact_root not in connection.artifact_roots:
+                raise SshTransportError(
+                    "artifact transfer root is not configured for every host in the pool"
+                )
+
     def _local_artifact(self, root_id: Any, relative: Any, *, output: bool) -> Path:
         roots = getattr(self.inventory, "local_artifact_roots", {})
         root = roots.get(root_id)
