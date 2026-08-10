@@ -119,6 +119,8 @@ YDB_FILE_LIST_SCHEMA = {"type": "object", "properties": {"path": {"type": "strin
 YDB_FILE_FIND_SCHEMA = {"type": "object", "properties": {"root": {"type": "string", "default": "."}, "pattern": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 200}}, "required": ["pattern"], "additionalProperties": False}
 YDB_FILE_READ_SCHEMA = {"type": "object", "properties": {"path": {"type": "string"}, "offset": {"type": "integer", "minimum": 0, "default": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 131072, "default": 65536}}, "required": ["path"], "additionalProperties": False}
 YDB_HOST_RELEASE_SCHEMA = {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
+SPIN_VERIFY_REMOTE_SCHEMA = {"type":"object","properties":{"model":{"type":"string"},"profile":{"type":"string","enum":["exhaustive","bitstate"],"default":"exhaustive"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":300,"default":60},"memory_mb":{"type":"integer","minimum":64,"maximum":8192,"default":512},"max_depth":{"type":"integer","minimum":100,"maximum":10000000,"default":100000},"hash_bits":{"type":"integer","minimum":10,"maximum":36,"default":24},"property_name":{"type":"string"},"detached":{"type":"boolean","default":False}},"required":["model"],"additionalProperties":False}
+SPIN_REPLAY_REMOTE_SCHEMA = {"type":"object","properties":{"run_id":{"type":"string"},"detached":{"type":"boolean","default":False}},"required":["run_id"],"additionalProperties":False}
 
 EXECUTION_STATUS_SCHEMA = {
     "type": "object",

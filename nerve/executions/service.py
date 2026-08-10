@@ -28,6 +28,7 @@ from nerve.executions.backend import (
 from nerve.executions.catalog import CompiledExecutionPlan, ExecutionCatalog
 from nerve.executions.public import public_execution
 from nerve.executions.ydb import snapshot as ydb_snapshot, validate_worktree
+from nerve.executions.spin import validate_request as validate_spin_request
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,10 @@ def _duration_ms(row: Mapping[str, Any]) -> int | None:
     start = row.get("started_at") or row.get("queued_at")
     end = row.get("finished_at")
     if not start or not end:
+        return None
+    try:
+        return max(0, int((datetime.fromisoformat(str(end)) - datetime.fromisoformat(str(start))).total_seconds() * 1000))
+    except (TypeError, ValueError):
         return None
 
 
@@ -54,10 +59,6 @@ def _bind_session_reservation_slot(
     if len(slots) != 1:
         raise ValueError("session reservation must map to exactly one resource slot")
     return {**lease, "slot": slots[0]}
-    try:
-        return max(0, int((datetime.fromisoformat(str(end)) - datetime.fromisoformat(str(start))).total_seconds() * 1000))
-    except (TypeError, ValueError):
-        return None
 
 
 class ExecutionService:
@@ -133,6 +134,7 @@ class ExecutionService:
             with contextlib.suppress(OSError):
                 pack_path.unlink()
             raise
+
         snap["pack_path"] = str(pack_path)
         snap["pack_length"] = len(pack)
         snap["pack_sha256"] = hashlib.sha256(pack).hexdigest()
@@ -159,6 +161,26 @@ class ExecutionService:
             with contextlib.suppress(OSError):
                 pack_path.unlink()
             raise
+
+    async def start_spin_verify(self, *, session_id: str, model: Any, profile: Any = "exhaustive", timeout_seconds: Any = 60, memory_mb: Any = 512, max_depth: Any = 100_000, hash_bits: Any = 24, property_name: Any = None, auto_continue: bool = True) -> Mapping[str, Any]:
+        spec = validate_spin_request(model=model, profile=profile, timeout_seconds=timeout_seconds, memory_mb=memory_mb, max_depth=max_depth, hash_bits=hash_bits, property_name=property_name)
+        run_id = "spin-" + uuid.uuid4().hex
+        # ``spin -run`` performs generator, compiler, and verifier lifecycle
+        # without accepting a shell fragment.  These are the documented pan
+        # flags: exhaustive by default; bitstate only when explicitly chosen.
+        args = ["-run", "-a", f"-m{spec['max_depth']}", f"-w{spec['hash_bits']}", f"-DMEMLIM={spec['memory_mb']}"]
+        if spec["profile"] == "bitstate":
+            args.append("-DBITSTATE")
+        if spec["property_name"]:
+            args.extend(["-N", spec["property_name"]])
+        args.append("model.pml")
+        plan = {"kind":"spin_verify_remote", "profile_version":"1", "profile_hash":"built-in-spin-remote-v1", "arguments":{k:v for k,v in spec.items() if k != "model"}, "resources":{"session":"ydb-builders"}, "session_reservation":{"pool":"ydb-builders", "worktree":"spin:" + session_id}, "spin":{**spec, "run_id":run_id, "retention_seconds":86400}, "steps":[{"id":"spin", "transport":"resource", "resource_slot":"session", "executable":"/usr/bin/spin", "argv":[{"type":"literal", "value":x} for x in args], "cwd":"workspace"}], "result":{"success_exit_codes":[0]}, "timeout_seconds":spec["timeout_seconds"], "cancellation":{"mode":"terminate", "grace_seconds":10, "run_cleanup":False}}
+        return await self._start_serialized(session_id=session_id, plan=plan, profile_snapshot={"kind":"spin_verify_remote","title":"remote SPIN verification","source":"built-in reviewed SPIN operation"}, auto_continue=auto_continue)
+
+    async def start_spin_replay(self, *, session_id: str, run_id: Any, auto_continue: bool = True) -> Mapping[str, Any]:
+        if not isinstance(run_id, str) or not run_id.startswith("spin-") or not run_id[5:].isalnum(): raise ValueError("invalid SPIN run id")
+        plan = {"kind":"spin_replay_remote", "profile_version":"1", "profile_hash":"built-in-spin-remote-v1", "resources":{"session":"ydb-builders"}, "session_reservation":{"pool":"ydb-builders", "worktree":"spin:" + session_id}, "spin":{"run_id":run_id, "retention_seconds":86400}, "steps":[{"id":"spin", "transport":"resource", "resource_slot":"session", "executable":"/usr/bin/spin", "argv":[{"type":"literal", "value":x} for x in ["-t", "-p", "-g", "-l", "model.pml"]], "cwd":"workspace"}], "result":{"success_exit_codes":[0]}, "timeout_seconds":30, "cancellation":{"mode":"terminate", "grace_seconds":10, "run_cleanup":False}}
+        return await self._start_serialized(session_id=session_id, plan=plan, profile_snapshot={"kind":"spin_replay_remote","title":"remote SPIN replay","source":"built-in reviewed SPIN operation"}, auto_continue=auto_continue)
 
     async def start_artifact_transfer(self, *, session_id: str, source: Mapping[str, Any], destination: Mapping[str, Any], auto_continue: bool = True) -> Mapping[str, Any]:
         """Persist a fenced remote/local transfer plan; endpoints have no coordinates."""
@@ -643,6 +665,13 @@ class ExecutionService:
                 result["missing_output"] = missing_output
                 result["forbidden_output"] = present_forbidden
                 result["summary"] = "textual result validation failed"
+        if plan.get("kind") == "spin_verify_remote":
+            output = "".join(str(entry.get("text", "")) for entry in (await self.db.tail_execution_logs(execution_id, limit=2000)).get("entries", []))[-256 * 1024:]
+            has_error = bool(__import__("re").search(r"errors:\s*[1-9][0-9]*", output, __import__("re").I))
+            profile = plan.get("spin", {}).get("profile")
+            result["verification_status"] = "counterexample" if has_error else ("inconclusive" if profile == "bitstate" else ("verified" if status == "succeeded" else "tool_error"))
+            if has_error:
+                status = "failed"; result["summary"] = "SPIN found a counterexample"
         if status == "succeeded":
             missing: list[str] = []
             artifacts = plan.get("artifacts", {})

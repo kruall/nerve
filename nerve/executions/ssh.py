@@ -165,6 +165,7 @@ class SshConnectionCatalog:
 
 class RemoteSupervisor(Protocol):
     async def sync(self, connection: SshConnection, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
+    async def spin_prepare(self, connection: SshConnection, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
     async def start(self, connection: SshConnection, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
     async def status(self, connection: SshConnection, job_id: str, fencing_token: int, root: str) -> Mapping[str, Any]: ...
     async def tail(self, connection: SshConnection, job_id: str, fencing_token: int, cursor: int, root: str) -> Mapping[str, Any]: ...
@@ -278,6 +279,7 @@ class OpenSshSupervisor:
     async def files(self, connection, request): return await self._rpc(connection, "files", request)
     async def artifact_put(self, connection, request): return await self._rpc(connection, "artifact_put", request)
     async def artifact_get(self, connection, request): return await self._rpc(connection, "artifact_get", request)
+    async def spin_prepare(self, connection, request): return await self._rpc(connection, "spin_prepare", request)
     async def ydb_publish(self, connection, request): return await self._rpc(connection, "ydb_publish", request)
     async def artifact_transfer_prepare_destination(self, connection, request): return await self._rpc(connection, "artifact_transfer_prepare_destination", request)
     async def artifact_transfer_prepare_source(self, connection, request): return await self._rpc(connection, "artifact_transfer_prepare_source", request)
@@ -403,6 +405,12 @@ class SshExecutionBackend:
         root = _remote_path(str(plan.get("remote_root", connection.remote_roots[0])), connection.remote_roots)
         remote_workspace = root
         snapshot = plan.get("ydb_snapshot")
+        spin = plan.get("spin")
+        spin_version = None
+        if isinstance(spin, Mapping):
+            reply = await self.supervisor.spin_prepare(connection, {"execution_id": execution_id, "lease_id": next(x["id"] for x in plan["selected_leases"] if x.get("slot") == step.get("resource_slot")), "fencing_token": token, "root": root, "session_id": str(plan.get("session_id", "")), **dict(spin)})
+            remote_workspace = _remote_path(str(reply.get("workspace") or ""), connection.remote_roots)
+            spin_version = str(reply.get("spin_version") or "unavailable")[:256]
         # Recovery attaches to the durable supervisor job; it must never
         # rewrite that job's checkout while it may still be compiling.
         if isinstance(snapshot, Mapping) and not plan.get("_remote_existing_job"):
@@ -451,6 +459,12 @@ class SshExecutionBackend:
                     for entry in tail.get("entries", []):
                         await emit(str(entry.get("stream", "stdout")), str(entry.get("text", "")))
                     result = BackendResult(status.get("exit_code"), summary=str(status.get("summary", "remote job finished")), error=status.get("error"))
+                    if spin_version is not None:
+                        result = BackendResult(
+                            result.exit_code, signal=result.signal, error=result.error,
+                            summary=(result.summary + "; SPIN " + spin_version)[:512],
+                            spin_version=spin_version,
+                        )
                     publish = plan.get("ydb_publish")
                     if result.exit_code == 0 and isinstance(publish, Mapping):
                         await emit("stdout", "network stage ydb_publish started\n")

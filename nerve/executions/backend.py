@@ -30,6 +30,7 @@ class BackendResult:
     signal: int | None = None
     summary: str = ""
     error: str | None = None
+    spin_version: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -37,6 +38,7 @@ class BackendResult:
             "signal": self.signal,
             "summary": self.summary,
             "error": self.error,
+            **({"spin_version": self.spin_version} if self.spin_version is not None else {}),
         }
 
 

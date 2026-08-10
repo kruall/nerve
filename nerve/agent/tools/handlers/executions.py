@@ -25,6 +25,7 @@ from nerve.agent.tools.schemas import (
     YDB_FILE_FIND_SCHEMA,
     YDB_FILE_READ_SCHEMA,
     YDB_HOST_RELEASE_SCHEMA,
+    SPIN_VERIFY_REMOTE_SCHEMA, SPIN_REPLAY_REMOTE_SCHEMA,
 )
 from nerve.executions import ExecutionCatalog, OperationValidationError
 from nerve.executions.public import DEFAULT_LOG_TAIL_LINES, public_execution, public_log_tail
@@ -210,6 +211,19 @@ async def ydb_host_release_handler(ctx: ToolContext, args: dict) -> ToolResult:
         return ToolResult.text("Could not safely release this session's YDB host.", is_error=True)
     return _json({"released": released})
 
+async def _spin_handler(ctx: ToolContext, args: dict, replay: bool) -> ToolResult:
+    service = _service(ctx)
+    if service is None: return ToolResult.text("Execution lifecycle service is unavailable.", is_error=True)
+    try:
+        row = await (service.start_spin_replay(session_id=ctx.session_id, run_id=args.get("run_id"), auto_continue=bool(args.get("detached", False))) if replay else service.start_spin_verify(session_id=ctx.session_id, model=args.get("model"), profile=args.get("profile", "exhaustive"), timeout_seconds=args.get("timeout_seconds", 60), memory_mb=args.get("memory_mb", 512), max_depth=args.get("max_depth", 100000), hash_bits=args.get("hash_bits", 24), property_name=args.get("property_name"), auto_continue=bool(args.get("detached", False))))
+        if not args.get("detached", False): row = await service.join_execution(execution_id=str(row["id"]), session_id=ctx.session_id)
+    except Exception as exc:
+        logger.warning("SPIN operation rejected (%s)", type(exc).__name__); return ToolResult.text("Could not start safe remote SPIN operation.", is_error=True)
+    return _json({"kind": "spin_replay_remote" if replay else "spin_verify_remote", "execution": public_execution(row)})
+
+async def spin_verify_remote_handler(ctx: ToolContext, args: dict) -> ToolResult: return await _spin_handler(ctx, args, False)
+async def spin_replay_remote_handler(ctx: ToolContext, args: dict) -> ToolResult: return await _spin_handler(ctx, args, True)
+
 
 def _service(ctx: ToolContext):
     return ctx.execution_service or getattr(ctx.engine, "execution_service", None)
@@ -296,6 +310,8 @@ EXECUTION_SPECS = [
     ToolSpec("ydb_file_find", "Find bounded paths in this session's synchronized YDB checkout.", YDB_FILE_FIND_SCHEMA, ydb_file_find_handler),
     ToolSpec("ydb_file_read", "Read bounded UTF-8 text from this session's synchronized YDB checkout.", YDB_FILE_READ_SCHEMA, ydb_file_read_handler),
     ToolSpec("ydb_host_release", "Release this session's idle YDB builder host.", YDB_HOST_RELEASE_SCHEMA, ydb_host_release_handler),
+    ToolSpec("spin_verify_remote", "Safely verify bounded Promela source on the session-affine ydb-builders host.", SPIN_VERIFY_REMOTE_SCHEMA, spin_verify_remote_handler),
+    ToolSpec("spin_replay_remote", "Replay a retained SPIN counterexample on its session-affine builder host.", SPIN_REPLAY_REMOTE_SCHEMA, spin_replay_remote_handler),
     ToolSpec(
         "execution_kind_list",
         "List compact summaries of configured declarative execution kinds. Use describe only for the kind you need.",

@@ -35,6 +35,7 @@ _MAX_PACK = 512 * 1024 * 1024
 # deployed everywhere.  It is not advertised as a large-artifact operation.
 _MAX_ARTIFACT_GET = 32 * 1024
 _TERMINAL_STATE_BY_UNKNOWN_EXIT_CODE = "failed"
+_SPIN_RETENTION_SECONDS = 24 * 60 * 60
 
 
 def _decode_frame(raw: bytes) -> tuple[dict[str, Any], bytes]:
@@ -54,7 +55,7 @@ def _decode_frame(raw: bytes) -> tuple[dict[str, Any], bytes]:
     if not isinstance(request, dict) or request.get("version") != _VERSION:
         raise ValueError("unsupported frame version")
     operation = request.get("operation")
-    if operation not in {"start", "sync", "artifact_put", "artifact_get", "ydb_publish", "artifact_transfer_prepare_destination", "artifact_transfer_prepare_source", "artifact_transfer_receive", "artifact_transfer_status", "artifact_transfer_cancel", "artifact_transfer_cleanup", "status", "cancel", "tail", "files"}:
+    if operation not in {"start", "sync", "spin_prepare", "artifact_put", "artifact_get", "ydb_publish", "artifact_transfer_prepare_destination", "artifact_transfer_prepare_source", "artifact_transfer_receive", "artifact_transfer_status", "artifact_transfer_cancel", "artifact_transfer_cleanup", "status", "cancel", "tail", "files"}:
         raise ValueError("invalid frame operation")
     if pack_size and operation not in {"sync", "artifact_put"}:
         raise ValueError("binary pack is only permitted for sync or artifact_put")
@@ -393,6 +394,53 @@ def _sync(request: Mapping[str, Any], pack: bytes) -> dict[str, Any]:
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     return {"ok": True, "workspace": str(target), "snapshot_id": ident}
+
+
+def _cleanup_expired_spin_runs(root: Path, now: float) -> None:
+    """Best-effort expiry of retained source; never follows links outside root."""
+    runs = root / ".nerve-spin-runs"
+    if not runs.is_dir():
+        return
+    for session_dir in runs.iterdir():
+        if not session_dir.is_dir() or session_dir.is_symlink():
+            continue
+        for run_dir in session_dir.iterdir():
+            metadata = run_dir / "retention.json"
+            try:
+                expires_at = float(json.loads(metadata.read_text(encoding="utf-8"))["expires_at"])
+            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+                continue
+            if now >= expires_at and run_dir.is_dir() and not run_dir.is_symlink():
+                shutil.rmtree(run_dir)
+        with contextlib.suppress(OSError):
+            session_dir.rmdir()
+
+
+def _spin_prepare(request: Mapping[str, Any]) -> dict[str, Any]:
+    """Persist only bounded Promela source below the current fenced lease."""
+    root = _safe_root(str(request["root"])); root.mkdir(parents=True, exist_ok=True)
+    session, run_id, token = str(request.get("session_id") or ""), str(request.get("run_id") or ""), int(request["fencing_token"])
+    if not session or not session.replace("-", "").isalnum() or not run_id.startswith("spin-") or not run_id[5:].isalnum(): raise ValueError("invalid SPIN run identity")
+    retention = request.get("retention_seconds", _SPIN_RETENTION_SECONDS)
+    if isinstance(retention, bool) or not isinstance(retention, int) or not 60 <= retention <= _SPIN_RETENTION_SECONDS:
+        raise ValueError("invalid SPIN retention")
+    now = time.time(); _cleanup_expired_spin_runs(root, now)
+    model = request.get("model")
+    if model is not None and (not isinstance(model, str) or not model or len(model.encode()) > 128 * 1024 or "\0" in model or re.search(r"^\s*#\s*include|\bc_(?:code|expr|decl|state|track)\b", model, re.M)): raise ValueError("invalid bounded SPIN source")
+    ident = hashlib.sha256(session.encode()).hexdigest()[:24]; fences = root / ".nerve-spin-fences"; fences.mkdir(parents=True, exist_ok=True); fence = fences / (ident + ".json")
+    if fence.exists() and int(json.loads(fence.read_text()).get("fencing_token", -1)) > token: raise PermissionError("stale fencing token")
+    temporary = fence.with_suffix(".tmp"); temporary.write_text(json.dumps({"fencing_token": token, "lease_id": str(request.get("lease_id", ""))})); os.chmod(temporary, 0o600); temporary.replace(fence)
+    directory = root / ".nerve-spin-runs" / ident / run_id; directory.mkdir(parents=True, mode=0o700, exist_ok=True); source = directory / "model.pml"
+    if model is not None:
+        temporary = source.with_suffix(".tmp"); temporary.write_text(model, encoding="utf-8"); os.chmod(temporary, 0o600); temporary.replace(source)
+    if not source.is_file(): raise FileNotFoundError("retained SPIN run is unavailable")
+    metadata = directory / "retention.json"
+    temporary = metadata.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"expires_at": now + retention}), encoding="utf-8")
+    os.chmod(temporary, 0o600); temporary.replace(metadata)
+    try: version = subprocess.run(["/usr/bin/spin", "-V"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=5, check=False).stdout.strip()[:256]
+    except OSError: version = "unavailable"
+    return {"ok": True, "workspace": str(directory), "spin_version": version, "expires_at": int(now + retention)}
 
 
 def _status(request: Mapping[str, Any]) -> dict[str, Any]:
@@ -735,7 +783,7 @@ def rpc() -> None:
         request, pack = _decode_frame(sys.stdin.buffer.read())
         operation = request.pop("operation")
         request.pop("version")
-        handlers = {"start": _start, "status": _status, "cancel": _cancel, "tail": _tail, "files": _files, "artifact_get": _artifact_get, "ydb_publish": _ydb_publish, "artifact_transfer_prepare_destination": _artifact_transfer_prepare_destination, "artifact_transfer_prepare_source": _artifact_transfer_prepare_source, "artifact_transfer_receive": _artifact_transfer_receive, "artifact_transfer_status": _artifact_transfer_status, "artifact_transfer_cancel": _artifact_transfer_cancel, "artifact_transfer_cleanup": _artifact_transfer_cleanup}
+        handlers = {"start": _start, "spin_prepare": _spin_prepare, "status": _status, "cancel": _cancel, "tail": _tail, "files": _files, "artifact_get": _artifact_get, "ydb_publish": _ydb_publish, "artifact_transfer_prepare_destination": _artifact_transfer_prepare_destination, "artifact_transfer_prepare_source": _artifact_transfer_prepare_source, "artifact_transfer_receive": _artifact_transfer_receive, "artifact_transfer_status": _artifact_transfer_status, "artifact_transfer_cancel": _artifact_transfer_cancel, "artifact_transfer_cleanup": _artifact_transfer_cleanup}
         result = _sync(request, pack) if operation == "sync" else (_artifact_put(request, pack) if operation == "artifact_put" else handlers[operation](request))
     except Exception as exc:
         # Keep errors useful to the control plane without turning this fixed

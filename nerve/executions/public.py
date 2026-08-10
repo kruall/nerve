@@ -146,7 +146,7 @@ def public_execution(raw: Mapping[str, Any]) -> dict[str, Any]:
     terminal = raw.get("result")
     if isinstance(terminal, Mapping):
         public_result: dict[str, Any] = {}
-        for key in ("outcome", "exit_code", "signal"):
+        for key in ("outcome", "exit_code", "signal", "verification_status", "spin_version"):
             value = _scalar(terminal.get(key))
             if value is not None:
                 public_result[key] = value
