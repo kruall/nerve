@@ -10,7 +10,7 @@ import os
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from nerve.agent.streaming import broadcaster
@@ -89,12 +89,27 @@ class ExecutionService:
         self._terminal_changed = asyncio.Condition()
         self.ydb_worktree_root = Path(ydb_worktree_root) if ydb_worktree_root else None
 
-    async def start_ydb(self, *, session_id: str, kind: str, worktree: str, args: list[str], auto_continue: bool = True) -> Mapping[str, Any]:
+    async def start_ydb(self, *, session_id: str, kind: str, worktree: str, args: list[str], build_type: str = "relwithdebinfo", publish: Mapping[str, Any] | None = None, auto_continue: bool = True) -> Mapping[str, Any]:
         """Start the two reviewed YDB commands; callers choose neither host nor SSH."""
-        if kind not in {"ydb_make", "ydb_test"} or not all(isinstance(x, str) and "\0" not in x for x in args):
+        if kind not in {"ydb_make", "ydb_test"} or build_type not in {"debug", "relwithdebinfo", "release", "profile"} or not all(isinstance(x, str) and "\0" not in x for x in args):
             raise ValueError("invalid YDB operation")
+        publish_path: PurePosixPath | None = None
+        if publish is not None:
+            if kind != "ydb_make" or not isinstance(publish, Mapping) or set(publish) != {"output_path"}:
+                raise ValueError("invalid YDB publish request")
+            output_path = publish.get("output_path")
+            path = PurePosixPath(output_path) if isinstance(output_path, str) else None
+            if path is None or not output_path or path.is_absolute() or ".." in path.parts or "\0" in output_path:
+                raise ValueError("invalid YDB publish output path")
+            publish_path = path
         top = validate_worktree(worktree, self.ydb_worktree_root)
         snap = ydb_snapshot(top)
+        published = (None if publish_path is None else {
+            "output_path": publish_path.as_posix(), "artifact_root": "artifacts",
+            "path": "ydb/" + hashlib.sha256(
+                (str(snap.get("snapshot_id")) + "\0" + publish_path.as_posix()).encode()
+            ).hexdigest()[:32] + "/" + publish_path.name,
+        })
         pack = snap.pop("pack")
         if not isinstance(pack, bytes):
             raise ValueError("YDB snapshot did not produce a binary pack")
@@ -118,11 +133,12 @@ class ExecutionService:
         snap["pack_length"] = len(pack)
         snap["pack_sha256"] = hashlib.sha256(pack).hexdigest()
         test = kind == "ydb_test"
-        argv = ["make", "--build", "relwithdebinfo"] + (["-tA"] if test else []) + list(args)
+        argv = ["make", "--build", build_type] + (["-tA"] if test else []) + list(args)
         plan = {"kind": kind, "profile_version": "1", "profile_hash": "built-in-ydb-v1",
-                "arguments": {"args": list(args)}, "resources": {"session": "ydb-builders"},
+                "arguments": {"args": list(args), "build_type": build_type}, "resources": {"session": "ydb-builders"},
                 "session_reservation": {"pool": "ydb-builders", "worktree": str(top)},
                 "ydb_snapshot": snap,
+                **({"ydb_publish": published} if published else {}),
                 "steps": [{"id": "ydb", "transport": "resource", "resource_slot": "session", "executable": "./ya", "argv": [{"type": "literal", "value": x} for x in argv], "cwd": "workspace"}],
                 # ya test writes test-owned stderr verbatim.  Valid passing
                 # tests can therefore contain words such as ERROR (for

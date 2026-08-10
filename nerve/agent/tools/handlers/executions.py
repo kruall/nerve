@@ -131,6 +131,8 @@ async def _ydb_handler(ctx: ToolContext, args: dict, kind: str) -> ToolResult:
             raise ValueError("args must be an array")
         started = await service.start_ydb(session_id=ctx.session_id, kind=kind,
                                           worktree=str(args.get("worktree") or ""), args=values,
+                                          build_type=str(args.get("build_type") or "relwithdebinfo"),
+                                          publish=args.get("publish"),
                                           auto_continue=bool(args.get("detached", False)))
         if not bool(args.get("detached", False)):
             started = await service.join_execution(execution_id=str(started["id"]), session_id=ctx.session_id)

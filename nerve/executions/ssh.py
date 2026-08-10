@@ -263,6 +263,7 @@ class OpenSshSupervisor:
     async def files(self, connection, request): return await self._rpc(connection, "files", request)
     async def artifact_put(self, connection, request): return await self._rpc(connection, "artifact_put", request)
     async def artifact_get(self, connection, request): return await self._rpc(connection, "artifact_get", request)
+    async def ydb_publish(self, connection, request): return await self._rpc(connection, "ydb_publish", request)
     async def artifact_transfer_prepare_destination(self, connection, request): return await self._rpc(connection, "artifact_transfer_prepare_destination", request)
     async def artifact_transfer_prepare_source(self, connection, request): return await self._rpc(connection, "artifact_transfer_prepare_source", request)
     async def artifact_transfer_receive(self, connection, request): return await self._rpc(connection, "artifact_transfer_receive", request)
@@ -434,7 +435,12 @@ class SshExecutionBackend:
                     tail = await self.supervisor.tail(connection, job_id, token, cursor, root)
                     for entry in tail.get("entries", []):
                         await emit(str(entry.get("stream", "stdout")), str(entry.get("text", "")))
-                    return BackendResult(status.get("exit_code"), summary=str(status.get("summary", "remote job finished")), error=status.get("error"))
+                    result = BackendResult(status.get("exit_code"), summary=str(status.get("summary", "remote job finished")), error=status.get("error"))
+                    publish = plan.get("ydb_publish")
+                    if result.exit_code == 0 and isinstance(publish, Mapping):
+                        reply = await self.supervisor.ydb_publish(connection, {"root": root, "lease_id": next(x["id"] for x in plan["selected_leases"] if x.get("slot") == step.get("resource_slot")), "fencing_token": token, "workspace": str(remote_workspace), **dict(publish)})
+                        await emit("stdout", "published artifact " + str(reply.get("artifact_root")) + "/" + str(reply.get("path")) + "\\n")
+                    return result
                 await asyncio.sleep(self.poll_seconds)
         finally:
             self._jobs.pop(execution_id, None)

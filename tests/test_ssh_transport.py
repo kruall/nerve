@@ -184,6 +184,25 @@ def test_remote_supervisor_artifact_put_is_fenced_confined_and_atomic(tmp_path):
         remote_supervisor._artifact_put({**request, "fencing_token": 6}, payload)
 
 
+def test_remote_supervisor_ydb_publish_is_fenced_and_confined(tmp_path):
+    workspace = tmp_path / "sessions" / "owner" / "snapshot"
+    source = workspace / "ydb/tools/ydb_bench/ydb_bench"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"benchmark")
+    request = {
+        "root": str(tmp_path), "workspace": str(workspace),
+        "artifact_root": "artifacts", "lease_id": "lease-a", "fencing_token": 7,
+        "output_path": "ydb/tools/ydb_bench/ydb_bench", "path": "ydb/hash/ydb_bench",
+    }
+    result = remote_supervisor._ydb_publish(request)
+    target = tmp_path / "artifacts" / "ydb/hash/ydb_bench"
+    assert result["path"] == "ydb/hash/ydb_bench" and target.read_bytes() == b"benchmark"
+    with pytest.raises(ValueError, match="source is unavailable"):
+        remote_supervisor._ydb_publish({**request, "output_path": "missing"})
+    with pytest.raises(ValueError, match="escapes"):
+        remote_supervisor._ydb_publish({**request, "output_path": "../secret"})
+
+
 def test_artifact_frame_allows_binary_only_for_the_fixed_put_operation():
     payload = b"x"
     request, received = remote_supervisor._decode_frame(

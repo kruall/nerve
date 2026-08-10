@@ -618,6 +618,29 @@ def _artifact_get(request: Mapping[str, Any]) -> dict[str, Any]:
     return {"ok": True, "size": size, "sha256": digest.hexdigest(), "data": base64.b64encode(b"".join(chunks)).decode("ascii")}
 
 
+def _ydb_publish(request: Mapping[str, Any]) -> dict[str, Any]:
+    """Atomically expose one regular file from a fenced YDB workspace."""
+    root = _safe_root(str(request["root"]))
+    artifact_root = _artifact_root(request)
+    _advance_artifact_fence(artifact_root, request)
+    workspace = _safe_root(str(request.get("workspace") or ""))
+    if workspace != root and root not in workspace.parents:
+        raise ValueError("YDB workspace escapes configured root")
+    relative = request.get("output_path")
+    source = _artifact_target(workspace, relative)
+    if not source.is_file() or source.is_symlink():
+        raise ValueError("YDB publish source is unavailable")
+    target = _artifact_target(artifact_root, request.get("path"))
+    temporary = target.with_name("." + target.name + ".nerve-publish-" + os.urandom(8).hex())
+    try:
+        shutil.copyfile(source, temporary)
+        os.chmod(temporary, 0o700)
+        temporary.replace(target)
+    finally:
+        with contextlib.suppress(FileNotFoundError): temporary.unlink()
+    return {"ok": True, "artifact_root": str(request["artifact_root"]), "path": str(request["path"]), "size": target.stat().st_size, "sha256": _stream_sha256(target)}
+
+
 def _transfer_dir(root: Path, ident: Any) -> Path:
     if not isinstance(ident, str) or not ident.startswith("transfer-") or not ident[9:].isalnum(): raise ValueError("invalid transfer id")
     value = root / ".nerve-transfers" / ident; value.mkdir(parents=True, mode=0o700, exist_ok=True); return value
@@ -712,7 +735,7 @@ def rpc() -> None:
         request, pack = _decode_frame(sys.stdin.buffer.read())
         operation = request.pop("operation")
         request.pop("version")
-        handlers = {"start": _start, "status": _status, "cancel": _cancel, "tail": _tail, "files": _files, "artifact_get": _artifact_get, "artifact_transfer_prepare_destination": _artifact_transfer_prepare_destination, "artifact_transfer_prepare_source": _artifact_transfer_prepare_source, "artifact_transfer_receive": _artifact_transfer_receive, "artifact_transfer_status": _artifact_transfer_status, "artifact_transfer_cancel": _artifact_transfer_cancel, "artifact_transfer_cleanup": _artifact_transfer_cleanup}
+        handlers = {"start": _start, "status": _status, "cancel": _cancel, "tail": _tail, "files": _files, "artifact_get": _artifact_get, "ydb_publish": _ydb_publish, "artifact_transfer_prepare_destination": _artifact_transfer_prepare_destination, "artifact_transfer_prepare_source": _artifact_transfer_prepare_source, "artifact_transfer_receive": _artifact_transfer_receive, "artifact_transfer_status": _artifact_transfer_status, "artifact_transfer_cancel": _artifact_transfer_cancel, "artifact_transfer_cleanup": _artifact_transfer_cleanup}
         result = _sync(request, pack) if operation == "sync" else (_artifact_put(request, pack) if operation == "artifact_put" else handlers[operation](request))
     except Exception as exc:
         # Keep errors useful to the control plane without turning this fixed

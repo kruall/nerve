@@ -156,6 +156,37 @@ async def test_ydb_test_plan_does_not_reject_test_owned_error_text(
 
 
 @pytest.mark.asyncio
+async def test_ydb_make_publishes_one_confined_output_with_explicit_build_type(
+    db, owner, tmp_path, monkeypatch,
+):
+    worktree = tmp_path / "ydb"
+    monkeypatch.setattr("nerve.executions.service.validate_worktree", lambda *_args: worktree)
+    monkeypatch.setattr("nerve.executions.service.ydb_snapshot", lambda _top: {
+        "snapshot_id": "a" * 40, "head": "b" * 40, "pack": b"pack",
+    })
+    service = ExecutionService(db=db, engine=_engine(), workspace=tmp_path,
+                               catalog=SimpleNamespace(), execution_root=tmp_path / "runs")
+    service._start_serialized = AsyncMock(return_value={"id": "exec-ydb"})
+
+    await service.start_ydb(session_id=owner, kind="ydb_make", worktree=str(worktree),
+                            args=["ydb/tools/ydb_bench"], build_type="profile",
+                            publish={"output_path": "ydb/tools/ydb_bench/ydb_bench"})
+
+    plan = service._start_serialized.await_args.kwargs["plan"]
+    assert plan["steps"][0]["argv"][:3] == [
+        {"type": "literal", "value": "make"},
+        {"type": "literal", "value": "--build"},
+        {"type": "literal", "value": "profile"},
+    ]
+    assert plan["ydb_publish"]["artifact_root"] == "artifacts"
+    assert plan["ydb_publish"]["path"].endswith("/ydb_bench")
+
+    with pytest.raises(ValueError, match="publish output path"):
+        await service.start_ydb(session_id=owner, kind="ydb_make", worktree=str(worktree),
+                                args=[], publish={"output_path": "../secret"})
+
+
+@pytest.mark.asyncio
 async def test_artifact_transfer_builds_one_or_two_resource_slots(db, owner, tmp_path):
     inventory = SimpleNamespace(local_artifact_roots={"control": tmp_path})
     inventory.members = lambda pool: [pool + "-host"]

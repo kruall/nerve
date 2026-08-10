@@ -109,6 +109,8 @@ RESOURCE_COMMAND_SCHEMA = {
 _YDB_OPERATION_PROPERTIES = {
     "worktree": {"type": "string", "description": "Configured local YDB Git worktree top-level"},
     "args": {"type": "array", "items": {"type": "string"}, "default": [], "description": "Additional ya argv elements"},
+    "build_type": {"type": "string", "enum": ["debug", "relwithdebinfo", "release", "profile"], "default": "relwithdebinfo", "description": "Reviewed ya build type"},
+    "publish": {"type": "object", "properties": {"output_path": {"type": "string", "description": "Relative file path below the YDB build workspace to publish"}}, "required": ["output_path"], "additionalProperties": False, "description": "Publish one built file into the configured remote artifact root"},
     "detached": {"type": "boolean", "default": False},
 }
 YDB_MAKE_SCHEMA = {"type": "object", "properties": _YDB_OPERATION_PROPERTIES, "required": ["worktree"], "additionalProperties": False}
