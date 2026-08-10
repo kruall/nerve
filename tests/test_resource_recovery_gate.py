@@ -219,6 +219,29 @@ async def test_processing_intent_with_handle_quarantines_its_host(db):
 
 
 @pytest.mark.asyncio
+async def test_payload_only_acquire_intent_quarantines_allocator_lease(db):
+    resources, gate = await _resources(db)
+    await db.create_session("session-1", source="web", backend="codex", status="idle")
+    allocator_id = "session-handles:session-1:crashed"
+    lease = await db.acquire_resource_lease(
+        lease_id="lease-payload-only", execution_id=allocator_id,
+        session_id="session-1", pool="builders", host_id="host-1",
+    )
+    assert lease is not None
+    await db.create_resource_recovery_intent({
+        "id": "payload-only-acquire", "kind": "acquire", "session_id": "session-1",
+        "payload": {"allocator_execution_id": allocator_id},
+    })
+
+    await gate.open(resources, RecoveryProbe(db), dispatch_continuations=False)
+
+    intent = await db.get_resource_recovery_intent("payload-only-acquire")
+    recovered = await db.get_resource_lease("lease-payload-only")
+    assert intent is not None and intent["operation_id"] is None and intent["state"] == "failed"
+    assert recovered is not None and recovered["state"] == "quarantined"
+
+
+@pytest.mark.asyncio
 async def test_normal_acquire_and_release_resume_only_after_gate_opens(db):
     resources, gate = await _resources(db)
     probe = RecoveryProbe(db)

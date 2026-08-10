@@ -50,6 +50,23 @@ class ResourceStore:
         row = await self.get_session_resource_handle(str(handle["id"])); assert row is not None
         return row
 
+    async def create_session_resource_handles(self, handles: list[Mapping[str, Any]]) -> None:
+        """Atomically retain a newly granted handle bundle.
+
+        Leases are allocated separately by the allocator.  Keeping all handle
+        rows in one transaction means a failed retention never makes a partial
+        bundle externally usable; the caller then releases every new lease.
+        """
+        now = utc_now_iso()
+        async with self._atomic():
+            for handle in handles:
+                await self.db.execute("""INSERT INTO session_resource_handles
+                    (id, session_id, pool, host_id, lease_id, fencing_token, state, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)""", (
+                    handle["id"], handle["session_id"], handle["pool"], handle["host_id"],
+                    handle["lease_id"], handle["fencing_token"], now, now,
+                ))
+
     async def update_session_resource_handle(self, handle_id: str, *, expected_state: str, state: str, release_reason: str | None = None) -> bool:
         if state not in {"active", "releasing", "released", "quarantined"}:
             raise ValueError("invalid handle state")

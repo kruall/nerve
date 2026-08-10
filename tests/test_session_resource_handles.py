@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 
 import pytest
 
@@ -237,3 +238,43 @@ async def test_wait_and_intent_updates_reject_unknown_states(db):
         await db.update_resource_wait_operation("wait-state", expected_state="pending", state="unknown")
     with pytest.raises(ValueError, match="invalid recovery intent state"):
         await db.update_resource_recovery_intent("intent-state", expected_state="prepared", state="unknown")
+
+
+@pytest.mark.asyncio
+async def test_batch_handle_retention_rolls_back_every_row_on_conflicting_lease(db):
+    """The R4 service can safely compensate leases after a failed batch write."""
+    await _operation(db)
+    first = _handle("batch-first")
+    conflicting = {**_handle("batch-conflicting")}
+
+    with pytest.raises(sqlite3.IntegrityError):
+        await db.create_session_resource_handles([first, conflicting])
+
+    assert await db.get_session_resource_handle("batch-first") is None
+    assert await db.get_session_resource_handle("batch-conflicting") is None
+    lease = await db.get_resource_lease("lease-a")
+    assert lease is not None and lease["state"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_batch_handle_retention_persists_every_member_with_independent_leases(db):
+    await _operation(db)
+    await db.seed_resource_host({"id": "host-b", "connection_ref": "ssh://host-b"})
+    second_lease = await db.acquire_resource_lease(
+        lease_id="lease-b", execution_id="operation-b", session_id="session-a",
+        pool="pool-b", host_id="host-b",
+    )
+    assert second_lease is not None
+    second = {
+        "id": "batch-second", "session_id": "session-a", "pool": "pool-b",
+        "host_id": "host-b", "lease_id": "lease-b",
+        "fencing_token": second_lease["fencing_token"],
+    }
+
+    await db.create_session_resource_handles([_handle("batch-first"), second])
+
+    rows = await db.list_session_resource_handles("session-a", states=("active",))
+    assert [(row["id"], row["lease_id"]) for row in rows] == [
+        ("batch-first", "lease-a"), ("batch-second", "lease-b"),
+    ]
+    assert all(row["created_at"] and row["updated_at"] for row in rows)

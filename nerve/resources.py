@@ -18,6 +18,13 @@ from nerve.utils.time import utc_now_iso
 class ResourceInventoryError(ValueError): pass
 
 
+class ResourceHandleOwnershipError(PermissionError):
+    """The stable response for an absent or foreign retained handle."""
+
+    def __init__(self) -> None:
+        super().__init__("resource handle does not belong to this session")
+
+
 class ResourceRecoveryUnavailable(RuntimeError):
     """The retryable response while durable startup recovery owns the subsystem."""
 
@@ -279,7 +286,7 @@ class LeaseService:
             handle = await self.db.get_session_resource_handle(str(intent["handle_id"]))
             if handle:
                 lease_ids.add(str(handle["lease_id"]))
-        operation_id = intent.get("operation_id")
+        operation_id = intent.get("operation_id") or payload.get("allocator_execution_id")
         leases = [lease for lease in await self.db.list_resource_leases()
                   if str(lease["id"]) in lease_ids or (
                       operation_id is not None and str(lease["execution_id"]) == str(operation_id)
@@ -408,6 +415,126 @@ class LeaseService:
         except Exception:
             await self.db.cancel_resource_requests(execution_id)
             raise
+
+    @staticmethod
+    def _opaque_handle(handle: Mapping[str, Any]) -> Mapping[str, str]:
+        """Keep transport identity and lease/fence lineage inside the server."""
+        return {"id": str(handle["id"])}
+
+    def _normalize_handle_spec(self, spec: Mapping[str, Any] | Sequence[Mapping[str, Any]]) -> list[tuple[str, str | None]]:
+        requests = spec.get("requests") if isinstance(spec, Mapping) else spec
+        if not isinstance(requests, Sequence) or isinstance(requests, (str, bytes)) or not requests:
+            raise ResourceInventoryError("handle request spec must contain requests")
+        normalized: list[tuple[str, str | None]] = []
+        for request in requests:
+            if not isinstance(request, Mapping):
+                raise ResourceInventoryError("handle request must be an object")
+            pool = request.get("pool")
+            host = request.get("host")
+            if not isinstance(pool, str) or not pool:
+                raise ResourceInventoryError("handle request must select a pool")
+            if host is not None and (not isinstance(host, str) or host not in self.inventory.members(pool)):
+                raise ResourceInventoryError("handle request host is not a member of its pool")
+            normalized.append((pool, host))
+        return normalized
+
+    async def _active_session_handles(self, session_id: str) -> list[Mapping[str, Any]]:
+        handles = await self.db.list_session_resource_handles(session_id, states=("active",))
+        result = []
+        for handle in handles:
+            lease = await self.db.get_resource_lease(str(handle["lease_id"]))
+            if lease is not None and lease["state"] == "active":
+                result.append({**handle, "_lease": lease})
+        return result
+
+    async def acquire_handles(self, session_id: str, spec: Mapping[str, Any] | Sequence[Mapping[str, Any]]) -> Sequence[Mapping[str, str]]:
+        """Retain an all-or-none handle bundle, acquiring only its missing slots.
+
+        Existing active handles satisfy matching pool/host requests first.  A
+        post-recovery partial bundle therefore retains its healthy members and
+        allocates one atomic bundle for only the unavailable remainder.
+        """
+        self.recovery_gate.require_ready()
+        if await self.db.get_session(session_id) is None:
+            raise ResourceInventoryError("unknown session for resource handles")
+        normalized = self._normalize_handle_spec(spec)
+        retained = await self._active_session_handles(session_id)
+        available = list(retained)
+        selected: list[Mapping[str, Any] | None] = [None] * len(normalized)
+        missing_by_index: dict[int, tuple[str, str | None]] = {}
+        # Reserve exact-host slots first: an any-host slot may overlap their
+        # pool, but consuming that candidate would make a later exact slot
+        # spuriously wait for a lease we already own.
+        order = [index for index, (_pool, host) in enumerate(normalized) if host is not None]
+        order += [index for index, (_pool, host) in enumerate(normalized) if host is None]
+        for index in order:
+            pool, host = normalized[index]
+            match = next((handle for handle in available if handle["pool"] == pool and (host is None or handle["host_id"] == host)), None)
+            if match is None:
+                missing_by_index[index] = (pool, host)
+            else:
+                available.remove(match)
+                selected[index] = match
+        missing = [missing_by_index[index] for index in sorted(missing_by_index)]
+        if not missing:
+            return [self._opaque_handle(handle) for handle in selected if handle is not None]
+
+        execution_id = f"session-handles:{session_id}:{uuid.uuid4().hex}"
+        intent = await self.db.create_resource_recovery_intent({
+            "id": f"intent-{uuid.uuid4().hex}", "kind": "acquire",
+            "session_id": session_id,
+            "payload": {"operation": "session_handle_bundle",
+                        "allocator_execution_id": execution_id},
+        })
+        leases: Sequence[Mapping[str, Any]] = []
+        try:
+            leases = await self.acquire(
+                execution_id=execution_id, session_id=session_id,
+                requests=[{"slot": f"handle-{index}", "pool": pool, "host": host}
+                          for index, (pool, host) in enumerate(missing)],
+            )
+            handles = [
+                {"id": f"handle-{uuid.uuid4().hex}", "session_id": session_id,
+                 "pool": pool, "host_id": lease["host_id"], "lease_id": lease["id"],
+                 "fencing_token": lease["fencing_token"]}
+                for (pool, _host), lease in zip(missing, leases, strict=True)
+            ]
+            await self.db.create_session_resource_handles(handles)
+        except Exception:
+            await self.db.update_resource_recovery_intent(
+                str(intent["id"]), expected_state="prepared", state="processing",
+            )
+            if leases:
+                await self.release(execution_id=execution_id, leases=leases)
+            await self.db.update_resource_recovery_intent(
+                str(intent["id"]), expected_state="processing", state="failed",
+            )
+            raise
+        await self.db.update_resource_recovery_intent(
+            str(intent["id"]), expected_state="prepared", state="completed",
+        )
+        selected_by_index = iter(handles)
+        ordered = [next(selected_by_index) if handle is None else handle for handle in selected]
+        return [self._opaque_handle(handle) for handle in ordered]
+
+    async def list_session_handles(self, session_id: str) -> Sequence[Mapping[str, str]]:
+        """List only opaque active handle identifiers owned by a session."""
+        return [self._opaque_handle(handle) for handle in await self._active_session_handles(session_id)]
+
+    async def resolve_handle(self, session_id: str, handle_id: str) -> Mapping[str, str]:
+        """Authorize a handle without revealing lease or transport details."""
+        handle = await self._resolve_handle_lease(session_id, handle_id)
+        return self._opaque_handle(handle)
+
+    async def _resolve_handle_lease(self, session_id: str, handle_id: str) -> Mapping[str, Any]:
+        """Trusted execution-only resolution, including the current lease fence."""
+        handle = await self.db.get_session_resource_handle(handle_id)
+        if handle is None or handle["session_id"] != session_id or handle["state"] != "active":
+            raise ResourceHandleOwnershipError()
+        lease = await self.db.get_resource_lease(str(handle["lease_id"]))
+        if lease is None or lease["state"] != "active":
+            raise ResourceHandleOwnershipError()
+        return {**handle, "lease": lease}
 
     async def heartbeat(self, *, execution_id: str, lease: Mapping[str, Any]) -> bool:
         # Fencing predicates make stale messages harmless.

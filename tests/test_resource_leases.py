@@ -1,9 +1,12 @@
 from __future__ import annotations
 import asyncio
+import json
 import pytest
 from types import SimpleNamespace
 from nerve.agent.tools import ToolContext, build_default_registry
-from nerve.resources import LeaseService, ResourceInventory, ResourceInventoryError
+from nerve.resources import (LeaseService, ResourceHandleOwnershipError,
+                             ResourceInventory, ResourceInventoryError,
+                             ResourceRecoveryGate, ResourceRecoveryUnavailable)
 
 CONFIG={"connections":["lab-ssh"],"hosts":[{"id":"host-a","connection_ref":"lab-ssh","labels":{"rack":"a"}},{"id":"host-b","connection_ref":"lab-ssh","labels":{"rack":"b"}}],"pools":[{"id":"build","members":["host-a"]},{"id":"test","selector":{"rack":"a"}}]}
 
@@ -131,3 +134,235 @@ async def test_resource_mcp_surface_is_secret_free_and_guarded(db):
     accepted=await registry.invoke("resource_host_quarantine",ctx,{"host_id":"host-a","confirm_host_id":"host-a","reason":"maintenance"})
     assert not accepted.is_error
     assert (await db.get_resource_host("host-a"))["quarantined"] == 1
+
+
+HANDLE_CONFIG = {
+    "connections": ["lab-ssh"],
+    "hosts": [
+        {"id": "host-a", "connection_ref": "lab-ssh"},
+        {"id": "host-b", "connection_ref": "lab-ssh"},
+        {"id": "host-c", "connection_ref": "lab-ssh"},
+    ],
+    "pools": [
+        {"id": "workers", "members": ["host-a", "host-b", "host-c"]},
+        {"id": "only-a", "members": ["host-a"]},
+        {"id": "only-b", "members": ["host-b"]},
+    ],
+}
+
+
+async def _handle_service(db, *, ready=True):
+    inventory = ResourceInventory(db, HANDLE_CONFIG)
+    await inventory.initialize()
+    for session_id in ("session-a", "session-b", "blocker"):
+        await db.create_session(session_id)
+    return LeaseService(
+        db=db, inventory=inventory, recovery_gate=ResourceRecoveryGate(ready=ready),
+    )
+
+
+@pytest.mark.asyncio
+async def test_session_handles_are_opaque_and_one_session_can_hold_two_hosts(db):
+    service = await _handle_service(db)
+    handles = await service.acquire_handles("session-a", {
+        "requests": [{"pool": "only-a"}, {"pool": "only-b"}],
+    })
+
+    assert len(handles) == 2
+    assert all(set(handle) == {"id"} and handle["id"].startswith("handle-") for handle in handles)
+    assert all("fencing_token" not in handle for handle in handles)
+    assert all("lease_id" not in handle for handle in handles)
+    assert all("host_id" not in handle for handle in handles)
+    assert {item["id"] for item in await service.list_session_handles("session-a")} == {
+        item["id"] for item in handles
+    }
+    resolved = await service.resolve_handle("session-a", handles[0]["id"])
+    assert resolved == handles[0]
+    internal = await service._resolve_handle_lease("session-a", handles[0]["id"])
+    assert {"lease", "lease_id", "fencing_token", "host_id", "pool"} <= set(internal)
+    assert "connection_ref" not in internal
+
+
+@pytest.mark.asyncio
+async def test_session_handle_resolution_rejects_foreign_and_unknown_handles_stably(db):
+    service = await _handle_service(db)
+    handle = (await service.acquire_handles("session-a", [{"pool": "only-a"}]))[0]
+
+    for handle_id in (handle["id"], "handle-not-found"):
+        with pytest.raises(ResourceHandleOwnershipError, match="does not belong to this session"):
+            await service.resolve_handle("session-b", handle_id)
+    assert await service.list_session_handles("session-b") == []
+
+
+@pytest.mark.asyncio
+async def test_handle_bundle_waits_without_creating_partial_new_handles_or_leases(db):
+    service = await _handle_service(db)
+    held = await service.acquire(execution_id="blocker", session_id="blocker", requests=[
+        {"pool": "only-b"},
+    ])
+    request = asyncio.create_task(service.acquire_handles("session-a", {
+        "requests": [{"pool": "only-a"}, {"pool": "only-b"}],
+    }))
+    await asyncio.sleep(.05)
+
+    assert not request.done()
+    assert await service.list_session_handles("session-a") == []
+    assert [lease["host_id"] for lease in await db.list_resource_leases()
+            if lease["state"] == "active"] == ["host-b"]
+    await service.release(execution_id="blocker", leases=held)
+    handles = await asyncio.wait_for(request, 1)
+    assert len(handles) == 2
+    assert {row["host_id"] for row in await service._active_session_handles("session-a")} == {
+        "host-a", "host-b",
+    }
+
+
+@pytest.mark.asyncio
+async def test_recovery_reacquires_only_missing_member_of_retained_bundle(db):
+    service = await _handle_service(db)
+    original = await service.acquire_handles("session-a", {
+        "requests": [{"pool": "only-a"}, {"pool": "only-b"}],
+    })
+    before = await service._active_session_handles("session-a")
+    failed = next(handle for handle in before if handle["host_id"] == "host-b")
+    healthy = next(handle for handle in before if handle["host_id"] == "host-a")
+    await service.quarantine(execution_id=failed["_lease"]["execution_id"],
+                             leases=[failed["_lease"]], reason="transport lost")
+    await service.recover_host(host_id="host-b", requested_by="operator",
+                               remote_quiescence_confirmed=True)
+
+    reacquired = await service.acquire_handles("session-a", {
+        "requests": [{"pool": "only-a"}, {"pool": "only-b"}],
+    })
+    current = await service._active_session_handles("session-a")
+    assert len(reacquired) == 2 and len(current) == 2
+    assert next(handle for handle in current if handle["host_id"] == "host-a")["id"] == healthy["id"]
+    assert {handle["id"] for handle in current} != {handle["id"] for handle in before}
+    all_leases = await db.list_resource_leases()
+    assert len([lease for lease in all_leases if lease["session_id"] == "session-a"]) == 3
+    assert len([lease for lease in all_leases if lease["session_id"] == "session-a" and lease["state"] == "active"]) == 2
+    assert original[0]["id"] in {handle["id"] for handle in await service.list_session_handles("session-a")}
+
+
+@pytest.mark.asyncio
+async def test_handle_acquisition_is_closed_by_recovery_gate_without_writes(db):
+    service = await _handle_service(db, ready=False)
+    with pytest.raises(ResourceRecoveryUnavailable, match="retry shortly"):
+        await service.acquire_handles("session-a", [{"pool": "only-a"}])
+    assert await db.list_session_resource_handles("session-a") == []
+    assert await db.list_resource_requests() == []
+
+
+@pytest.mark.asyncio
+async def test_handle_spec_accepts_any_and_exact_hosts_without_transport_details(db):
+    service = await _handle_service(db)
+    handles = await service.acquire_handles("session-a", [
+        {"pool": "workers", "host": "host-c"},
+        {"pool": "only-a"},
+    ])
+
+    internal = [await service._resolve_handle_lease("session-a", handle["id"])
+                for handle in handles]
+    assert {handle["host_id"] for handle in internal} == {"host-a", "host-c"}
+    assert all("connection_ref" not in handle for handle in internal)
+    assert await service.acquire_handles("session-a", [
+        {"pool": "workers", "host": "host-c"},
+        {"pool": "only-a"},
+    ]) == handles
+
+
+@pytest.mark.asyncio
+async def test_retained_handle_matching_reserves_exact_hosts_before_any_slots(db):
+    service = await _handle_service(db)
+    original = await service.acquire_handles("session-a", [
+        {"pool": "workers"}, {"pool": "workers"},
+    ])
+    original_internal = [await service._resolve_handle_lease("session-a", handle["id"])
+                         for handle in original]
+    assert [item["host_id"] for item in original_internal] == ["host-a", "host-b"]
+    lease_count = len(await db.list_resource_leases())
+
+    reacquired = await asyncio.wait_for(service.acquire_handles("session-a", [
+        {"pool": "workers"}, {"pool": "workers", "host": "host-a"},
+    ]), 1)
+
+    assert [item["id"] for item in reacquired] == [original[1]["id"], original[0]["id"]]
+    assert len(await db.list_resource_leases()) == lease_count
+
+
+@pytest.mark.asyncio
+async def test_invalid_handle_specs_and_unknown_sessions_do_not_enqueue_requests(db):
+    service = await _handle_service(db)
+    invalid_specs = [
+        {},
+        {"requests": []},
+        {"requests": [{"pool": "workers", "host": "missing"}]},
+        {"requests": ["workers"]},
+    ]
+    for spec in invalid_specs:
+        with pytest.raises(ResourceInventoryError):
+            await service.acquire_handles("session-a", spec)
+    with pytest.raises(ResourceInventoryError, match="unknown session"):
+        await service.acquire_handles("missing-session", [{"pool": "only-a"}])
+    assert await db.list_resource_requests() == []
+    assert await db.list_session_resource_handles("session-a") == []
+
+
+@pytest.mark.asyncio
+async def test_handle_retention_failure_releases_the_entire_new_lease_bundle(db, monkeypatch):
+    service = await _handle_service(db)
+
+    async def fail_retention(handles):
+        assert len(handles) == 2
+        raise RuntimeError("durable handle write failed")
+
+    monkeypatch.setattr(db, "create_session_resource_handles", fail_retention)
+    with pytest.raises(RuntimeError, match="durable handle write failed"):
+        await service.acquire_handles("session-a", [
+            {"pool": "only-a"}, {"pool": "only-b"},
+        ])
+    assert await service.list_session_handles("session-a") == []
+    session_leases = [lease for lease in await db.list_resource_leases()
+                      if lease["session_id"] == "session-a"]
+    assert len(session_leases) == 2
+    assert {lease["state"] for lease in session_leases} == {"released"}
+
+
+@pytest.mark.asyncio
+async def test_handle_acquire_intent_covers_grant_before_handle_persistence(db, monkeypatch):
+    service = await _handle_service(db)
+    observed = {}
+
+    async def fail_retention(handles):
+        observed["intent"] = (await db.list_resource_recovery_intents())[0]
+        observed["active_leases"] = [lease for lease in await db.list_resource_leases()
+                                      if lease["state"] == "active"]
+        raise RuntimeError("durable handle write failed")
+
+    monkeypatch.setattr(db, "create_session_resource_handles", fail_retention)
+    with pytest.raises(RuntimeError, match="durable handle write failed"):
+        await service.acquire_handles("session-a", [{"pool": "only-a"}])
+
+    assert observed["intent"]["state"] == "prepared"
+    assert observed["intent"]["operation_id"] is None
+    payload = json.loads(observed["intent"]["payload_json"])
+    assert payload["allocator_execution_id"] == observed["active_leases"][0]["execution_id"]
+    assert await db.get_execution(observed["active_leases"][0]["execution_id"]) is None
+    intents = await db.list_resource_recovery_intents()
+    assert len(intents) == 1 and intents[0]["state"] == "failed"
+    assert all(lease["state"] == "released" for lease in await db.list_resource_leases())
+
+
+@pytest.mark.asyncio
+async def test_handle_list_and_resolution_hide_stale_recovered_lease(db):
+    service = await _handle_service(db)
+    handle = (await service.acquire_handles("session-a", [{"pool": "only-a"}]))[0]
+    private = await service._resolve_handle_lease("session-a", handle["id"])
+    await service.quarantine(execution_id=private["lease"]["execution_id"],
+                             leases=[private["lease"]], reason="lost")
+    await service.recover_host(host_id="host-a", requested_by="operator",
+                               remote_quiescence_confirmed=True)
+
+    assert await service.list_session_handles("session-a") == []
+    with pytest.raises(ResourceHandleOwnershipError, match="does not belong"):
+        await service.resolve_handle("session-a", handle["id"])
