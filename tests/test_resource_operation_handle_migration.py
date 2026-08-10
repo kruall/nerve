@@ -1,11 +1,13 @@
-"""Focused contract tests for V53/V54 retained-resource persistence."""
+"""Focused contract tests for V53-V56 retained-resource persistence."""
 
 import importlib
 
 import aiosqlite
 import pytest
 
+from nerve.db import Database
 from nerve.db.migrations import runner
+from nerve.resources import LeaseService, ResourceInventory
 
 
 TABLES = (
@@ -13,6 +15,7 @@ TABLES = (
     "operation_resource_refs",
     "resource_wait_operations",
     "resource_recovery_intents",
+    "resource_wait_allocator",
 )
 
 
@@ -20,7 +23,7 @@ async def _schema(db: aiosqlite.Connection) -> dict[str, str]:
     rows = await (
         await db.execute(
             "SELECT name, sql FROM sqlite_master WHERE type IN ('table', 'index') "
-            "AND (name IN (?, ?, ?, ?) OR name LIKE 'idx_resource_%' "
+            "AND (name IN (?, ?, ?, ?, ?) OR name LIKE 'idx_resource_%' "
             "OR name LIKE 'uq_session_resource_handles_%') ORDER BY name",
             TABLES,
         )
@@ -67,7 +70,7 @@ async def _legacy_snapshot(db: aiosqlite.Connection) -> tuple[tuple, tuple, tupl
 
 
 @pytest.mark.asyncio
-async def test_v53_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp_path):
+async def test_v56_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp_path):
     fresh = await aiosqlite.connect(tmp_path / "fresh.db")
     upgraded = await aiosqlite.connect(tmp_path / "upgrade.db")
     try:
@@ -76,12 +79,118 @@ async def test_v53_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp_
         await _legacy_rows(upgraded)
         legacy_before = await _legacy_snapshot(upgraded)
 
-        assert await runner.run_migrations(upgraded) == 54
-        assert await _schema(fresh) == await _schema(upgraded)
+        assert await runner.run_migrations(upgraded) == 56
+        fresh_schema = await _schema(fresh)
+        assert fresh_schema == await _schema(upgraded)
+        assert (await (await fresh.execute("SELECT next_ticket FROM resource_wait_allocator")).fetchone())[0] == 1
+        assert "idx_resource_wait_operations_pending_ticket_host" in fresh_schema
         assert await _legacy_snapshot(upgraded) == legacy_before
     finally:
         await fresh.close()
         await upgraded.close()
+
+
+@pytest.mark.asyncio
+async def test_v55_backfills_pending_waits_and_queued_bundle_with_unique_tickets(tmp_path):
+    db = await aiosqlite.connect(tmp_path / "backfill.db")
+    try:
+        await _apply_through_v52(db)
+        for ident in ("s", "ordinary"):
+            await db.execute("INSERT INTO sessions(id, title, created_at, updated_at) VALUES (?, ?, 'now', 'now')", (ident, ident))
+        for ident, session in (("wait-op", "s"), ("ordinary-op", "ordinary")):
+            await db.execute("""INSERT INTO executions(id, session_id, kind, profile_version, profile_hash, profile_snapshot, plan, status, created_at, queued_at, updated_at)
+                              VALUES (?, ?, 'remote', '1', 'h', '{}', '{}', 'queued', 'now', 'now', 'now')""", (ident, session))
+        await importlib.import_module("nerve.db.migrations.v053_resource_operation_handles").up(db)
+        await importlib.import_module("nerve.db.migrations.v054_resource_wait_outcomes").up(db)
+        await db.execute("""INSERT INTO resource_wait_operations(id, session_id, operation_id, request_kind, requested_hosts_json, pool, queue_ticket, state, created_at, updated_at)
+                          VALUES ('wait', 's', 'wait-op', 'host', '[{"pool":"p","host":"a"}]', 'p', 99, 'pending', '2000', '2000')""")
+        await db.execute("INSERT INTO resource_lease_bundles(id, execution_id, session_id, state, requested_at) VALUES ('bundle', 'ordinary-op', 'ordinary', 'queued', '2001')")
+        for ident in ("r1", "r2"):
+            await db.execute("""INSERT INTO resource_lease_requests(id, execution_id, session_id, slot, pool, mode, state, requested_at, bundle_id)
+                              VALUES (?, 'ordinary-op', 'ordinary', ?, 'p', 'exclusive', 'queued', '2001', 'bundle')""", (ident, ident))
+        await importlib.import_module("nerve.db.migrations.v055_resource_wait_fair_queue").up(db)
+        tickets = await (await db.execute("SELECT DISTINCT queue_ticket FROM resource_lease_requests WHERE bundle_id='bundle'")).fetchall()
+        wait_ticket = (await (await db.execute("SELECT queue_ticket FROM resource_wait_operations WHERE id='wait'")).fetchone())[0]
+        next_ticket = (await (await db.execute("SELECT next_ticket FROM resource_wait_allocator")).fetchone())[0]
+        assert len(tickets) == 1 and tickets[0][0] != wait_ticket and next_ticket > max(tickets[0][0], wait_ticket)
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_v56_backfills_exact_host_and_reattaches_queued_bundle(tmp_path):
+    database = Database(tmp_path / "restart.db")
+    try:
+        await database.connect()
+        await database.db.execute("ALTER TABLE resource_lease_requests DROP COLUMN requested_host")
+        await database.db.execute("DELETE FROM schema_version WHERE version=56")
+        await database.db.commit()
+
+        await database.create_session("session-1")
+        await database.create_execution(
+            "execution-1", session_id="session-1", kind="remote", profile_version="1",
+            profile_hash="hash", profile_snapshot={},
+            plan={"resource_hosts": {"exact": "host-a"}}, resource_requests=[],
+        )
+        await database.db.execute(
+            """INSERT INTO resource_lease_bundles(
+                   id, execution_id, session_id, state, requested_at
+               ) VALUES ('bundle-1', 'execution-1', 'session-1', 'queued', 'now')"""
+        )
+        await database.db.execute(
+            """INSERT INTO resource_lease_requests(
+                   id, execution_id, session_id, slot, pool, mode, state,
+                   requested_at, bundle_id, queue_ticket
+               ) VALUES ('request-exact', 'execution-1', 'session-1', 'exact', 'workers',
+                         'exclusive', 'queued', 'now', 'bundle-1', 7)"""
+        )
+        await database.db.execute(
+            """INSERT INTO resource_lease_requests(
+                   id, execution_id, session_id, slot, pool, mode, state,
+                   requested_at, bundle_id, queue_ticket
+               ) VALUES ('request-any', 'execution-1', 'session-1', 'any', 'workers',
+                         'exclusive', 'queued', 'now', 'bundle-1', 7)"""
+        )
+        await database.db.commit()
+
+        migration = importlib.import_module("nerve.db.migrations.v056_resource_request_hosts")
+        await migration.up(database.db)
+        await database.db.commit()
+        rows = await (
+            await database.db.execute(
+                "SELECT id, requested_host, queue_ticket FROM resource_lease_requests ORDER BY id"
+            )
+        ).fetchall()
+        assert [(row[0], row[1], row[2]) for row in rows] == [
+            ("request-any", None, 7), ("request-exact", "host-a", 7),
+        ]
+
+        inventory = ResourceInventory(database, {
+            "connections": ["lab-ssh"],
+            "hosts": [
+                {"id": "host-a", "connection_ref": "lab-ssh"},
+                {"id": "host-b", "connection_ref": "lab-ssh"},
+            ],
+            "pools": [{"id": "workers", "members": ["host-a", "host-b"]}],
+        })
+        await inventory.initialize()
+        service = LeaseService(db=database, inventory=inventory)
+        leases = await service.acquire(
+            execution_id="execution-1", session_id="session-1",
+            requests=[
+                {"slot": "exact", "pool": "workers", "host": "host-a"},
+                {"slot": "any", "pool": "workers"},
+            ],
+        )
+        assert {lease["host_id"] for lease in leases} == {"host-a", "host-b"}
+        retained = await (
+            await database.db.execute(
+                "SELECT queue_ticket FROM resource_lease_requests WHERE bundle_id='bundle-1'"
+            )
+        ).fetchall()
+        assert [row[0] for row in retained] == [7, 7]
+    finally:
+        await database.close()
 
 
 @pytest.mark.asyncio

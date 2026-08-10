@@ -393,7 +393,8 @@ class LeaseService:
                 continue
             await self.db.cancel_resource_requests(execution_id)
 
-    async def acquire(self, *, execution_id: str, session_id: str, requests: Sequence[Mapping[str, Any]]) -> Sequence[Mapping[str, Any]]:
+    async def acquire(self, *, execution_id: str, session_id: str, requests: Sequence[Mapping[str, Any]],
+                      enforce_pool_fifo: bool = True, queue_ticket: int | None = None) -> Sequence[Mapping[str, Any]]:
         self.recovery_gate.require_ready()
         if not requests:
             return []
@@ -409,13 +410,15 @@ class LeaseService:
             if slot in seen_slots: raise ResourceInventoryError("resource request slot is duplicated")
             seen_slots.add(slot); normalized.append((slot, pool, host))
         bundle_id = f"bundle-{uuid.uuid4().hex[:12]}"
-        queued = [{"id": f"request-{uuid.uuid4().hex[:12]}", "slot": slot, "pool": pool} for slot, pool, _host in normalized]
+        queued = [{"id": f"request-{uuid.uuid4().hex[:12]}", "slot": slot, "pool": pool,
+                   "requested_host": host} for slot, pool, host in normalized]
         bundle = await self.db.enqueue_resource_bundle(
             bundle_id=bundle_id, execution_id=execution_id,
-            session_id=session_id, requests=queued,
+            session_id=session_id, requests=queued, queue_ticket=queue_ticket,
         )
         bundle_id = str(bundle["id"])
         queued = list(bundle["requests"])
+        ticket = int(queued[0]["queue_ticket"])
         try:
             while True:
                 execution = await self.db.get_execution(execution_id)
@@ -423,7 +426,10 @@ class LeaseService:
                     await self.db.cancel_resource_requests(execution_id)
                     raise ResourceInventoryError("resource request was cancelled")
                 requested = {slot: host for slot, _pool, host in normalized}
-                acquired = await self.db.try_acquire_resource_bundle(bundle_id=bundle_id, candidates={row['id']: ([requested[row['slot']]] if requested[row['slot']] is not None else self.inventory.members(row['pool'])) for row in queued}, ttl_seconds=self.ttl_seconds)
+                if not await self._bundle_is_fair(bundle_id, ticket, queued, execution_id):
+                    await asyncio.sleep(self.poll_seconds)
+                    continue
+                acquired = await self.db.try_acquire_resource_bundle(bundle_id=bundle_id, candidates={row['id']: ([requested[row['slot']]] if requested[row['slot']] is not None else self.inventory.members(row['pool'])) for row in queued}, ttl_seconds=self.ttl_seconds, enforce_pool_fifo=False)
                 if acquired is not None:
                     return [
                         {**lease, "slot": request["slot"]}
@@ -506,12 +512,146 @@ class LeaseService:
             self._reattach_wait(wait)
             return wait
 
+    async def replan_deadlock_wait(self, *, session_id: str, operation_id: str,
+                                   deadlocked_wait_id: str) -> Mapping[str, Any]:
+        """After quiescence, release the victim bundle and durably resubscribe it."""
+        self.recovery_gate.require_ready()
+        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            previous = await self.db.get_resource_wait_operation(deadlocked_wait_id)
+            if previous is None or str(previous["session_id"]) != session_id:
+                raise ResourceInventoryError("deadlock wait belongs to a different session")
+            await self._release_deadlock_victim_handles(session_id)
+            if await self.db.list_session_resource_handles(session_id, states=("active",)):
+                raise ResourceHandleConflictError([])
+            wait = await self.db.replan_resource_wait_operation(
+                wait_id=deadlocked_wait_id, operation_id=operation_id,
+            )
+            if wait is None:
+                raise ResourceInventoryError("deadlock wait cannot be replanned")
+            self._reattach_wait(wait)
+            return wait
+
     def _reattach_wait(self, wait: Mapping[str, Any]) -> None:
         wait_id = str(wait["id"])
         if wait_id not in self._wait_tasks:
             task = asyncio.create_task(self._run_wait(wait_id))
             self._wait_tasks[wait_id] = task
             task.add_done_callback(lambda _task: self._wait_tasks.pop(wait_id, None))
+
+    def _wait_hosts(self, wait: Mapping[str, Any]) -> set[str]:
+        """Expand a durable wait to its possible physical hosts."""
+        requested = wait.get("requested_hosts") or []
+        hosts: set[str] = set()
+        for item in requested:
+            if not isinstance(item, Mapping):
+                continue
+            host, pool = item.get("host"), item.get("pool")
+            if isinstance(host, str):
+                hosts.add(host)
+            elif isinstance(pool, str):
+                hosts.update(self.inventory.members(pool))
+        return hosts
+
+    async def _wait_is_fair(self, wait: Mapping[str, Any]) -> bool:
+        """Only earlier requests for a common host can hold this wait back."""
+        ours = self._wait_hosts(wait)
+        ticket = int(wait["queue_ticket"])
+        for older in await self.db.list_resource_requests():
+            if str(older["execution_id"]) == str(wait["operation_id"]):
+                continue
+            requested_host = older.get("requested_host")
+            older_hosts = ({str(requested_host)} if requested_host else
+                           set(self.inventory.members(str(older["pool"]))))
+            older_id = str(older.get("bundle_id") or older["id"])
+            if (int(older["queue_ticket"]), older_id) < (ticket, str(wait["id"])) and ours & older_hosts:
+                return False
+        for older in await self.db.list_resource_wait_operations(state="pending"):
+            if (int(older["queue_ticket"]), str(older["id"])) < (ticket, str(wait["id"])) and ours & self._wait_hosts(older):
+                return False
+        return True
+
+    async def _bundle_is_fair(self, bundle_id: str, ticket: int,
+                              rows: Sequence[Mapping[str, Any]], execution_id: str) -> bool:
+        """A newer ordinary bundle yields only to older overlapping waits."""
+        ours: set[str] = set()
+        for row in rows:
+            host = row.get("requested_host")
+            ours.update((str(host),) if host else self.inventory.members(str(row["pool"])))
+        for older in await self.db.list_resource_requests():
+            older_id = str(older.get("bundle_id") or older["id"])
+            if older_id == bundle_id:
+                continue
+            host = older.get("requested_host")
+            older_hosts = {str(host)} if host else set(self.inventory.members(str(older["pool"])))
+            if (int(older["queue_ticket"]), older_id) < (ticket, bundle_id) and ours & older_hosts:
+                return False
+        for wait in await self.db.list_resource_wait_operations(state="pending"):
+            if str(wait["operation_id"]) == execution_id:
+                continue
+            # Normal allocator output is unique; this id tie-breaker makes
+            # manually recovered equal-ticket data deterministic too.
+            if (int(wait["queue_ticket"]), str(wait["id"])) < (ticket, bundle_id) and ours & self._wait_hosts(wait):
+                return False
+        return True
+
+    async def _deadlock_victim(self, wait: Mapping[str, Any]) -> Mapping[str, Any] | None:
+        """Find a retained-handle wait cycle and select its stable victim."""
+        waits = await self.db.list_resource_wait_operations(state="pending")
+        waits_by_session: dict[str, list[Mapping[str, Any]]] = {}
+        for row in waits:
+            waits_by_session.setdefault(str(row["session_id"]), []).append(row)
+        sessions = set(waits_by_session)
+        edges: dict[str, set[str]] = {session: set() for session in sessions}
+        edge_waits: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+        handles_by_session = {
+            session: await self._active_session_handles(session) for session in sessions
+        }
+        for session, session_waits in waits_by_session.items():
+            own_hosts = {str(h["host_id"]) for h in handles_by_session[session]}
+            for row in session_waits:
+                wanted = self._wait_hosts(row) - own_hosts
+                for owner in sessions:
+                    if owner == session:
+                        continue
+                    owned = {str(h["host_id"]) for h in handles_by_session[owner]}
+                    if wanted & owned:
+                        edges[session].add(owner)
+                        edge_waits.setdefault((session, owner), []).append(row)
+        start = str(wait["session_id"])
+        stack, seen = [start], set()
+        while stack:
+            current = stack.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            stack.extend(edges[current] - seen)
+        def returns_to_start(node: str) -> bool:
+            pending, visited = [node], set()
+            while pending:
+                current = pending.pop()
+                if current == start:
+                    return True
+                if current not in visited:
+                    visited.add(current)
+                    pending.extend(edges[current] - visited)
+            return False
+        cycle_sessions = [session for session in seen if returns_to_start(session)]
+        if len(cycle_sessions) < 2 and start not in edges.get(start, set()):
+            return None
+        cycle = [row for session in cycle_sessions for owner in cycle_sessions
+                 if owner in edges[session]
+                 for row in edge_waits.get((session, owner), [])]
+        return max(cycle, key=lambda row: (int(row["queue_ticket"]), str(row["session_id"])))
+
+    async def _release_deadlock_victim_handles(self, session_id: str) -> None:
+        """Release the victim only when its retained handles are quiescent."""
+        for handle in await self.db.list_session_resource_handles(session_id, states=("active",)):
+            refs = await self.db.list_handle_operation_refs(str(handle["id"]))
+            if refs:
+                return
+        for handle in await self.db.list_session_resource_handles(session_id, states=("active",)):
+            await self.release_handle(session_id, str(handle["id"]))
 
     async def _run_wait(self, wait_id: str) -> None:
         wait = await self.db.get_resource_wait_operation(wait_id)
@@ -526,11 +666,27 @@ class LeaseService:
             }
             for item in requests
         ]
+        while True:
+            victim = await self._deadlock_victim(wait)
+            if victim is not None:
+                victim_id = str(victim["id"])
+                if victim_id == wait_id:
+                    await self.mark_wait_deadlock_replan_required(victim_id)
+                    await self._release_deadlock_victim_handles(str(victim["session_id"]))
+                return
+            if await self._wait_is_fair(wait):
+                break
+            await asyncio.sleep(self.poll_seconds)
+            wait = await self.db.get_resource_wait_operation(wait_id)
+            if wait is None or wait["state"] != "pending":
+                return
         try:
             leases = await self.acquire(
                 execution_id=str(wait["operation_id"]), session_id=str(wait["session_id"]),
                 requests=[{"slot": f"wait-{index}", "pool": item["pool"], "host": item.get("host")}
                           for index, item in enumerate(requests)],
+                enforce_pool_fifo=False,
+                queue_ticket=int(wait["queue_ticket"]),
             )
         except asyncio.CancelledError:
             # ``acquire`` restores queued rows.  It must not terminalize this
@@ -598,7 +754,7 @@ class LeaseService:
     async def mark_wait_deadlock_replan_required(self, wait_id: str) -> bool:
         """R7's policy hook; R6 deliberately performs no deadlock analysis."""
         task = self._wait_tasks.get(wait_id)
-        if task is not None:
+        if task is not None and task is not asyncio.current_task():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         wait = await self.db.get_resource_wait_operation(wait_id)

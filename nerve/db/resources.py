@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from collections.abc import Mapping
 from typing import Any
 
@@ -40,6 +41,13 @@ def _row(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
 
 
 class ResourceStore:
+    async def _allocate_resource_queue_ticket(self) -> int:
+        async with self.db.execute("UPDATE resource_wait_allocator SET next_ticket=next_ticket+1 WHERE singleton=1 RETURNING next_ticket-1") as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            raise RuntimeError("resource queue ticket allocator is unavailable")
+        return int(row[0])
+
     # Retained handles deliberately live beside leases rather than changing the
     # lease lifecycle: an Operation terminal transition only removes its ref.
     async def get_session_resource_handle(self, handle_id: str) -> dict[str, Any] | None:
@@ -114,6 +122,14 @@ class ResourceStore:
 
     async def list_operation_resource_refs(self, operation_id: str) -> list[dict[str, Any]]:
         async with self.db.execute("SELECT * FROM operation_resource_refs WHERE operation_id=? ORDER BY created_at, handle_id", (operation_id,)) as c:
+            return [dict(row) async for row in c]
+
+    async def list_handle_operation_refs(self, handle_id: str) -> list[dict[str, Any]]:
+        """Read the durable quiescence proof for a retained handle."""
+        async with self.db.execute(
+            "SELECT * FROM operation_resource_refs WHERE handle_id=? ORDER BY operation_id",
+            (handle_id,),
+        ) as c:
             return [dict(row) async for row in c]
 
     async def begin_release_handle(
@@ -210,11 +226,56 @@ class ResourceStore:
         if wait.get("outcome") is not None and wait["outcome"] not in _WAIT_OUTCOMES:
             raise ValueError("invalid resource wait outcome")
         now = utc_now_iso()
-        await self._write("""INSERT INTO resource_wait_operations
-            (id, session_id, operation_id, request_kind, requested_hosts_json, pool, queue_ticket, state, outcome, wakeup_generation, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (wait["id"], wait["session_id"], wait["operation_id"], wait["request_kind"], json.dumps(wait.get("requested_hosts", [])), wait["pool"], wait["queue_ticket"], wait.get("state", "pending"), wait.get("outcome"), wait.get("wakeup_generation", 0), now, now))
+        # Tickets are allocator-owned, not clock-derived.  A replan may pass
+        # its old positive ticket, while ordinary subscriptions get the next
+        # durable value even across restart.
+        async with self._atomic():
+            ticket = int(wait.get("queue_ticket") or 0)
+            if ticket <= 0:
+                ticket = await self._allocate_resource_queue_ticket()
+            else:
+                await self.db.execute(
+                    "UPDATE resource_wait_allocator SET next_ticket=MAX(next_ticket, ?) WHERE singleton=1",
+                    (ticket + 1,),
+                )
+            await self.db.execute("""INSERT INTO resource_wait_operations
+                (id, session_id, operation_id, request_kind, requested_hosts_json, pool, queue_ticket, state, outcome, wakeup_generation, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (wait["id"], wait["session_id"], wait["operation_id"], wait["request_kind"], json.dumps(wait.get("requested_hosts", [])), wait["pool"], ticket, wait.get("state", "pending"), wait.get("outcome"), wait.get("wakeup_generation", 0), now, now))
         row = await self.get_resource_wait_operation(str(wait["id"])); assert row is not None
         return row
+
+    async def replan_resource_wait_operation(self, *, wait_id: str, operation_id: str) -> dict[str, Any] | None:
+        """Clone a deadlock victim's complete bundle and ticket in one commit."""
+        now = utc_now_iso()
+        async with self._atomic():
+            async with self.db.execute(
+                "SELECT * FROM resource_wait_operations WHERE id=? AND outcome='DEADLOCK_REPLAN_REQUIRED'",
+                (wait_id,),
+            ) as c:
+                previous = await c.fetchone()
+            if previous is None:
+                return None
+            async with self.db.execute(
+                "SELECT session_id, status FROM executions WHERE id=?", (operation_id,),
+            ) as c:
+                operation = await c.fetchone()
+            if (operation is None or operation["session_id"] != previous["session_id"]
+                    or operation["status"] not in {"queued", "starting", "running", "cancelling"}):
+                return None
+            async with self.db.execute(
+                "SELECT id FROM resource_wait_operations WHERE operation_id=? AND state='pending'", (operation_id,),
+            ) as c:
+                existing = await c.fetchone()
+            if existing is not None:
+                return None
+            new_id = f"wait-{uuid.uuid4().hex}"
+            await self.db.execute("""INSERT INTO resource_wait_operations
+                (id, session_id, operation_id, request_kind, requested_hosts_json, pool, queue_ticket, state, outcome, wakeup_generation, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', NULL, 0, ?, ?)""",
+                (new_id, previous["session_id"], operation_id, previous["request_kind"],
+                 previous["requested_hosts_json"], previous["pool"], previous["queue_ticket"], now, now),
+            )
+        return await self.get_resource_wait_operation(new_id)
 
     async def update_resource_wait_operation(self, wait_id: str, *, expected_state: str, state: str, outcome: str | None = None) -> bool:
         if state not in {"pending", "granted", "cancelled", "failed"}:
@@ -452,15 +513,18 @@ class ResourceStore:
         return True
 
     async def enqueue_resource_request(self, *, request_id: str, execution_id: str,
-                                       session_id: str, slot: str, pool: str) -> dict[str, Any]:
+                                       session_id: str, slot: str, pool: str,
+                                       requested_host: str | None = None) -> dict[str, Any]:
         now = utc_now_iso()
         try:
-            await self._write(
+            async with self._atomic():
+                ticket = await self._allocate_resource_queue_ticket()
+                await self.db.execute(
                 """INSERT INTO resource_lease_requests
-                   (id, execution_id, session_id, slot, pool, mode, state, requested_at)
-                   VALUES (?, ?, ?, ?, ?, 'exclusive', 'queued', ?)""",
-                (request_id, execution_id, session_id, slot, pool, now),
-            )
+                   (id, execution_id, session_id, slot, pool, mode, state, requested_at, requested_host, queue_ticket)
+                   VALUES (?, ?, ?, ?, ?, 'exclusive', 'queued', ?, ?, ?)""",
+                (request_id, execution_id, session_id, slot, pool, now, requested_host, ticket),
+                )
         except sqlite3.IntegrityError:
             pass
         async with self.db.execute(
@@ -513,7 +577,8 @@ class ResourceStore:
         )
 
     async def enqueue_resource_bundle(self, *, bundle_id: str, execution_id: str,
-                                      session_id: str, requests: list[Mapping[str, Any]]) -> dict[str, Any]:
+                                      session_id: str, requests: list[Mapping[str, Any]],
+                                      queue_ticket: int | None = None) -> dict[str, Any]:
         """Create a durable bundle, or reuse this execution's queued bundle."""
         now = utc_now_iso()
         async with self._atomic():
@@ -527,31 +592,38 @@ class ResourceStore:
             if existing is not None:
                 existing_id = str(existing[0])
                 async with self.db.execute(
-                    """SELECT id, slot, pool FROM resource_lease_requests
+                    """SELECT id, slot, pool, requested_host, queue_ticket FROM resource_lease_requests
                        WHERE bundle_id=? AND state='queued' ORDER BY sequence""",
                     (existing_id,),
                 ) as cursor:
                     existing_requests = [dict(row) async for row in cursor]
-                expected = [(str(item["slot"]), str(item["pool"])) for item in requests]
-                actual = [(str(item["slot"]), str(item["pool"])) for item in existing_requests]
+                expected = [(str(item["slot"]), str(item["pool"]), item.get("requested_host")) for item in requests]
+                actual = [(str(item["slot"]), str(item["pool"]), item.get("requested_host")) for item in existing_requests]
                 if actual != expected:
                     raise ValueError("queued resource bundle does not match execution plan")
                 return {"id": existing_id, "requests": existing_requests}
+            if queue_ticket is None:
+                ticket = await self._allocate_resource_queue_ticket()
+            else:
+                ticket = int(queue_ticket)
+                await self.db.execute("UPDATE resource_wait_allocator SET next_ticket=MAX(next_ticket, ?) WHERE singleton=1", (ticket + 1,))
+            stored_requests = [{**request, "queue_ticket": ticket} for request in requests]
             await self.db.execute(
                 "INSERT INTO resource_lease_bundles (id, execution_id, session_id, state, requested_at) VALUES (?, ?, ?, 'queued', ?)",
                 (bundle_id, execution_id, session_id, now),
             )
-            for request in requests:
+            for request in stored_requests:
                 await self.db.execute(
                     """INSERT INTO resource_lease_requests
-                       (id, execution_id, session_id, slot, pool, mode, state, requested_at, bundle_id)
-                       VALUES (?, ?, ?, ?, ?, 'exclusive', 'queued', ?, ?)""",
-                    (request["id"], execution_id, session_id, request["slot"], request["pool"], now, bundle_id),
+                       (id, execution_id, session_id, slot, pool, mode, state, requested_at, bundle_id, requested_host, queue_ticket)
+                       VALUES (?, ?, ?, ?, ?, 'exclusive', 'queued', ?, ?, ?, ?)""",
+                    (request["id"], execution_id, session_id, request["slot"], request["pool"], now, bundle_id, request.get("requested_host"), ticket),
                 )
-        return {"id": bundle_id, "requests": requests}
+        return {"id": bundle_id, "requests": stored_requests}
 
     async def try_acquire_resource_bundle(self, *, bundle_id: str,
-                                          candidates: Mapping[str, list[str]], ttl_seconds: int) -> list[dict[str, Any]] | None:
+                                          candidates: Mapping[str, list[str]], ttl_seconds: int,
+                                          enforce_pool_fifo: bool = True) -> list[dict[str, Any]] | None:
         """Allocate every bundle slot or none, preserving per-pool FIFO.
 
         The matching is deliberately deterministic: slots are sorted by their
@@ -569,11 +641,12 @@ class ResourceStore:
             ids = {row['id'] for row in rows}
             # A bundle may pass a pool only when every older queued request in
             # that pool is part of this same bundle (needed for two same-pool slots).
-            for pool in {row['pool'] for row in rows}:
-                async with self.db.execute("SELECT id FROM resource_lease_requests WHERE pool=? AND state='queued' ORDER BY sequence", (pool,)) as c:
-                    queued = [row[0] async for row in c]
-                if any(request_id not in ids for request_id in queued[:sum(r['pool'] == pool for r in rows)]):
-                    return None
+            if enforce_pool_fifo:
+                for pool in {row['pool'] for row in rows}:
+                    async with self.db.execute("SELECT id FROM resource_lease_requests WHERE pool=? AND state='queued' ORDER BY sequence", (pool,)) as c:
+                        queued = [row[0] async for row in c]
+                    if any(request_id not in ids for request_id in queued[:sum(r['pool'] == pool for r in rows)]):
+                        return None
             available: dict[str, int] = {}
             for host_id in sorted({host for row in rows for host in candidates.get(row['id'], [])}):
                 async with self.db.execute("""SELECT fencing_token FROM resource_hosts h WHERE id=? AND enabled=1 AND draining=0 AND offline=0 AND quarantined=0 AND NOT EXISTS (SELECT 1 FROM resource_leases l WHERE l.host_id=h.id AND l.state IN ('active','revoking','quarantined'))""", (host_id,)) as c:
@@ -712,7 +785,7 @@ class ResourceStore:
     async def list_resource_requests(self) -> list[dict[str, Any]]:
         async with self.db.execute(
             """SELECT * FROM resource_lease_requests
-               WHERE state='queued' ORDER BY sequence"""
+               WHERE state='queued' ORDER BY queue_ticket, sequence"""
         ) as cursor:
             rows = [dict(row) async for row in cursor]
         positions: dict[str, int] = {}
