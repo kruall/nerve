@@ -95,6 +95,9 @@ class ExecutionService:
         self._continuations_ready = False
         self._terminal_changed = asyncio.Condition()
         self.ydb_worktree_root = Path(ydb_worktree_root) if ydb_worktree_root else None
+        register_wait_publisher = getattr(self.resource_manager, "set_wait_continuation_publisher", None)
+        if callable(register_wait_publisher):
+            register_wait_publisher(self._schedule_continuation)
 
     async def start_ydb(self, *, session_id: str, kind: str, worktree: str, args: list[str], build_type: str = "relwithdebinfo", publish: Mapping[str, Any] | None = None, auto_continue: bool = True) -> Mapping[str, Any]:
         """Start the two reviewed YDB commands; callers choose neither host nor SSH."""

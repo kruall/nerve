@@ -33,7 +33,7 @@ async def test_handle_refs_waits_and_recovery_intents_are_durable(db):
     assert await db.detach_operation_resource_refs("operation-a") == 1
 
     wait = await db.create_resource_wait_operation({"id": "wait-a", "session_id": "session-a", "operation_id": "operation-a", "request_kind": "pool", "pool": "pool-a", "queue_ticket": 1})
-    assert await db.update_resource_wait_operation(wait["id"], expected_state="pending", state="cancelled", outcome="cancelled")
+    assert await db.update_resource_wait_operation(wait["id"], expected_state="pending", state="cancelled", outcome="REQUEST_CANCELLED")
     intent = await db.create_resource_recovery_intent({"id": "intent-a", "kind": "reconcile", "session_id": "session-a", "handle_id": handle["id"], "operation_id": "operation-a", "payload": {"lease": "lease-a"}})
     await db.close()
     await db.connect()
@@ -60,12 +60,10 @@ async def test_composite_commits_are_idempotent_and_terminal_keeps_handle(db):
     assert len(await db.list_pending_wakeups("session-a")) == 0
     assert len(await db.list_pending_execution_continuations()) == 1
 
-    assert await db.attach_operation_resource_ref("operation-a", "handle-a")
-    assert await db.commit_operation_terminal(operation_id="operation-a", status="cancelled", result={"outcome": "cancelled"})
-    assert await db.commit_operation_terminal(operation_id="operation-a", status="cancelled", result={"outcome": "cancelled"})
     assert await db.list_operation_resource_refs("operation-a") == []
     assert (await db.get_session_resource_handle("handle-a"))["state"] == "active"
     assert (await db.get_execution("operation-a"))["continuation_state"] == "pending"
+    assert (await db.get_execution("operation-a"))["status"] == "succeeded"
     assert len(await db.list_pending_wakeups("session-a")) == 0
 
 
@@ -110,10 +108,10 @@ async def test_wait_and_intent_crud_preserve_order_and_compare_state(db):
     waits = await db.list_resource_wait_operations(state="pending")
     assert [wait["id"] for wait in waits] == [first["id"], second["id"]]
     assert first["requested_hosts_json"] == '["host-a"]'
-    assert await db.update_resource_wait_operation(first["id"], expected_state="pending", state="failed", outcome="no capacity")
+    assert await db.update_resource_wait_operation(first["id"], expected_state="pending", state="failed", outcome="HOST_PERMANENTLY_UNAVAILABLE")
     assert not await db.update_resource_wait_operation(first["id"], expected_state="pending", state="granted")
     failed = await db.get_resource_wait_operation(first["id"])
-    assert failed is not None and failed["outcome"] == "no capacity" and failed["settled_at"]
+    assert failed is not None and failed["outcome"] == "HOST_PERMANENTLY_UNAVAILABLE" and failed["settled_at"]
 
     prepared = await db.create_resource_recovery_intent({
         "id": "intent-prepared", "kind": "acquire", "session_id": "session-a",
@@ -192,19 +190,14 @@ async def test_grant_and_terminal_commits_remain_safe_after_reopen(db):
     assert len(handles) == 1 and handles[0]["lease_id"] == "lease-a"
     assert len(await db.list_pending_wakeups("session-a")) == 0
 
-    assert await db.attach_operation_resource_ref("operation-a", "handle-a")
-    assert await db.commit_operation_terminal(
-        operation_id="operation-a", status="failed", result={"error": "transport lost"},
-    )
     await db.close()
     await db.connect()
-    assert await db.commit_operation_terminal(
-        operation_id="operation-a", status="failed", result={"error": "transport lost"},
-    )
     operation = await db.get_execution("operation-a")
     assert operation is not None
-    assert operation["status"] == "failed"
-    assert operation["result"] == {"error": "transport lost"}
+    assert operation["status"] == "succeeded"
+    assert operation["result"] == {
+        "outcome": "LEASE_GRANTED", "wait_id": "wait-reopen", "generation": 1,
+    }
     assert await db.list_operation_resource_refs("operation-a") == []
     retained = await db.get_session_resource_handle("handle-a")
     assert retained is not None

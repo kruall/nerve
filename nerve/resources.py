@@ -70,6 +70,7 @@ class ResourceRecoveryGate:
                 # Reattachment can issue fresh backend calls.  The durable
                 # intent replay is complete now, so open before it can run.
                 self._ready = True
+                await resources._reattach_pending_waits()
                 await executions._recover_startup(dispatch_continuations=dispatch_continuations)
             finally:
                 self._recovery_task = None
@@ -144,6 +145,8 @@ class LeaseService:
         self.ttl_seconds = max(5, int(raw.get("lease_ttl_seconds", 90)))
         self.poll_seconds = max(0.01, float(raw.get("queue_poll_seconds", 0.25)))
         self._reconciler: asyncio.Task[Any] | None = None
+        self._wait_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._wait_continuation_publisher: Any = None
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._service_started_at = utc_now_iso()
 
@@ -266,11 +269,18 @@ class LeaseService:
     async def initialize(self) -> None:
         await self._recover_startup()
         await self._start_reconcile_loop()
+        await self._reattach_pending_waits()
 
     async def _recover_startup(self) -> None:
         await self.cancel_orphaned_queued_session_reservations()
         await self.release_idle_recovered_session_reservations()
         await self.reconcile_expired()
+
+    async def _reattach_pending_waits(self) -> None:
+        if not self.recovery_gate.ready:
+            return
+        for wait in await self.db.list_resource_wait_operations(state="pending"):
+            self._reattach_wait(wait)
 
     async def _start_reconcile_loop(self) -> None:
         if self._reconciler is None:
@@ -310,6 +320,13 @@ class LeaseService:
         )
 
     async def shutdown(self) -> None:
+        # Wait rows and allocator queue rows are durable.  Do not cancel or
+        # release them on an ordinary agent/service stop; a new service simply
+        # attaches another local poller to the same queued bundle.
+        for task in self._wait_tasks.values():
+            task.cancel()
+        await asyncio.gather(*self._wait_tasks.values(), return_exceptions=True)
+        self._wait_tasks.clear()
         if self._reconciler is not None:
             self._reconciler.cancel()
             await asyncio.gather(self._reconciler, return_exceptions=True)
@@ -454,6 +471,147 @@ class LeaseService:
             if lease is not None and lease["state"] == "active":
                 result.append({**handle, "_lease": lease})
         return result
+
+    def set_wait_continuation_publisher(self, publisher: Any) -> None:
+        """Install ExecutionService's in-process nudge for durable outbox rows."""
+        self._wait_continuation_publisher = publisher
+
+    async def start_or_reattach_wait(
+        self, *, session_id: str, operation_id: str,
+        spec: Mapping[str, Any] | Sequence[Mapping[str, Any]],
+    ) -> Mapping[str, Any]:
+        """Create one durable retained-handle wait, or reattach its poller."""
+        self.recovery_gate.require_ready()
+        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            normalized = self._normalize_handle_spec(spec)
+            existing = await self.db.find_pending_resource_wait_operation(operation_id)
+            if existing is not None:
+                if str(existing["session_id"]) != session_id:
+                    raise ResourceInventoryError("resource wait operation belongs to a different session")
+                self._reattach_wait(existing)
+                return existing
+            operation = await self.db.get_execution(operation_id)
+            if await self.db.get_session(session_id) is None or operation is None:
+                raise ResourceInventoryError("unknown session or operation for resource wait")
+            if str(operation["session_id"]) != session_id:
+                raise ResourceInventoryError("resource wait operation belongs to a different session")
+            requests = [{"pool": pool, "host": host} for pool, host in normalized]
+            wait = await self.db.create_resource_wait_operation({
+                "id": f"wait-{uuid.uuid4().hex}", "session_id": session_id,
+                "operation_id": operation_id,
+                "request_kind": "bundle" if len(requests) > 1 else ("host" if requests[0]["host"] else "pool"),
+                "requested_hosts": requests, "pool": requests[0]["pool"], "queue_ticket": 0,
+            })
+            self._reattach_wait(wait)
+            return wait
+
+    def _reattach_wait(self, wait: Mapping[str, Any]) -> None:
+        wait_id = str(wait["id"])
+        if wait_id not in self._wait_tasks:
+            task = asyncio.create_task(self._run_wait(wait_id))
+            self._wait_tasks[wait_id] = task
+            task.add_done_callback(lambda _task: self._wait_tasks.pop(wait_id, None))
+
+    async def _run_wait(self, wait_id: str) -> None:
+        wait = await self.db.get_resource_wait_operation(wait_id)
+        if wait is None or wait["state"] != "pending":
+            return
+        requests = wait.get("requested_hosts") or []
+        if not requests:
+            return
+        requests = [
+            item if isinstance(item, Mapping) else {
+                "pool": wait["pool"], "host": item if wait["request_kind"] == "host" else None,
+            }
+            for item in requests
+        ]
+        try:
+            leases = await self.acquire(
+                execution_id=str(wait["operation_id"]), session_id=str(wait["session_id"]),
+                requests=[{"slot": f"wait-{index}", "pool": item["pool"], "host": item.get("host")}
+                          for index, item in enumerate(requests)],
+            )
+        except asyncio.CancelledError:
+            # ``acquire`` restores queued rows.  It must not terminalize this
+            # durable Operation merely because this process is going away.
+            raise
+        except Exception:
+            return
+        handles = [
+            {"id": f"handle-{uuid.uuid4().hex}", "session_id": wait["session_id"],
+             "pool": item["pool"], "host_id": lease["host_id"], "lease_id": lease["id"],
+             "fencing_token": lease["fencing_token"]}
+            for item, lease in zip(requests, leases, strict=True)
+        ]
+        if not await self.complete_wait_grant(wait_id, handles):
+            await self.release(execution_id=str(wait["operation_id"]), leases=leases)
+
+    async def complete_wait_grant(self, wait_id: str, handles: Sequence[Mapping[str, Any]]) -> bool:
+        """Persist granted handles before atomically waking the owning session."""
+        won = await self.db.terminalize_resource_wait_operation(
+            wait_id=wait_id, outcome="LEASE_GRANTED", handles=list(handles),
+        )
+        if won and self._wait_continuation_publisher is not None:
+            wait = await self.db.get_resource_wait_operation(wait_id)
+            if wait is not None and wait["outcome"] == "LEASE_GRANTED":
+                self._wait_continuation_publisher(str(wait["operation_id"]))
+        return won
+
+    async def cancel_wait(self, wait_id: str) -> bool:
+        """Cancel queue edges and terminalize REQUEST_CANCELLED once."""
+        task = self._wait_tasks.get(wait_id)
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        wait = await self.db.get_resource_wait_operation(wait_id)
+        if wait is None:
+            return False
+        won = await self.db.terminalize_resource_wait_operation(
+            wait_id=wait_id, outcome="REQUEST_CANCELLED",
+        )
+        await self.db.cancel_resource_requests(str(wait["operation_id"]))
+        if won and self._wait_continuation_publisher is not None:
+            self._wait_continuation_publisher(str(wait["operation_id"]))
+        return won
+
+    async def terminalize_exact_host_waits(self, host_id: str) -> list[str]:
+        """Apply authoritative permanent loss only to explicitly pinned waits."""
+        settled: list[str] = []
+        for wait in await self.db.list_resource_wait_operations(state="pending"):
+            requested = wait.get("requested_hosts") or []
+            if not any(item.get("host") == host_id for item in requested if isinstance(item, Mapping)):
+                continue
+            task = self._wait_tasks.get(str(wait["id"]))
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            if await self.db.terminalize_resource_wait_operation(
+                wait_id=str(wait["id"]), outcome="HOST_PERMANENTLY_UNAVAILABLE",
+            ):
+                await self.db.cancel_resource_requests(str(wait["operation_id"]))
+                settled.append(str(wait["id"]))
+                if self._wait_continuation_publisher is not None:
+                    self._wait_continuation_publisher(str(wait["operation_id"]))
+        return settled
+
+    async def mark_wait_deadlock_replan_required(self, wait_id: str) -> bool:
+        """R7's policy hook; R6 deliberately performs no deadlock analysis."""
+        task = self._wait_tasks.get(wait_id)
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        wait = await self.db.get_resource_wait_operation(wait_id)
+        if wait is None:
+            return False
+        won = await self.db.terminalize_resource_wait_operation(
+            wait_id=wait_id, outcome="DEADLOCK_REPLAN_REQUIRED",
+        )
+        if won:
+            await self.db.cancel_resource_requests(str(wait["operation_id"]))
+            if self._wait_continuation_publisher is not None:
+                self._wait_continuation_publisher(str(wait["operation_id"]))
+        return won
 
     async def acquire_handles(self, session_id: str, spec: Mapping[str, Any] | Sequence[Mapping[str, Any]]) -> Sequence[Mapping[str, str]]:
         """Retain an all-or-none handle bundle, acquiring only its missing slots.

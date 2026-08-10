@@ -1,4 +1,4 @@
-"""Focused contract tests for V53 retained-resource persistence."""
+"""Focused contract tests for V53/V54 retained-resource persistence."""
 
 import importlib
 
@@ -76,7 +76,7 @@ async def test_v53_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp_
         await _legacy_rows(upgraded)
         legacy_before = await _legacy_snapshot(upgraded)
 
-        assert await runner.run_migrations(upgraded) == 53
+        assert await runner.run_migrations(upgraded) == 54
         assert await _schema(fresh) == await _schema(upgraded)
         assert await _legacy_snapshot(upgraded) == legacy_before
     finally:
@@ -144,6 +144,27 @@ async def test_v53_rejects_invalid_states_and_duplicate_resource_references(tmp_
                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 ("wait-1", "session-1", "operation-1", "unknown", "[]", "pool-a", 1,
                  "pending", "now", "now"),
+            )
+        with pytest.raises(aiosqlite.IntegrityError):
+            await db.execute(
+                """INSERT INTO resource_wait_operations(
+                       id, session_id, operation_id, request_kind, requested_hosts_json, pool,
+                       queue_ticket, state, outcome, created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ("wait-invalid-insert", "session-1", "operation-1", "pool", "[]", "pool-a", 2,
+                 "pending", "not-an-outcome", "now", "now"),
+            )
+        await db.execute(
+            """INSERT INTO resource_wait_operations(
+                   id, session_id, operation_id, request_kind, requested_hosts_json, pool,
+                   queue_ticket, state, created_at, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("wait-valid", "session-1", "operation-1", "pool", "[]", "pool-a", 3,
+             "pending", "now", "now"),
+        )
+        with pytest.raises(aiosqlite.IntegrityError):
+            await db.execute(
+                "UPDATE resource_wait_operations SET outcome='not-an-outcome' WHERE id='wait-valid'"
             )
         with pytest.raises(aiosqlite.IntegrityError):
             await db.execute(

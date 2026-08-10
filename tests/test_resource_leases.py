@@ -553,7 +553,7 @@ async def test_resource_live_predicate_covers_durable_lease_wait(db):
     assert await db.session_resource_is_live("session-a") is True
     assert await service.release_all_session_handles("session-a") == []
     assert await db.update_resource_wait_operation(
-        "durable-wait", expected_state="pending", state="cancelled", outcome="cancelled",
+        "durable-wait", expected_state="pending", state="cancelled", outcome="REQUEST_CANCELLED",
     )
     assert await db.session_resource_is_live("session-a") is False
     assert await service.release_all_session_handles("session-a") == [handle["id"]]
