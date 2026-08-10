@@ -14,7 +14,7 @@ from typing import Any
 from nerve.utils.time import utc_now_iso
 
 
-_ACTIVE = ("active", "revoking")
+_HANDLE_ACTIVE = ("active", "releasing", "quarantined")
 
 
 def _row(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -31,6 +31,176 @@ def _row(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
 
 
 class ResourceStore:
+    # Retained handles deliberately live beside leases rather than changing the
+    # lease lifecycle: an Operation terminal transition only removes its ref.
+    async def get_session_resource_handle(self, handle_id: str) -> dict[str, Any] | None:
+        async with self.db.execute("SELECT * FROM session_resource_handles WHERE id=?", (handle_id,)) as c:
+            return _row(await c.fetchone())
+
+    async def list_session_resource_handles(self, session_id: str, *, states: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
+        marks = " AND state IN (%s)" % ",".join("?" for _ in states) if states else ""
+        async with self.db.execute(f"SELECT * FROM session_resource_handles WHERE session_id=?{marks} ORDER BY created_at, id", (session_id, *(states or ()))) as c:
+            return [_row(row) async for row in c]
+
+    async def create_session_resource_handle(self, handle: Mapping[str, Any]) -> dict[str, Any]:
+        now = utc_now_iso()
+        await self._write("""INSERT INTO session_resource_handles
+            (id, session_id, pool, host_id, lease_id, fencing_token, state, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""", (handle["id"], handle["session_id"], handle["pool"], handle["host_id"], handle["lease_id"], handle["fencing_token"], handle.get("state", "active"), now, now))
+        row = await self.get_session_resource_handle(str(handle["id"])); assert row is not None
+        return row
+
+    async def update_session_resource_handle(self, handle_id: str, *, expected_state: str, state: str, release_reason: str | None = None) -> bool:
+        if state not in {"active", "releasing", "released", "quarantined"}:
+            raise ValueError("invalid handle state")
+        now = utc_now_iso()
+        result = await self._write("""UPDATE session_resource_handles SET state=?, release_reason=?, updated_at=?,
+            released_at=CASE WHEN ? IN ('released', 'quarantined') THEN COALESCE(released_at, ?) ELSE NULL END
+            WHERE id=? AND state=?""", (state, release_reason, now, state, now, handle_id, expected_state))
+        return bool(result.rowcount)
+
+    async def delete_session_resource_handle(self, handle_id: str) -> bool:
+        return bool((await self._write("DELETE FROM session_resource_handles WHERE id=?", (handle_id,))).rowcount)
+
+    async def attach_operation_resource_ref(self, operation_id: str, handle_id: str) -> bool:
+        try:
+            result = await self._write("INSERT INTO operation_resource_refs(operation_id, handle_id, created_at) VALUES (?, ?, ?)", (operation_id, handle_id, utc_now_iso()))
+        except sqlite3.IntegrityError:
+            return False
+        return bool(result.rowcount)
+
+    async def detach_operation_resource_refs(self, operation_id: str) -> int:
+        return (await self._write("DELETE FROM operation_resource_refs WHERE operation_id=?", (operation_id,))).rowcount
+
+    async def list_operation_resource_refs(self, operation_id: str) -> list[dict[str, Any]]:
+        async with self.db.execute("SELECT * FROM operation_resource_refs WHERE operation_id=? ORDER BY created_at, handle_id", (operation_id,)) as c:
+            return [dict(row) async for row in c]
+
+    async def get_resource_wait_operation(self, wait_id: str) -> dict[str, Any] | None:
+        async with self.db.execute("SELECT * FROM resource_wait_operations WHERE id=?", (wait_id,)) as c:
+            return _row(await c.fetchone())
+
+    async def list_resource_wait_operations(self, *, state: str | None = None) -> list[dict[str, Any]]:
+        where, params = ("WHERE state=?", (state,)) if state else ("", ())
+        async with self.db.execute(f"SELECT * FROM resource_wait_operations {where} ORDER BY queue_ticket, id", params) as c:
+            return [_row(row) async for row in c]
+
+    async def create_resource_wait_operation(self, wait: Mapping[str, Any]) -> dict[str, Any]:
+        now = utc_now_iso()
+        await self._write("""INSERT INTO resource_wait_operations
+            (id, session_id, operation_id, request_kind, requested_hosts_json, pool, queue_ticket, state, outcome, wakeup_generation, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (wait["id"], wait["session_id"], wait["operation_id"], wait["request_kind"], json.dumps(wait.get("requested_hosts", [])), wait["pool"], wait["queue_ticket"], wait.get("state", "pending"), wait.get("outcome"), wait.get("wakeup_generation", 0), now, now))
+        row = await self.get_resource_wait_operation(str(wait["id"])); assert row is not None
+        return row
+
+    async def update_resource_wait_operation(self, wait_id: str, *, expected_state: str, state: str, outcome: str | None = None) -> bool:
+        if state not in {"pending", "granted", "cancelled", "failed"}:
+            raise ValueError("invalid wait state")
+        now = utc_now_iso()
+        result = await self._write("""UPDATE resource_wait_operations SET state=?, outcome=?, updated_at=?,
+            settled_at=CASE WHEN ?='pending' THEN NULL ELSE COALESCE(settled_at, ?) END WHERE id=? AND state=?""", (state, outcome, now, state, now, wait_id, expected_state))
+        return bool(result.rowcount)
+
+    async def delete_resource_wait_operation(self, wait_id: str) -> bool:
+        return bool((await self._write("DELETE FROM resource_wait_operations WHERE id=?", (wait_id,))).rowcount)
+
+    async def get_resource_recovery_intent(self, intent_id: str) -> dict[str, Any] | None:
+        async with self.db.execute("SELECT * FROM resource_recovery_intents WHERE id=?", (intent_id,)) as c:
+            return _row(await c.fetchone())
+
+    async def list_resource_recovery_intents(self, *, state: str | None = None) -> list[dict[str, Any]]:
+        where, params = ("WHERE state=?", (state,)) if state else ("", ())
+        async with self.db.execute(f"SELECT * FROM resource_recovery_intents {where} ORDER BY created_at, id", params) as c:
+            return [_row(row) async for row in c]
+
+    async def create_resource_recovery_intent(self, intent: Mapping[str, Any]) -> dict[str, Any]:
+        now = utc_now_iso()
+        await self._write("""INSERT INTO resource_recovery_intents
+            (id, kind, session_id, handle_id, operation_id, payload_json, state, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""", (intent["id"], intent["kind"], intent.get("session_id"), intent.get("handle_id"), intent.get("operation_id"), json.dumps(intent.get("payload", {})), intent.get("state", "prepared"), now, now))
+        row = await self.get_resource_recovery_intent(str(intent["id"])); assert row is not None
+        return row
+
+    async def update_resource_recovery_intent(self, intent_id: str, *, expected_state: str, state: str) -> bool:
+        if state not in {"prepared", "processing", "completed", "failed"}:
+            raise ValueError("invalid recovery intent state")
+        now = utc_now_iso()
+        result = await self._write("""UPDATE resource_recovery_intents SET state=?, updated_at=?,
+            completed_at=CASE WHEN ? IN ('completed', 'failed') THEN COALESCE(completed_at, ?) ELSE NULL END
+            WHERE id=? AND state=?""", (state, now, state, now, intent_id, expected_state))
+        return bool(result.rowcount)
+
+    async def delete_resource_recovery_intent(self, intent_id: str) -> bool:
+        return bool((await self._write("DELETE FROM resource_recovery_intents WHERE id=?", (intent_id,))).rowcount)
+
+    async def commit_handle_grant(self, *, wait_id: str, handle: Mapping[str, Any]) -> bool:
+        """Grant exactly once: handle, waiter transition, and continuation update."""
+        now = utc_now_iso()
+        async with self._atomic():
+            async with self.db.execute("SELECT state, operation_id FROM resource_wait_operations WHERE id=?", (wait_id,)) as c:
+                wait = await c.fetchone()
+            if wait is None:
+                return False
+            if wait["state"] == "granted":
+                return True
+            if wait["state"] != "pending":
+                return False
+
+            async with self.db.execute(
+                """SELECT id FROM session_resource_handles
+                   WHERE lease_id = ? AND state IN (?, ?, ?)""",
+                (handle["lease_id"], *_HANDLE_ACTIVE),
+            ) as c:
+                active_handle = await c.fetchone()
+            if active_handle is not None and str(active_handle["id"]) != str(handle["id"]):
+                return False
+
+            try:
+                await self.db.execute(
+                    """INSERT INTO session_resource_handles
+                        (id, session_id, pool, host_id, lease_id, fencing_token, state, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        handle["id"], handle["session_id"], handle["pool"], handle["host_id"],
+                        handle["lease_id"], handle["fencing_token"], handle.get("state", "active"), now, now
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                if "session_resource_handles.lease_id" in str(exc):
+                    return False
+                raise
+
+            await self.db.execute(
+                """UPDATE resource_wait_operations
+                   SET state='granted', outcome='granted', settled_at=?, updated_at=?
+                   WHERE id=? AND state='pending'""",
+                (now, now, wait_id),
+            )
+            await self.db.execute(
+                """UPDATE executions
+                   SET continuation_state = CASE WHEN auto_continue=1 THEN 'pending' ELSE 'suppressed' END,
+                       continuation_error = NULL,
+                       updated_at = ?,
+                       revision = revision + 1
+                   WHERE id=?""",
+                (now, wait["operation_id"]),
+            )
+        return True
+
+    async def commit_operation_terminal(self, *, operation_id: str, status: str, result: Mapping[str, Any]) -> bool:
+        """Settle one Operation and wake its owner, intentionally retaining all handles."""
+        if status not in {"succeeded", "failed", "cancelled", "lost"}:
+            raise ValueError("terminal execution status required")
+        now = utc_now_iso()
+        async with self._atomic():
+            won = await self.db.execute("""UPDATE executions SET status=?, result=?, finished_at=?, updated_at=?, revision=revision+1,
+                continuation_state=CASE WHEN auto_continue=1 THEN 'pending' ELSE 'suppressed' END WHERE id=? AND status IN ('queued','starting','running','cancelling')""", (status, json.dumps(dict(result)), now, now, operation_id))
+            if not won.rowcount:
+                async with self.db.execute("SELECT status FROM executions WHERE id=?", (operation_id,)) as c:
+                    row = await c.fetchone()
+                return row is not None and row["status"] in {"succeeded", "failed", "cancelled", "lost"}
+            await self.db.execute("DELETE FROM operation_resource_refs WHERE operation_id=?", (operation_id,))
+        return True
     async def get_session_resource_reservation(self, session_id: str) -> dict[str, Any] | None:
         async with self.db.execute(
             "SELECT * FROM session_resource_reservations WHERE session_id=?", (session_id,)
