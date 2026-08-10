@@ -12,6 +12,7 @@ import pytest_asyncio
 from nerve.executions.backend import BackendRecovery, BackendResult, ExecutionBackendUncertain, LocalExecutionBackend
 from nerve.executions.public import public_execution
 from nerve.executions.service import ExecutionService, _bind_session_reservation_slot
+from nerve.resources import LeaseService, ResourceInventory
 
 
 class StubProfile:
@@ -106,6 +107,33 @@ def broadcast_stub(monkeypatch):
 
 def _engine():
     return SimpleNamespace(run=AsyncMock(return_value="continued"), is_session_running=lambda _sid: False)
+
+
+async def _lease_service(db):
+    inventory = ResourceInventory(
+        db,
+        {
+            "connections": ["lab"],
+            "hosts": [{"id": "builder-1", "connection_ref": "lab"}],
+            "pools": [{"id": "builders", "members": ["builder-1"]}],
+        },
+    )
+    await inventory.initialize()
+    return LeaseService(db=db, inventory=inventory)
+
+
+class _SynchronousBackend:
+    name = "synchronous-backend"
+
+    async def run(self, *, execution_id, plan, workspace, execution_dir, emit, started):
+        await emit("stdout", "stage=backend_once\n")
+        return BackendResult(0, summary="ok")
+
+    async def cancel(self, *, execution_id, grace_seconds, mode):
+        return True
+
+    async def recover(self, execution):
+        return BackendRecovery("orphaned")
 
 
 def test_session_reservation_lease_is_bound_to_compiled_resource_slot():
@@ -1148,6 +1176,45 @@ async def test_startup_reconciles_orphaned_terminal_resource_queue(db, owner, tm
     ) as cursor:
         bundle = await cursor.fetchone()
     assert bundle is not None and bundle["state"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_startup_retries_stale_session_reservation_lease(db, owner, tmp_path):
+    resource_manager = await _lease_service(db)
+    stale = await resource_manager.reserve_for_session(
+        session_id=owner, pool="builders", worktree=f"spin:{owner}",
+    )
+    await resource_manager.release(
+        execution_id=stale["lease"]["execution_id"],
+        leases=[stale["lease"]],
+    )
+
+    plan = StubPlan().as_dict(redact_secrets=False)
+    plan["session_id"] = owner
+    plan["resources"] = {"session": "builders"}
+    plan["session_reservation"] = {"pool": "builders", "worktree": f"spin:{owner}"}
+    await db.create_execution(
+        "exec-stale-session-reservation-startup", session_id=owner,
+        kind="test.wait", profile_version="1", profile_hash="hash",
+        profile_snapshot={}, plan=plan, resource_requests=[],
+    )
+
+    service = ExecutionService(
+        db=db, engine=_engine(), workspace=tmp_path, catalog=SimpleNamespace(),
+        backend=_SynchronousBackend(), resource_manager=resource_manager,
+        execution_root=tmp_path / "runs",
+    )
+    await service.initialize()
+
+    async def _succeeded():
+        row = await db.get_execution("exec-stale-session-reservation-startup")
+        return row if row is not None and row["status"] == "succeeded" else None
+
+    current = await _eventually(_succeeded)
+    logs = await db.tail_execution_logs("exec-stale-session-reservation-startup", limit=20)
+    assert current["status"] == "succeeded"
+    assert any("stage=reservation_acquired" in entry["text"] for entry in logs["entries"])
+    await service.shutdown()
 
 
 @pytest.mark.asyncio

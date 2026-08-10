@@ -115,8 +115,18 @@ class LeaseService:
                 raise ResourceInventoryError("session reservation is pinned to a different pool")
             lease = await self.db.get_resource_lease(existing["lease_id"])
             if lease is None or lease["state"] != "active":
-                raise ResourceInventoryError("session reservation is no longer usable")
-            return {**existing, "lease": lease}
+                # The durable reservation row can outlive a stale session lease
+                # across a restart. Re-acquire it rather than failing execution
+                # scheduling with a hard error.
+                await self.db.cancel_resource_requests(self._reservation_execution_id(session_id))
+                await self.db.settle_session_resource_reservation(
+                    session_id=session_id,
+                    state="released",
+                    reason="session reservation lease is no longer active",
+                )
+                existing = None
+            else:
+                return {**existing, "lease": lease}
         if existing is not None and existing["state"] != "released":
             raise ResourceInventoryError("session reservation has already been settled")
         execution_id = self._reservation_execution_id(session_id)
