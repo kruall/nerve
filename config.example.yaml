@@ -267,6 +267,8 @@ memory:
 # connection providers, never in execution arguments or this model-visible
 # inventory. Pools may overlap; the lease is exclusive per physical host.
 # resources:
+#   # Keep the resource_command MCP tool approval-gated. It can execute any
+#   # process available to the configured remote worker account.
 #   lease_ttl_seconds: 90       # expiry enters revoking; it never frees a host
 #   queue_poll_seconds: 0.25    # local waiter cadence; FIFO state is durable
 #   connections: [lab-ssh]

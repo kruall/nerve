@@ -184,6 +184,65 @@ class ExecutionService:
                 "cancellation": {"mode": "terminate", "grace_seconds": 10, "run_cleanup": False}}
         return await self._start_serialized(session_id=session_id, plan=plan, profile_snapshot={"kind": "artifact_transfer", "title": "direct artifact transfer", "source": "built-in reviewed transfer"}, auto_continue=auto_continue)
 
+    async def start_resource_command(
+        self, *, session_id: str, pool: Any, executable: Any,
+        args: Any, timeout_seconds: Any = 3600,
+        auto_continue: bool = True,
+    ) -> Mapping[str, Any]:
+        """Run one literal argv command on an exclusively leased resource host."""
+        if not isinstance(pool, str) or not pool or "\x00" in pool:
+            raise ValueError("resource command pool is invalid")
+        if (
+            not isinstance(executable, str) or not executable
+            or "\x00" in executable or "\n" in executable
+        ):
+            raise ValueError("resource command executable is invalid")
+        if (
+            not isinstance(args, list)
+            or not all(isinstance(value, str) and "\x00" not in value for value in args)
+        ):
+            raise ValueError("resource command args must be literal strings")
+        if (
+            isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int)
+            or not 1 <= timeout_seconds <= 86400
+        ):
+            raise ValueError("resource command timeout is invalid")
+        inventory = getattr(self.resource_manager, "inventory", None)
+        if inventory is None:
+            raise ValueError("resource inventory is unavailable")
+        inventory.members(pool)
+        plan = {
+            "kind": "resource_command",
+            "profile_version": "1",
+            "profile_hash": "built-in-resource-command-v1",
+            "arguments": {
+                "pool": pool, "executable": executable, "args": list(args),
+            },
+            "resources": {"worker": pool},
+            "steps": [{
+                "id": "command", "transport": "resource",
+                "resource_slot": "worker", "executable": executable,
+                "argv": [{"type": "literal", "value": value} for value in args],
+                "cwd": "execution_dir",
+            }],
+            "result": {"success_exit_codes": [0]},
+            "timeout_seconds": timeout_seconds,
+            "cancellation": {
+                "mode": "terminate", "grace_seconds": 10,
+                "run_cleanup": False,
+            },
+        }
+        return await self._start_serialized(
+            session_id=session_id,
+            plan=plan,
+            profile_snapshot={
+                "kind": "resource_command",
+                "title": "approved arbitrary resource command",
+                "source": "built-in approval-gated operation",
+            },
+            auto_continue=auto_continue,
+        )
+
     async def inspect_ydb_files(self, *, session_id: str, operation: str, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
         inspect = getattr(self.backend, "inspect_ydb_files", None)
         use = getattr(self.resource_manager, "use_active_session_reservation", None)

@@ -141,6 +141,20 @@ The built-in local backend executes literal argv with no shell. Resource
 transport requires a configured inventory/backend implementation; lease
 acquisition and release remain service-owned and are never model-managed.
 
+## Approval-gated resource commands
+
+`resource_command(pool, executable, args)` runs one executable on an exclusively
+leased host from a configured pool. The executable and every argument are sent
+as separate process arguments; Nerve does not add a shell, accept SSH
+coordinates, or let the caller select a physical host. The command runs in its
+isolated execution directory and uses the normal durable status, tail,
+cancellation, fencing, and uncertain-cleanup behavior.
+
+This capability permits arbitrary code execution within the remote worker
+account. Keep its MCP approval mode at `prompt`; do not add a per-tool `approve`
+exception. Operators can still explicitly run a shell executable, but the full
+shell invocation remains visible in the approval request.
+
 ## Remote artifacts
 
 The SSH supervisor exposes a fixed `artifact_put` RPC for copying a verified

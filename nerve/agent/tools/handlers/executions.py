@@ -19,6 +19,7 @@ from nerve.agent.tools.schemas import (
     EXECUTION_LIST_SCHEMA,
     EXECUTION_STATUS_SCHEMA,
     EXECUTION_TAIL_SCHEMA,
+    RESOURCE_COMMAND_SCHEMA,
     YDB_MAKE_SCHEMA,
     YDB_TEST_SCHEMA,
     YDB_FILE_LIST_SCHEMA,
@@ -155,6 +156,32 @@ async def artifact_transfer_handler(ctx: ToolContext, args: dict) -> ToolResult:
     return _json({"kind": "artifact_transfer", "execution": public_execution(row)})
 
 
+async def resource_command_handler(ctx: ToolContext, args: dict) -> ToolResult:
+    service = _service(ctx)
+    if service is None:
+        return ToolResult.text("Execution lifecycle service is unavailable.", is_error=True)
+    try:
+        row = await service.start_resource_command(
+            session_id=ctx.session_id,
+            pool=args.get("pool"),
+            executable=args.get("executable"),
+            args=args.get("args", []),
+            timeout_seconds=args.get("timeout_seconds", 3600),
+            auto_continue=bool(args.get("detached", False)),
+        )
+        if not args.get("detached", False):
+            row = await service.join_execution(
+                execution_id=str(row["id"]), session_id=ctx.session_id,
+            )
+    except Exception as exc:
+        logger.warning("resource command rejected (%s)", type(exc).__name__)
+        return ToolResult.text(
+            "Could not start resource command: pool or command arguments were rejected.",
+            is_error=True,
+        )
+    return _json({"kind": "resource_command", "execution": public_execution(row)})
+
+
 async def ydb_test_handler(ctx: ToolContext, args: dict) -> ToolResult:
     return await _ydb_handler(ctx, args, "ydb_test")
 
@@ -273,6 +300,7 @@ async def execution_list_handler(ctx: ToolContext, args: dict) -> ToolResult:
 
 EXECUTION_SPECS = [
     ToolSpec("artifact_transfer", "Copy one confined artifact directly between two leased remote pools; Nerve never relays bytes.", ARTIFACT_TRANSFER_SCHEMA, artifact_transfer_handler),
+    ToolSpec("resource_command", "Run a shell-free executable and literal argv on one exclusively leased host from a configured resource pool.", RESOURCE_COMMAND_SCHEMA, resource_command_handler),
     ToolSpec("ydb_make", "Synchronize a configured YDB worktree to the session's reviewed builder and run ya make.", YDB_MAKE_SCHEMA, ydb_make_handler),
     ToolSpec("ydb_test", "Synchronize a configured YDB worktree to the session's reviewed builder and run ya tests.", YDB_TEST_SCHEMA, ydb_test_handler),
     ToolSpec("ydb_file_list", "List bounded paths in this session's synchronized YDB checkout.", YDB_FILE_LIST_SCHEMA, ydb_file_list_handler),

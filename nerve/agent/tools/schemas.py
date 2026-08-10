@@ -77,6 +77,35 @@ ARTIFACT_TRANSFER_SCHEMA = {
     }, "required": ["source", "destination"], "additionalProperties": False,
 }
 
+RESOURCE_COMMAND_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "pool": {
+            "type": "string",
+            "description": "Configured resource pool from resource_inventory",
+        },
+        "executable": {
+            "type": "string",
+            "description": "Executable passed directly to the remote process launcher; no shell is implied",
+        },
+        "args": {
+            "type": "array",
+            "items": {"type": "string"},
+            "default": [],
+            "description": "Literal argv elements",
+        },
+        "timeout_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 86400,
+            "default": 3600,
+        },
+        "detached": {"type": "boolean", "default": False},
+    },
+    "required": ["pool", "executable"],
+    "additionalProperties": False,
+}
+
 _YDB_OPERATION_PROPERTIES = {
     "worktree": {"type": "string", "description": "Configured local YDB Git worktree top-level"},
     "args": {"type": "array", "items": {"type": "string"}, "default": [], "description": "Additional ya argv elements"},

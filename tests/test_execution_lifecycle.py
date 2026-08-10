@@ -217,6 +217,75 @@ async def test_artifact_transfer_validates_remote_endpoint_before_start(db, owne
 
 
 @pytest.mark.asyncio
+async def test_resource_command_builds_shell_free_leased_plan(db, owner, tmp_path):
+    inventory = SimpleNamespace(members=Mock(return_value=["worker-1"]))
+    service = ExecutionService(
+        db=db, engine=_engine(), workspace=tmp_path, catalog=SimpleNamespace(),
+        resource_manager=SimpleNamespace(inventory=inventory),
+    )
+    service._start_serialized = AsyncMock(return_value={"id": "exec-command"})
+
+    await service.start_resource_command(
+        session_id=owner,
+        pool="test-machines",
+        executable="/opt/tests/run",
+        args=["--case", "value with spaces; $(still-data)"],
+        timeout_seconds=90,
+        auto_continue=False,
+    )
+
+    inventory.members.assert_called_once_with("test-machines")
+    call = service._start_serialized.await_args.kwargs
+    assert call["auto_continue"] is False
+    assert call["plan"] == {
+        "kind": "resource_command",
+        "profile_version": "1",
+        "profile_hash": "built-in-resource-command-v1",
+        "arguments": {
+            "pool": "test-machines",
+            "executable": "/opt/tests/run",
+            "args": ["--case", "value with spaces; $(still-data)"],
+        },
+        "resources": {"worker": "test-machines"},
+        "steps": [{
+            "id": "command", "transport": "resource",
+            "resource_slot": "worker", "executable": "/opt/tests/run",
+            "argv": [
+                {"type": "literal", "value": "--case"},
+                {"type": "literal", "value": "value with spaces; $(still-data)"},
+            ],
+            "cwd": "execution_dir",
+        }],
+        "result": {"success_exit_codes": [0]},
+        "timeout_seconds": 90,
+        "cancellation": {
+            "mode": "terminate", "grace_seconds": 10,
+            "run_cleanup": False,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_resource_command_rejects_unknown_pool_and_malformed_argv(db, owner, tmp_path):
+    inventory = SimpleNamespace(members=Mock(side_effect=KeyError("missing")))
+    service = ExecutionService(
+        db=db, engine=_engine(), workspace=tmp_path, catalog=SimpleNamespace(),
+        resource_manager=SimpleNamespace(inventory=inventory),
+    )
+    service._start_serialized = AsyncMock()
+
+    with pytest.raises(KeyError):
+        await service.start_resource_command(
+            session_id=owner, pool="missing", executable="/bin/true", args=[],
+        )
+    with pytest.raises(ValueError, match="literal strings"):
+        await service.start_resource_command(
+            session_id=owner, pool="workers", executable="/bin/true", args=[1],
+        )
+    service._start_serialized.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_ydb_host_release_refuses_active_execution(db, owner, tmp_path):
     await db.create_execution(
         "exec-active",

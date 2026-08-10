@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 import yaml
@@ -300,6 +301,39 @@ async def test_start_reports_missing_lifecycle_service(tmp_path):
     )
     assert unknown.is_error is True
     assert "unknown execution kind" in unknown.content[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_resource_command_tool_forwards_literal_argv_and_waits():
+    class Service:
+        start_resource_command = AsyncMock(
+            return_value={"id": "exec-command", "session_id": "s"},
+        )
+        join_execution = AsyncMock(
+            return_value={
+                "id": "exec-command", "session_id": "s", "status": "succeeded",
+                "continuation": {"state": "suppressed"},
+            },
+        )
+
+    service = Service()
+    result = await build_default_registry().invoke(
+        "resource_command",
+        ToolContext(session_id="s", execution_service=service),
+        {
+            "pool": "test-machines", "executable": "/bin/echo",
+            "args": ["hello world"], "timeout_seconds": 30,
+        },
+    )
+
+    assert result.is_error is False
+    service.start_resource_command.assert_awaited_once_with(
+        session_id="s", pool="test-machines", executable="/bin/echo",
+        args=["hello world"], timeout_seconds=30, auto_continue=False,
+    )
+    service.join_execution.assert_awaited_once_with(
+        execution_id="exec-command", session_id="s",
+    )
 
 
 def test_config_validation_treats_profile_as_portable_reviewed_config(tmp_path):
