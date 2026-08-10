@@ -104,8 +104,12 @@ class ExecutionService:
             publish_path = path
         top = validate_worktree(worktree, self.ydb_worktree_root)
         snap = ydb_snapshot(top)
+        output_dir = ".nerve-ydb-output"
         published = (None if publish_path is None else {
-            "output_path": publish_path.as_posix(), "artifact_root": "artifacts",
+            # ``ya`` output is not part of its source checkout.  Keep it in a
+            # fixed relative directory so publication never depends on a
+            # compiler-specific default or a caller-supplied remote path.
+            "output_path": (PurePosixPath(output_dir) / publish_path).as_posix(), "artifact_root": "artifacts",
             "path": "ydb/" + hashlib.sha256(
                 (str(snap.get("snapshot_id")) + "\0" + publish_path.as_posix()).encode()
             ).hexdigest()[:32] + "/" + publish_path.name,
@@ -133,7 +137,7 @@ class ExecutionService:
         snap["pack_length"] = len(pack)
         snap["pack_sha256"] = hashlib.sha256(pack).hexdigest()
         test = kind == "ydb_test"
-        argv = ["make", "--build", build_type] + (["-tA"] if test else []) + list(args)
+        argv = ["make", "--build", build_type, "--output", output_dir] + (["-tA"] if test else []) + list(args)
         plan = {"kind": kind, "profile_version": "1", "profile_hash": "built-in-ydb-v1",
                 "arguments": {"args": list(args), "build_type": build_type}, "resources": {"session": "ydb-builders"},
                 "session_reservation": {"pool": "ydb-builders", "worktree": str(top)},

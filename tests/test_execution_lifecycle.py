@@ -173,11 +173,14 @@ async def test_ydb_make_publishes_one_confined_output_with_explicit_build_type(
                             publish={"output_path": "ydb/tools/ydb_bench/ydb_bench"})
 
     plan = service._start_serialized.await_args.kwargs["plan"]
-    assert plan["steps"][0]["argv"][:3] == [
+    assert plan["steps"][0]["argv"][:5] == [
         {"type": "literal", "value": "make"},
         {"type": "literal", "value": "--build"},
         {"type": "literal", "value": "profile"},
+        {"type": "literal", "value": "--output"},
+        {"type": "literal", "value": ".nerve-ydb-output"},
     ]
+    assert plan["ydb_publish"]["output_path"] == ".nerve-ydb-output/ydb/tools/ydb_bench/ydb_bench"
     assert plan["ydb_publish"]["artifact_root"] == "artifacts"
     assert plan["ydb_publish"]["path"].endswith("/ydb_bench")
 
