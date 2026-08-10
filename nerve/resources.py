@@ -13,10 +13,20 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+import aiosqlite
+
 from nerve.utils.time import utc_now_iso
 
 
 class ResourceInventoryError(ValueError): pass
+
+
+def _is_closed_database_error(error: BaseException) -> bool:
+    """Identify the aiosqlite errors expected while tearing down the service."""
+    if not isinstance(error, (aiosqlite.ProgrammingError, ValueError)):
+        return False
+    message = str(error).casefold()
+    return "closed" in message and ("connection" in message or "database" in message)
 
 
 class ResourceHandleOwnershipError(PermissionError):
@@ -581,7 +591,10 @@ class LeaseService:
         if wait_id not in self._wait_tasks:
             task = asyncio.create_task(self._run_wait(wait_id))
             self._wait_tasks[wait_id] = task
-            task.add_done_callback(lambda _task: self._wait_tasks.pop(wait_id, None))
+            task.add_done_callback(
+                lambda done: self._wait_tasks.pop(wait_id, None)
+                if self._wait_tasks.get(wait_id) is done else None
+            )
 
     def _wait_hosts(self, wait: Mapping[str, Any]) -> set[str]:
         """Expand a durable wait to its possible physical hosts."""
@@ -698,6 +711,22 @@ class LeaseService:
             await self.release_handle(session_id, str(handle["id"]))
 
     async def _run_wait(self, wait_id: str) -> None:
+        try:
+            await self._run_wait_impl(wait_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            # Shutdown may close the database before the event-loop callback
+            # gets a chance to cancel this best-effort local poller. The wait
+            # is durable and will be reattached by the next service instance.
+            if not _is_closed_database_error(error):
+                raise
+        finally:
+            task = self._wait_tasks.get(wait_id)
+            if task is asyncio.current_task():
+                self._wait_tasks.pop(wait_id, None)
+
+    async def _run_wait_impl(self, wait_id: str) -> None:
         wait = await self.db.get_resource_wait_operation(wait_id)
         if wait is None or wait["state"] != "pending":
             return
@@ -736,8 +765,6 @@ class LeaseService:
             # ``acquire`` restores queued rows.  It must not terminalize this
             # durable Operation merely because this process is going away.
             raise
-        except Exception:
-            return
         handles = [
             {"id": f"handle-{uuid.uuid4().hex}", "session_id": wait["session_id"],
              "pool": item["pool"], "host_id": lease["host_id"], "lease_id": lease["id"],
@@ -764,6 +791,7 @@ class LeaseService:
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+            self._wait_tasks.pop(wait_id, None)
         wait = await self.db.get_resource_wait_operation(wait_id)
         if wait is None:
             return False
@@ -883,6 +911,45 @@ class LeaseService:
         selected_by_index = iter(handles)
         ordered = [next(selected_by_index) if handle is None else handle for handle in selected]
         return [self._opaque_handle(handle) for handle in ordered]
+
+    async def start_public_handle_wait(
+        self, session_id: str, spec: Mapping[str, Any] | Sequence[Mapping[str, Any]],
+    ) -> Mapping[str, Any]:
+        """Create a session-owned durable wait without exposing its operation.
+
+        The execution is solely the durable continuation outbox record; its id
+        never crosses the public tool boundary.  A fresh id per request also
+        makes each detached request own exactly one wait/continuation pair.
+        """
+        self.recovery_gate.require_ready()
+        normalized = self._normalize_handle_spec(spec)
+        if await self.db.get_session(session_id) is None:
+            raise ResourceInventoryError("unknown session for resource handles")
+        operation_id = f"resource-handle-wait:{uuid.uuid4().hex}"
+        await self.db.create_execution(
+            operation_id, session_id=session_id, kind="resource_handle_wait",
+            profile_version="1", profile_hash="resource-handle-wait-v1",
+            profile_snapshot={}, plan={"resource_handle_wait": True},
+            resource_requests=[], auto_continue=True,
+        )
+        return await self.start_or_reattach_wait(
+            session_id=session_id, operation_id=operation_id,
+            spec=[{"pool": pool, "host": host} for pool, host in normalized],
+        )
+
+    async def public_handle_wait(self, session_id: str, wait_id: str) -> Mapping[str, Any]:
+        """Return the safe public state of one owner-bound durable wait."""
+        wait = await self.db.get_resource_wait_operation(wait_id)
+        if wait is None or str(wait["session_id"]) != session_id:
+            raise ResourceHandleOwnershipError()
+        return {"wait_id": str(wait["id"]), "outcome": wait.get("outcome"),
+                "queue_position": int(wait["queue_ticket"]) if wait["state"] == "pending" else None}
+
+    async def cancel_public_handle_wait(self, session_id: str, wait_id: str) -> bool:
+        # Check before cancelling: cancel_wait deliberately accepts a bare id
+        # for trusted lifecycle code, whereas the public path is owner-bound.
+        await self.public_handle_wait(session_id, wait_id)
+        return await self.cancel_wait(wait_id)
 
     async def list_session_handles(self, session_id: str) -> Sequence[Mapping[str, str]]:
         """List only opaque active handle identifiers owned by a session."""

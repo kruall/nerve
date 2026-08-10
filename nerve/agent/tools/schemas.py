@@ -221,6 +221,44 @@ RESOURCE_QUARANTINE_SCHEMA = {
     "additionalProperties": False,
 }
 
+# Retained handles are session-owned capabilities.  In particular, none of
+# these public schemas accepts a session id: adapters bind ownership from
+# ToolContext instead.
+RESOURCE_HANDLE_REQUEST = {
+    "type": "object",
+    "properties": {
+        "pool": {"type": "string", "minLength": 1},
+        "host": {"type": "string", "minLength": 1},
+    },
+    "required": ["pool"], "additionalProperties": False,
+}
+RESOURCE_HANDLE_ACQUIRE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "requests": {"type": "array", "items": RESOURCE_HANDLE_REQUEST, "minItems": 1, "maxItems": 16},
+        "detached": {"type": "boolean", "default": False},
+    },
+    "required": ["requests"], "additionalProperties": False,
+}
+RESOURCE_HANDLE_LIST_SCHEMA = RESOURCE_EMPTY_SCHEMA
+RESOURCE_HANDLE_ID_SCHEMA = {
+    "type": "object", "properties": {"handle_id": {"type": "string", "minLength": 1}},
+    "required": ["handle_id"], "additionalProperties": False,
+}
+RESOURCE_HANDLE_WAIT_CANCEL_SCHEMA = {
+    "type": "object", "properties": {"wait_id": {"type": "string", "minLength": 1}},
+    "required": ["wait_id"], "additionalProperties": False,
+}
+RESOURCE_HANDLE_CHECK_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "handle_id": {"type": "string", "minLength": 1},
+        "wait_id": {"type": "string", "minLength": 1},
+    },
+    "oneOf": [{"required": ["handle_id"]}, {"required": ["wait_id"]}],
+    "required": [], "additionalProperties": False,
+}
+
 
 # ----- Task tools -----
 

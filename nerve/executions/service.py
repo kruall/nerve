@@ -357,6 +357,12 @@ class ExecutionService:
             )
         for row in await self.db.list_active_executions():
             status = row["status"]
+            # Resource-handle waits are allocated by LeaseService's durable
+            # poller, not an execution backend.  Their terminal transition
+            # publishes the normal session continuation, and reattaching the
+            # poller before this recovery pass keeps that contract intact.
+            if row.get("kind") == "resource_handle_wait":
+                continue
             if status == "queued":
                 self._spawn_runner(row["id"])
                 continue
@@ -623,6 +629,8 @@ class ExecutionService:
     async def _run(self, execution_id: str) -> None:
         row = await self.db.get_execution(execution_id)
         if row is None:
+            return
+        if row.get("kind") == "resource_handle_wait":
             return
         if row["status"] == "queued":
             if not await self.db.transition_execution(

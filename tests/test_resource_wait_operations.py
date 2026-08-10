@@ -1,5 +1,6 @@
 """R6 durable retained-handle wait operation contracts."""
 import asyncio
+import sqlite3
 from types import SimpleNamespace
 import pytest
 from nerve.resources import LeaseService, ResourceInventory, ResourceRecoveryGate
@@ -129,6 +130,41 @@ async def test_concurrent_start_or_reattach_serializes_one_wait_and_poller(db):
     assert len(service._wait_tasks) == 1
     await service.cancel_wait(waits[0]["id"])
     await service.release(execution_id="holder", leases=held)
+
+
+@pytest.mark.asyncio
+async def test_wait_poller_does_not_swallow_deadlock_detector_errors(db):
+    service = await _service(db)
+    operation = await _operation(db, "deadlock-error")
+    wait = await service.start_or_reattach_wait(
+        session_id="deadlock-error", operation_id=operation["id"],
+        spec=[{"pool": "workers", "host": "a"}],
+    )
+
+    async def broken_deadlock_detector(_wait):
+        raise RuntimeError("injected deadlock detector failure")
+
+    service._deadlock_victim = broken_deadlock_detector
+    task = service._wait_tasks[wait["id"]]
+    with pytest.raises(RuntimeError, match="injected deadlock detector failure"):
+        await task
+    assert wait["id"] not in service._wait_tasks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error", [ValueError("Connection closed"), sqlite3.ProgrammingError("closed database")],
+)
+async def test_wait_poller_ignores_closed_database_teardown_errors(error):
+    class ClosedDatabase:
+        async def get_resource_wait_operation(self, _wait_id):
+            raise error
+
+    database = ClosedDatabase()
+    service = LeaseService(db=database, inventory=ResourceInventory(database, CONFIG))
+    await service._run_wait("closed-database")
+
+
 @pytest.mark.asyncio
 async def test_permanent_loss_only_settles_exact_host_and_deadlock_hook_is_terminal(db):
     service = await _service(db)
