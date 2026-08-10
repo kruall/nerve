@@ -201,8 +201,14 @@ class ExecutionService:
                     # reject unknown pools before durable queue state is made.
                     self.resource_manager.inventory.members(pool)
         resources = ({"destination": dp} if source_local else {"source": sp} if destination_local else {"source": sp, "destination": dp})
+        source_reservation = False
+        if sh is not None:
+            reservation = await self.db.get_session_resource_reservation(session_id)
+            if reservation is not None and reservation.get("state") == "active" and reservation.get("pool") == sp:
+                lease = await self.db.get_resource_lease(str(reservation.get("lease_id") or ""))
+                source_reservation = lease is not None and lease.get("state") == "active" and lease.get("host_id") == sh
         plan = {"kind": "artifact_transfer", "profile_version": "1", "profile_hash": "built-in-artifact-transfer-v1",
-                "resources": resources, "resource_hosts": {slot: host for slot, host in (("source", sh), ("destination", dh)) if host is not None}, "artifact_transfer": {"transfer_id": "transfer-" + uuid.uuid4().hex, "source_path": sx, "source_root": sr, "source_local": source_local, "destination_path": dx, "destination_root": dr, "destination_local": destination_local},
+                "resources": resources, "resource_hosts": {slot: host for slot, host in (("source", sh), ("destination", dh)) if host is not None}, "source_session_reservation": source_reservation, "artifact_transfer": {"transfer_id": "transfer-" + uuid.uuid4().hex, "source_path": sx, "source_root": sr, "source_local": source_local, "destination_path": dx, "destination_root": dr, "destination_local": destination_local},
                 "steps": [], "result": {"success_exit_codes": [0]}, "timeout_seconds": 86400,
                 "cancellation": {"mode": "terminate", "grace_seconds": 10, "run_cleanup": False}}
         return await self._start_serialized(session_id=session_id, plan=plan, profile_snapshot={"kind": "artifact_transfer", "title": "direct artifact transfer", "source": "built-in reviewed transfer"}, auto_continue=auto_continue)
@@ -469,6 +475,7 @@ class ExecutionService:
         elif row["status"] != "starting" or row.get("selected_leases"):
             return
         leases: Sequence[Mapping[str, Any]] = []
+        reservation_lease_id: str | None = None
         try:
             reservation = row["plan"].get("session_reservation")
             if reservation:
@@ -477,6 +484,26 @@ class ExecutionService:
                         row["plan"], reservation, held["lease"],
                     )
                     await self._run_with_leases(execution_id, row, [lease], held)
+                return
+            if row["plan"].get("source_session_reservation"):
+                use = getattr(self.resource_manager, "use_active_session_reservation", None)
+                if not callable(use):
+                    raise ValueError("active session reservation is unavailable")
+                async with use(session_id=row["session_id"]) as held:
+                    requested_hosts = dict(row["plan"].get("resource_hosts", {}))
+                    source_host = requested_hosts.get("source")
+                    if held.get("pool") != row["plan"].get("resources", {}).get("source") or held["lease"].get("host_id") != source_host:
+                        raise ValueError("source session reservation no longer matches the requested host")
+                    source_lease = _bind_session_reservation_slot(row["plan"], held, held["lease"])
+                    reservation_lease_id = str(source_lease["id"])
+                    requests = [
+                        {**request, "host": requested_hosts.get(str(request.get("slot")))}
+                        for request in row.get("resource_requests") or []
+                        if request.get("slot") != "source"
+                    ]
+                    extra_leases = await self.resource_manager.acquire(execution_id=execution_id, session_id=row["session_id"], requests=requests)
+                    leases = [source_lease, *extra_leases]
+                    await self._run_with_leases(execution_id, row, leases, held)
                 return
             requested_hosts = dict(row["plan"].get("resource_hosts", {}))
             requests = [
@@ -514,8 +541,9 @@ class ExecutionService:
                 await self._broadcast(execution_id)
                 if won: self._schedule_continuation(execution_id)
         finally:
-            if leases and not self._stopping:
-                with contextlib.suppress(Exception): await self.resource_manager.release(execution_id=execution_id, leases=leases)
+            releasable = [lease for lease in leases if str(lease.get("id")) != reservation_lease_id]
+            if releasable and not self._stopping:
+                with contextlib.suppress(Exception): await self.resource_manager.release(execution_id=execution_id, leases=releasable)
 
     async def _run_with_leases(self, execution_id: str, row: Mapping[str, Any], leases: Sequence[Mapping[str, Any]], reservation: Mapping[str, Any] | None) -> None:
         """The common durable backend path; a reservation lease is never released per command."""

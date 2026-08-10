@@ -176,7 +176,11 @@ contain an explicit `host` that must be a member of the selected pool; this
 pins that transfer slot to the named host. A
 localhost endpoint is exactly `{host: localhost, artifact_root: <configured
 local root id>, path: <relative path>}`. localhost-to-localhost is rejected.
-Plans retain only root ids and relative paths. Remote-to-remote creates
+When a pinned source is the active YDB session-reservation host for the same
+session, the transfer reuses that fenced lease instead of attempting to acquire
+a second lease for it.
+Plans retain stable pool, host, and root ids with relative paths, never
+connection coordinates. Remote-to-remote creates
 `source` and `destination` slots; local-to-remote creates only `destination`,
 and remote-to-local creates only `source`. Connection coordinates are never
 tool input. The destination

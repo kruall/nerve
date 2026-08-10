@@ -190,7 +190,7 @@ async def test_ydb_make_publishes_one_confined_output_with_explicit_build_type(
 
 
 @pytest.mark.asyncio
-async def test_artifact_transfer_builds_one_or_two_resource_slots(db, owner, tmp_path):
+async def test_artifact_transfer_builds_one_or_two_resource_slots(db, owner, tmp_path, monkeypatch):
     inventory = SimpleNamespace(local_artifact_roots={"control": tmp_path})
     inventory.members = lambda pool: [pool + "-host"]
     service = ExecutionService(
@@ -224,6 +224,21 @@ async def test_artifact_transfer_builds_one_or_two_resource_slots(db, owner, tmp
     )
     plan = service._start_serialized.await_args.kwargs["plan"]
     assert plan["resource_hosts"] == {"source": "builders-host", "destination": "workers-host"}
+    assert plan["source_session_reservation"] is False
+
+    monkeypatch.setattr(db, "get_session_resource_reservation", AsyncMock(return_value={
+        "state": "active", "pool": "builders", "lease_id": "reservation-lease",
+    }))
+    monkeypatch.setattr(db, "get_resource_lease", AsyncMock(return_value={
+        "state": "active", "host_id": "builders-host",
+    }))
+    await service.start_artifact_transfer(
+        session_id=owner,
+        source={"pool": "builders", "host": "builders-host", "artifact_root": "artifacts", "path": "a.bin"},
+        destination={"pool": "workers", "artifact_root": "artifacts", "path": "b.bin"},
+    )
+    plan = service._start_serialized.await_args.kwargs["plan"]
+    assert plan["source_session_reservation"] is True
 
     with pytest.raises(ValueError, match="not a member"):
         await service.start_artifact_transfer(
