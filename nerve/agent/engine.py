@@ -610,7 +610,11 @@ class AgentEngine:
             ydb_worktree_root=(getattr(self.config, "resources", {}).get("ydb_worktree_root")),
         )
         self.set_execution_service(execution_service)
-        self.sessions._on_final_stop = resource_service.release_all_session_handles
+        async def final_stop_resources(session_id: str, *, agent_turn_active: bool = False) -> bool:
+            # agent_turn_active is intentionally ignored: this is a final
+            # boundary, unlike ordinary end-of-turn idle reconciliation.
+            return await execution_service.final_stop_session(session_id)
+        self.sessions._on_final_stop = final_stop_resources
         # Archive is a hard lifecycle boundary for session-owned remote state.
         # The reservation layer quarantines if quiescence cannot be proven.
         previous_archive = self.sessions._on_archive

@@ -966,6 +966,7 @@ class LeaseService:
 
     async def release_all_session_handles(
         self, session_id: str, *, agent_turn_active: bool = False,
+        final_stop: bool = False,
     ) -> list[str]:
         """Release every handle only after the session is resource-idle.
 
@@ -976,14 +977,14 @@ class LeaseService:
         method only observes their durable pending state.
         """
         self.recovery_gate.require_ready()
-        if await self._session_resource_live(session_id, agent_turn_active=agent_turn_active):
+        if not final_stop and await self._session_resource_live(session_id, agent_turn_active=agent_turn_active):
             return []
         released: list[str] = []
         for handle in await self.db.list_session_resource_handles(session_id, states=("active",)):
             # Explicitly acquired handles are retained until their owner calls
             # release_handle.  Only the compatibility path that converted a
             # legacy per-operation resource request opts in to idle cleanup.
-            if not handle.get("auto_release_when_session_idle"):
+            if not final_stop and not handle.get("auto_release_when_session_idle"):
                 continue
             try:
                 if await self.release_handle(session_id, str(handle["id"])):

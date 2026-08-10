@@ -207,6 +207,80 @@ class ResourceStore:
             row = await c.fetchone()
         return bool(row[0])
 
+    async def final_stop_session_resources(self, session_id: str, *, reason: str) -> tuple[list[str], list[str]]:
+        """Durably make a session non-resumable before remote reconciliation.
+
+        This is the final-stop fence.  It intentionally settles waits without
+        publishing their normal continuation: a grant racing this transaction
+        either loses its pending-state CAS or is subsequently suppressed here.
+        The returned ids are reconciled outside the transaction, where backend
+        cancellation and fenced handle release may safely be retried.
+        """
+        now = utc_now_iso()
+        async with self._atomic():
+            await self.db.execute(
+                "UPDATE sessions SET status='stopped' WHERE id=? AND status!='archived'",
+                (session_id,),
+            )
+            async with self.db.execute(
+                """SELECT id FROM executions WHERE session_id=? AND (
+                       status IN ('queued','starting','running','cancelling')
+                       OR continuation_state IN ('pending','claimed'))""",
+                (session_id,),
+            ) as cursor:
+                operation_ids = [str(row[0]) async for row in cursor]
+            async with self.db.execute(
+                "SELECT id FROM resource_wait_operations WHERE session_id=? AND state='pending'",
+                (session_id,),
+            ) as cursor:
+                wait_ids = [str(row[0]) async for row in cursor]
+            await self.db.execute(
+                """UPDATE resource_wait_operations
+                   SET state='cancelled', outcome='REQUEST_CANCELLED',
+                       settled_at=?, updated_at=?
+                   WHERE session_id=? AND state='pending'""",
+                (now, now, session_id),
+            )
+            await self.db.execute(
+                """UPDATE executions SET
+                     status=CASE WHEN status IN ('queued','starting','running','cancelling')
+                                 THEN 'cancelling' ELSE status END,
+                     cancel_reason=?, cancel_requested_at=COALESCE(cancel_requested_at, ?),
+                     continuation_state='suppressed', updated_at=?, revision=revision+1
+                   WHERE session_id=? AND (
+                     status IN ('queued','starting','running','cancelling')
+                     OR continuation_state IN ('pending','claimed'))""",
+                (reason[:500], now, now, session_id),
+            )
+            await self.db.execute(
+                """UPDATE resource_lease_requests SET state='cancelled', settled_at=?
+                   WHERE execution_id IN (SELECT id FROM executions WHERE session_id=?)
+                     AND state='queued'""",
+                (now, session_id),
+            )
+            await self.db.execute(
+                """UPDATE resource_lease_bundles SET state='cancelled', settled_at=?
+                   WHERE execution_id IN (SELECT id FROM executions WHERE session_id=?)
+                     AND state='queued'""",
+                (now, session_id),
+            )
+        return operation_ids, wait_ids
+
+    async def list_final_stop_sessions_needing_cleanup(self) -> list[str]:
+        """Stopped owners with retained resource lineage to replay on restart."""
+        async with self.db.execute(
+            """SELECT DISTINCT s.id FROM sessions s WHERE s.status='stopped' AND (
+                   EXISTS (SELECT 1 FROM session_resource_handles h
+                           WHERE h.session_id=s.id AND h.state IN ('active','releasing'))
+                   OR EXISTS (SELECT 1 FROM session_resource_reservations r
+                              WHERE r.session_id=s.id AND r.state='active')
+                   OR EXISTS (SELECT 1 FROM executions e WHERE e.session_id=s.id
+                              AND (e.status IN ('queued','starting','running','cancelling')
+                                   OR e.continuation_state IN ('pending','claimed')))
+               ) ORDER BY s.id""",
+        ) as cursor:
+            return [str(row[0]) async for row in cursor]
+
     async def get_resource_wait_operation(self, wait_id: str) -> dict[str, Any] | None:
         async with self.db.execute("SELECT * FROM resource_wait_operations WHERE id=?", (wait_id,)) as c:
             return _row(await c.fetchone())

@@ -221,15 +221,16 @@ class SessionManager:
     async def mark_stopped(self, session_id: str) -> None:
         """Mark session as user-stopped."""
         agent_turn_active = self.is_running(session_id)
-        await self.db.update_session_fields(
-            session_id, {"status": SessionStatus.STOPPED.value},
-        )
-        await self.db.log_session_event(session_id, "stopped", {})
         if self._on_final_stop:
             try:
                 await self._on_final_stop(session_id, agent_turn_active=agent_turn_active)
             except Exception as e:
                 logger.warning("Retained-resource cleanup after stop failed for %s: %s", session_id, e)
+        else:
+            await self.db.update_session_fields(
+                session_id, {"status": SessionStatus.STOPPED.value},
+            )
+        await self.db.log_session_event(session_id, "stopped", {})
         self.mark_not_running(session_id)
 
     async def mark_error(self, session_id: str, error_msg: str) -> None:
@@ -686,12 +687,7 @@ class SessionManager:
                 await self._on_archive(session_id)
             except Exception as e:
                 logger.warning("Execution cancellation before archive failed for %s: %s", session_id, e)
-        if self._on_final_stop:
-            try:
-                await self._on_final_stop(session_id, agent_turn_active=self.is_running(session_id))
-            except Exception as e:
-                logger.warning("Retained-resource cleanup before archive failed for %s: %s", session_id, e)
-
+        await self.mark_stopped(session_id)
         # Memorize in the background: memU indexing can take ~90s; awaiting it
         # here would hang the archive (and, in a cascade, the whole request on the root).
         if self._on_memorize:

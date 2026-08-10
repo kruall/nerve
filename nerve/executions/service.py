@@ -370,8 +370,12 @@ class ExecutionService:
                 # Cancellation recovery must make its own durable status RPC
                 # and log its disposition before a host is released or
                 # quarantined; never infer it from a stale startup snapshot.
-                task = asyncio.create_task(self._recover_and_cancel(row))
-                self._track(self._tasks, row["id"], task)
+                owner = await self.db.get_session(str(row["session_id"]))
+                if owner and owner.get("status") == "stopped":
+                    await self._recover_and_cancel(row)
+                else:
+                    task = asyncio.create_task(self._recover_and_cancel(row))
+                    self._track(self._tasks, row["id"], task)
                 continue
             recovery = await self.backend.recover(row)
             if recovery.state == "reattachable":
@@ -396,6 +400,11 @@ class ExecutionService:
                 if won:
                     await self._broadcast(row["id"])
                     self._schedule_continuation(row["id"])
+        # A crash may occur after the final-stop fence but before backend
+        # reconciliation or fenced release.  Replay exactly that unfinished
+        # suffix; final_stop_session is CAS/idempotent and cannot revive it.
+        for session_id in await self.db.list_final_stop_sessions_needing_cleanup():
+            await self.final_stop_session(session_id)
         if dispatch_continuations:
             await self.start_continuations()
 
@@ -949,6 +958,10 @@ class ExecutionService:
             await self.db.append_execution_log(
                 row["id"], stream="stdout", text="stage=resource_quarantine quiescence=unproven\n",
             )
+        if not confirmed and self._uses_retained_handles(row):
+            await self._quarantine_retained_handles(
+                row, reason="cancellation could not confirm backend quiescence",
+            )
         if confirmed:
             await self.db.finalize_execution_cancelled(row["id"])
         else:
@@ -1026,6 +1039,24 @@ class ExecutionService:
         for owner, owned_leases in grouped.items():
             await self.resource_manager.quarantine(
                 execution_id=owner, leases=owned_leases, reason=reason,
+            )
+
+    async def _quarantine_retained_handles(
+        self, row: Mapping[str, Any], *, reason: str,
+    ) -> None:
+        """Fence session handles whose borrowed remote work is ambiguous."""
+        for handle_id in row.get("plan", {}).get("retained_handle_ids", ()):
+            handle = await self.db.get_session_resource_handle(str(handle_id))
+            if handle is None or handle.get("state") not in {"active", "releasing"}:
+                continue
+            lease = await self.db.get_resource_lease(str(handle["lease_id"]))
+            if lease is not None and lease.get("state") in {"active", "revoking"}:
+                await self.resource_manager.quarantine(
+                    execution_id=str(lease["execution_id"]), leases=[lease], reason=reason,
+                )
+            await self.db.update_session_resource_handle(
+                str(handle["id"]), expected_state=str(handle["state"]),
+                state="quarantined", release_reason=reason,
             )
 
     async def _quarantine_or_release(
@@ -1314,6 +1345,10 @@ class ExecutionService:
                     reason="session cancellation could not confirm backend quiescence",
                 )
                 await self.db.append_execution_log(execution_id, stream="stdout", text="stage=resource_quarantine quiescence=unproven\n")
+            if not cancelled and self._uses_retained_handles(row):
+                await self._quarantine_retained_handles(
+                    row, reason="session cancellation could not confirm backend quiescence",
+                )
             if cancelled or (not row.get("selected_leases") and row["status"] == "cancelling"):
                 await self.db.finalize_execution_cancelled(execution_id)
             elif not cancelled:
@@ -1326,6 +1361,32 @@ class ExecutionService:
                 )
             await self._broadcast(execution_id)
         return True
+
+    async def final_stop_session(self, session_id: str, *, reason: str = "session stopped") -> bool:
+        """Finish the durable final-stop protocol without publishing a resume."""
+        self.recovery_gate.require_ready()
+        operation_ids, wait_ids = await self.db.final_stop_session_resources(
+            session_id, reason=reason,
+        )
+        for wait_id in wait_ids:
+            task = self.resource_manager._wait_tasks.get(wait_id)
+            if task is not None:
+                task.cancel()
+        if wait_ids:
+            await asyncio.gather(
+                *(task for wait_id in wait_ids
+                  if (task := self.resource_manager._wait_tasks.get(wait_id)) is not None),
+                return_exceptions=True,
+            )
+        # cancel_session is deliberately idempotent; it reconciles every row
+        # this transaction put into cancelling, including a completed-grant
+        # race whose continuation was just suppressed.
+        cancelled = await self.cancel_session(session_id, reason=reason)
+        await self.resource_manager.release_all_session_handles(
+            session_id, final_stop=True,
+        )
+        await self.resource_manager.cleanup_session_reservation(session_id)
+        return bool(operation_ids or wait_ids or cancelled)
 
     async def retry_execution(self, *, execution_id: str, profile_mode: str, requested_by: str):
         row = await self.db.get_execution(execution_id)
