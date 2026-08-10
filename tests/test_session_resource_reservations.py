@@ -71,6 +71,49 @@ async def test_session_reservation_cleanup_cancels_queued_request_without_lease(
 
 
 @pytest.mark.asyncio
+async def test_startup_cancels_orphaned_queued_session_reservation(db):
+    first = await _service(db)
+    await db.create_session("session-a")
+    await db.enqueue_resource_bundle(
+        bundle_id="bundle-session-a",
+        execution_id=first._reservation_execution_id("session-a"),
+        session_id="session-a",
+        requests=[{"id": "request-session-a", "slot": "session", "pool": "builders"}],
+    )
+
+    recovered = await _service(db)
+    await recovered.initialize()
+
+    assert await db.list_resource_requests() == []
+    await recovered.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_startup_cancels_queued_session_reservation_for_active_execution(db):
+    first = await _service(db)
+    await db.create_session("session-a")
+    await db.create_execution(
+        "exec-starting", session_id="session-a", kind="test", profile_version="1",
+        profile_hash="hash", profile_snapshot={}, plan={}, resource_requests=[],
+    )
+    assert await db.transition_execution(
+        "exec-starting", to_status="starting", expect=("queued",),
+    )
+    await db.enqueue_resource_bundle(
+        bundle_id="bundle-session-a",
+        execution_id=first._reservation_execution_id("session-a"),
+        session_id="session-a",
+        requests=[{"id": "request-session-a", "slot": "session", "pool": "builders"}],
+    )
+
+    recovered = await _service(db)
+    await recovered.initialize()
+
+    assert await db.list_resource_requests() == []
+    await recovered.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_session_commands_serialize_and_uncertain_cleanup_quarantines(db, tmp_path):
     service = await _service(db)
     await db.create_session("session-a")

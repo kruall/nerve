@@ -203,6 +203,7 @@ class LeaseService:
         )
 
     async def initialize(self) -> None:
+        await self.cancel_orphaned_queued_session_reservations()
         await self.release_idle_recovered_session_reservations()
         await self.reconcile_expired()
         if self._reconciler is None:
@@ -255,6 +256,25 @@ class LeaseService:
                     remote_quiescence_confirmed=True,
                     reason="idle session reservation released after daemon restart",
                 )
+
+    async def cancel_orphaned_queued_session_reservations(self) -> None:
+        """Cancel abandoned reservation queue entries left by a prior daemon.
+
+        A queued reservation has no reservation row or lease yet, so terminal
+        execution cleanup cannot find it through ``selected_leases``.  It also
+        cannot be reused by recovered work: the resumed execution acquires a
+        fresh reservation request.  Cancel it before execution recovery so it
+        cannot become an unowned FIFO head-of-line blocker.
+        """
+        prefix = "session-reservation:"
+        for request in await self.db.list_resource_requests():
+            execution_id = str(request["execution_id"])
+            if not execution_id.startswith(prefix):
+                continue
+            session_id = execution_id.removeprefix(prefix)
+            if not session_id or session_id != str(request["session_id"]):
+                continue
+            await self.db.cancel_resource_requests(execution_id)
 
     async def acquire(self, *, execution_id: str, session_id: str, requests: Sequence[Mapping[str, Any]]) -> Sequence[Mapping[str, Any]]:
         if not requests:
