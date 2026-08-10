@@ -24,35 +24,6 @@ def _row(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
 
 
 class PresetWorkflowStore:
-    async def reserve_preset_workflow_join(self, workflow_id: str, session_id: str) -> str:
-        """Atomically request observer restoration when the workflow completes."""
-        now = utc_now_iso()
-        async with self._atomic():
-            async with self.db.execute(
-                "SELECT observer_session_id, completion_mode FROM preset_workflows WHERE id = ?",
-                (workflow_id,),
-            ) as cursor:
-                workflow = await cursor.fetchone()
-            if workflow is None or workflow["observer_session_id"] != session_id:
-                return "not_found"
-            async with self.db.execute(
-                "SELECT state FROM workflow_completion_outbox WHERE workflow_id = ?",
-                (workflow_id,),
-            ) as cursor:
-                completion = await cursor.fetchone()
-            if completion is not None and completion["state"] in ("claimed", "completed", "failed"):
-                return "delivering"
-            await self.db.execute(
-                "UPDATE preset_workflows SET completion_mode = 'observer', updated_at = ? WHERE id = ?",
-                (now, workflow_id),
-            )
-            await self.db.execute(
-                """UPDATE workflow_completion_outbox SET state = 'pending', updated_at = ?
-                   WHERE workflow_id = ? AND state = 'suppressed'""",
-                (now, workflow_id),
-            )
-        return "reserved"
-
     async def create_preset_workflow(self, workflow_id: str, *, session_id: str, plan: Mapping[str, Any], preset_hash: str, spec_hash: str) -> dict:
         now = utc_now_iso()
         await self._write("""INSERT INTO preset_workflows

@@ -377,19 +377,6 @@ class WorkflowRunService:
     async def get_run(self, run_id: str) -> dict | None:
         return await self.db.get_workflow_run(run_id)
 
-    async def join_run(self, run_id: str, *, session_id: str) -> dict:
-        run = await self.db.get_workflow_run(run_id)
-        if run is None or run.get("owner_session_id") != session_id:
-            raise WorkflowRunError(f"no such workflow run in this session: {run_id}")
-        if not await self.db.enable_workflow_run_continuation(run_id, session_id):
-            current = await self.db.get_workflow_run(run_id)
-            if current and current.get("continuation_state") == "claimed":
-                raise WorkflowRunError("workflow completion is already being delivered")
-        current = await self.db.get_workflow_run(run_id) or run
-        if current["status"] not in ACTIVE_STATUSES:
-            self._schedule_continuation(run_id)
-        return current
-
     async def wait_run(self, run_id: str, *, session_id: str) -> dict:
         """Wait synchronously without scheduling a completion continuation."""
         run = await self.db.get_workflow_run(run_id)

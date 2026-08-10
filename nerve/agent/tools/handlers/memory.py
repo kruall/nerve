@@ -287,7 +287,6 @@ async def session_context_handler(ctx: ToolContext, args: dict) -> ToolResult:
         capabilities = workflow_preset_tool_capabilities(available)
         if getattr(engine, "workflow_preset_service", None) is None:
             capabilities.discard("workflow_preset_start")
-            capabilities.discard("workflow_preset_join")
         section = format_workflow_preset_section(summaries, capabilities)
         if section:
             parts.append(section)

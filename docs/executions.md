@@ -124,9 +124,9 @@ The MCP surface is progressive:
   compiled plan without starting it.
 - `execution_kind_start(...)` compiles, persists, and queues the immutable plan.
   It waits by default; `detached: true` returns the id immediately and keeps a
-  durable completion watch.
-- `execution_join` waits for a detached execution. `execution_forget` removes
-  the completion watch without cancelling the work.
+  durable completion watch. Once the initiating session ends, Nerve restores it
+  automatically when the execution reaches terminal state.
+- `execution_forget` removes the completion watch without cancelling the work.
 - `execution_status`, `execution_tail`, `execution_cancel`, and
   `execution_list` expose only work owned by the calling ToolContext session.
 
@@ -230,9 +230,10 @@ plan, resource requests, selected leases, backend handle, result, cancellation
 marker, and continuation outbox state. Secret plan values stay in the local
 database and are never returned by the public projection.
 
-`join` and `forget` atomically suppress automatic delivery before waiting or
-returning. Thus completion is delivered either through the blocked tool call or
-through the preserved session continuation, never both.
+Synchronous starts suppress automatic delivery while the tool call waits.
+Detached starts retain it, so completion restores the owner session exactly
+once. `forget` atomically removes that pending delivery without cancelling the
+execution.
 
 Completion and cancellation are compare-and-set transitions. An accepted Stop
 atomically moves active work to `cancelling`, suppresses pending or claimed

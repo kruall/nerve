@@ -169,39 +169,6 @@ async def test_duplicate_completion_wakeups_claim_only_one_observer_turn(db):
     assert (await db.get_preset_workflow_completion("w"))["state"] == "completed"
 
 @pytest.mark.asyncio
-async def test_join_returns_immediately_and_restores_observer_on_completion(db):
-    engine, service = await _agent_stage(db)
-    result = await service.join("w", session_id="owner")
-    assert result["status"] in {"queued", "running"}
-    await service.initialize()
-    await _wait(lambda: _completion_done(db, "w"))
-    assert (await db.get_preset_workflow_completion("w"))["state"] == "completed"
-    engine.run.assert_awaited_once()
-    await service.shutdown()
-
-@pytest.mark.asyncio
-async def test_join_after_terminal_pending_restores_observer(db):
-    await db.create_session("owner", source="web", backend="codex", status="idle")
-    await db.create_preset_workflow("w", session_id="owner", plan={}, preset_hash="x", spec_hash="x")
-    assert await db.terminalize_preset_workflow("w", to_status="succeeded", result={"outcome":"succeeded"})
-    service = WorkflowPresetService(db=db, engine=SimpleNamespace(run=AsyncMock()), executions=_Executions(), agent_runs=None)
-    result = await service.join("w", session_id="owner")
-    assert result["result"] == {"outcome":"succeeded"}
-    assert (await db.get_preset_workflow_completion("w"))["state"] == "completed"
-
-@pytest.mark.asyncio
-async def test_join_is_owner_scoped_and_loses_to_claimed_delivery(db):
-    await db.create_session("owner", source="web", backend="codex", status="idle")
-    await db.create_session("other", source="web", backend="codex", status="idle")
-    await db.create_preset_workflow("w", session_id="owner", plan={}, preset_hash="x", spec_hash="x")
-    service = WorkflowPresetService(db=db, engine=SimpleNamespace(), executions=_Executions(), agent_runs=None)
-    with pytest.raises(WorkflowActionError, match="no such preset workflow"):
-        await service.join("w", session_id="other")
-    assert await db.terminalize_preset_workflow("w", to_status="succeeded", result={})
-    assert await db.claim_preset_workflow_completion("w")
-    with pytest.raises(WorkflowActionError, match="already being delivered"):
-        await service.join("w", session_id="owner")
-
 @pytest.mark.asyncio
 async def test_malformed_agent_artifact_blocks_without_observer_continuation(db):
     engine, service = await _agent_stage(db, result="not json")

@@ -88,7 +88,6 @@ WORKFLOW_RUN_STATUS_SCHEMA = {
     "required": ["run_id"],
 }
 
-WORKFLOW_RUN_JOIN_SCHEMA = WORKFLOW_RUN_STATUS_SCHEMA
 WORKFLOW_RUN_FORGET_SCHEMA = WORKFLOW_RUN_STATUS_SCHEMA
 
 WORKFLOW_RUN_KILL_SCHEMA = {
@@ -228,23 +227,6 @@ async def workflow_run_start_handler(ctx: ToolContext, args: dict) -> ToolResult
     )
 
 
-async def workflow_run_join_handler(ctx: ToolContext, args: dict) -> ToolResult:
-    service, reason = _get_service(ctx)
-    if service is None:
-        return ToolResult.text(reason, is_error=True)
-    from nerve.workflows.service import WorkflowRunError
-    try:
-        run = await service.join_run(
-            str(args.get("run_id") or ""), session_id=ctx.session_id,
-        )
-    except WorkflowRunError as e:
-        return ToolResult.text(str(e), is_error=True)
-    return ToolResult.text(
-        f"Join applied for workflow run {run['id']}. This session may stop now; "
-        "Nerve will restore it when the run finishes."
-    )
-
-
 async def workflow_run_forget_handler(ctx: ToolContext, args: dict) -> ToolResult:
     service, reason = _get_service(ctx)
     if service is None:
@@ -335,15 +317,6 @@ WORKFLOW_RUN_SPECS = [
         ),
         input_schema=WORKFLOW_RUN_STATUS_SCHEMA,
         handler=workflow_run_status_handler,
-    ),
-    ToolSpec(
-        name="workflow_run_join",
-        description=(
-            "Request automatic restoration of this session when a workflow run "
-            "finishes. Returns immediately after the durable join is applied."
-        ),
-        input_schema=WORKFLOW_RUN_JOIN_SCHEMA,
-        handler=workflow_run_join_handler,
     ),
     ToolSpec(
         name="workflow_run_forget",

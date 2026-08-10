@@ -155,15 +155,15 @@ survives session deletion — the journal directory keeps the details.
 |------|-----------|
 | `workflow_run_start` | `engine`, `prompt`, `budget_usd` (required); `title`, `model`, `effort`, `cwd`, `detached` |
 | `workflow_run_status` | `run_id` |
-| `workflow_run_join` | `run_id` |
 | `workflow_run_forget` | `run_id` |
 | `workflow_run_kill` | `run_id`, `reason` |
 | `workflow_run_list` | `status` (`active`, exact status, or empty), `limit` |
 
 `workflow_run_start` waits for terminal state by default. With `detached: true`
 it returns the run id immediately and keeps a durable watch that resumes the
-owner session on completion. `workflow_run_join` waits explicitly;
-`workflow_run_forget` removes the watch without killing the run.
+owner session on completion. When the initiating session ends, Nerve restores
+it automatically after the run completes. `workflow_run_forget` removes the
+watch without killing the run.
 
 ```
 workflow_run_start(engine="claude-workflow", title="Sample batch audit",
@@ -172,8 +172,7 @@ workflow_run_start(engine="claude-workflow", title="Sample batch audit",
 → Workflow run wfr-3fa2b81c created (pending). Engine: claude-workflow,
   budget: $12.00. Journal: ~/.nerve/workflow-runs/wfr-3fa2b81c. ...
 
-# later — block explicitly, or forget it without killing it
-workflow_run_join(run_id="wfr-3fa2b81c")
+# The owner session is restored automatically on completion.
 ```
 
 Start/kill are engine-owned operations and are rejected for external MCP

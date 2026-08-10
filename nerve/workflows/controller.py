@@ -93,19 +93,6 @@ class WorkflowPresetService:
         await self._changed(workflow_id)
         return True
 
-    async def join(self, workflow_id: str, *, session_id: str) -> dict:
-        reservation = await self.db.reserve_preset_workflow_join(workflow_id, session_id)
-        if reservation == "not_found":
-            raise WorkflowActionError(f"no such preset workflow in this session: {workflow_id}")
-        if reservation == "delivering":
-            raise WorkflowActionError("preset workflow completion is already being delivered")
-        workflow = await self.db.get_preset_workflow(workflow_id)
-        if workflow is None:
-            raise WorkflowActionError(f"no such preset workflow: {workflow_id}")
-        if workflow["status"] not in ("queued", "running", "cancelling"):
-            await self._deliver_completion(workflow)
-        return workflow
-
     async def available_actions(self, workflow: Mapping[str, Any]) -> list[dict[str, Any]]:
         # Registry is deliberately fail-closed.  Retry needs attempt journaling
         # and accept needs a separately pinned acceptance artifact; neither is

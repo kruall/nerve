@@ -30,18 +30,15 @@ stages:
 ```
 
 Use `workflow_preset_list`, `workflow_preset_describe`,
-`workflow_preset_validate`, `workflow_preset_start`, and `workflow_preset_join`;
+`workflow_preset_validate` and `workflow_preset_start`;
 REST equivalents are
 under `/api/workflow-presets`. The initial catalog does not schedule stages or
 run agents: `start` delegates the already-pinned plan to an installed controller.
 
-`workflow_preset_join(workflow_id="wfp-...")` is owner-session scoped and waits
-for the whole controller, not its current child stage. It atomically consumes
-the automatic observer wakeup and returns the persisted terminal result plus
-stage summaries. The REST equivalent is
-`POST /api/preset-workflows/{id}/join` with `{session_id}`. If automatic
-delivery has already been claimed, join fails instead of creating a duplicate
-assistant continuation.
+Starting a preset registers a durable observer continuation. When the observer
+session ends, Nerve restores it automatically after the whole controller
+finishes, never between child stages. The completion is claimed atomically, so
+the terminal result creates at most one observer turn.
 
 The web UI rehydrates preset workflows from `/api/preset-workflows` and uses
 WebSocket `workflow_update` only as an invalidation signal. The public shape

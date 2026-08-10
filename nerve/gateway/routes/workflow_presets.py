@@ -2,7 +2,6 @@
 from typing import Any
 from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, Field
-from nerve.workflows.controller import WorkflowActionError
 from nerve.gateway.auth import require_auth
 from nerve.gateway.routes._deps import get_deps
 from nerve.workflows.presets import WorkflowPresetValidationError
@@ -62,16 +61,6 @@ async def get_preset_workflow(workflow_id: str, user: dict = Depends(require_aut
     row = await _service().db.get_preset_workflow(workflow_id)
     if row is None: raise HTTPException(404, "workflow not found")
     return await _public(row)
-
-@router.post("/api/preset-workflows/{workflow_id}/join")
-async def join_preset_workflow(workflow_id: str, body: Any=Body(default={}), user: dict=Depends(require_auth)):
-    if not isinstance(body, dict) or set(body) != {"session_id"} or not isinstance(body.get("session_id"), str):
-        raise HTTPException(422, "request body must contain session_id")
-    try:
-        return await _service().join(workflow_id, session_id=body["session_id"])
-    except WorkflowActionError as error:
-        message = str(error)
-        raise HTTPException(409 if "already being delivered" in message else 404, message) from error
 
 @router.post("/api/preset-workflows/{workflow_id}/cancel")
 async def cancel_preset_workflow(workflow_id: str, user: dict = Depends(require_auth)):

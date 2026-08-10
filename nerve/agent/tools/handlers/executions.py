@@ -14,7 +14,6 @@ from nerve.agent.tools.schemas import (
     EXECUTION_KIND_LIST_SCHEMA,
     EXECUTION_KIND_START_SCHEMA,
     EXECUTION_KIND_VALIDATE_SCHEMA,
-    EXECUTION_JOIN_SCHEMA,
     EXECUTION_FORGET_SCHEMA,
     EXECUTION_LIST_SCHEMA,
     EXECUTION_STATUS_SCHEMA,
@@ -232,18 +231,6 @@ async def execution_status_handler(ctx: ToolContext, args: dict) -> ToolResult:
     return _json({"execution": public_execution(row)})
 
 
-async def execution_join_handler(ctx: ToolContext, args: dict) -> ToolResult:
-    execution_id = str(args.get("execution_id") or "")
-    try:
-        service, _ = await _owned_execution(ctx, execution_id)
-        row = await service.join_execution(
-            execution_id=execution_id, session_id=ctx.session_id,
-        )
-    except (RuntimeError, LookupError, KeyError, ValueError) as e:
-        return ToolResult.text(str(e), is_error=True)
-    return _json({"execution": public_execution(row)})
-
-
 async def execution_forget_handler(ctx: ToolContext, args: dict) -> ToolResult:
     execution_id = str(args.get("execution_id") or "")
     try:
@@ -337,12 +324,6 @@ EXECUTION_SPECS = [
         "Get one execution owned by this session without changing its wait state.",
         EXECUTION_STATUS_SCHEMA,
         execution_status_handler,
-    ),
-    ToolSpec(
-        "execution_join",
-        "Wait for one execution owned by this session. Joining consumes its automatic completion wakeup.",
-        EXECUTION_JOIN_SCHEMA,
-        execution_join_handler,
     ),
     ToolSpec(
         "execution_forget",

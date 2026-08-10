@@ -27,7 +27,6 @@ import pytest_asyncio
 
 from nerve.agent.tools.handlers.workflow_runs import (
     workflow_run_forget_handler,
-    workflow_run_join_handler,
     workflow_run_kill_handler,
     workflow_run_list_handler,
     workflow_run_start_handler,
@@ -756,26 +755,6 @@ class TestWorkflowRunTools:
         assert len(runs) == 1
         assert runs[0]["created_by"] == "session:sess-main"
         await _drain(tool_service)
-
-    async def test_join_returns_immediately_and_restores_session_on_completion(self, tool_service, db, engine):
-        await db.create_session("sess-main", source="web")
-        await db.create_workflow_run(
-            "wfr-join0001", ENGINE_CLAUDE, {"prompt": "p"}, 1.0,
-            owner_session_id="sess-main", auto_continue=True,
-        )
-        result = await workflow_run_join_handler(
-            _ctx(db, engine), {"run_id": "wfr-join0001"},
-        )
-        assert not result.is_error
-        assert "Join applied" in result.content[0]["text"]
-        run = await db.get_workflow_run("wfr-join0001")
-        assert run["auto_continue"]
-        assert await db.transition_workflow_run(
-            "wfr-join0001", "done", expect=("pending",),
-        )
-        await tool_service._finalize_terminal("wfr-join0001", "done", {})
-        await tool_service._continuations["wfr-join0001"]
-        engine.run.assert_awaited_once()
 
     async def test_forget_does_not_kill_or_resume(self, tool_service, db, engine):
         await db.create_session("sess-main", source="web")
