@@ -99,25 +99,12 @@ class WorkflowPresetService:
             raise WorkflowActionError(f"no such preset workflow in this session: {workflow_id}")
         if reservation == "delivering":
             raise WorkflowActionError("preset workflow completion is already being delivered")
-        while True:
-            async with self._terminal_changed:
-                workflow = await self.db.get_preset_workflow(workflow_id)
-                if workflow is None:
-                    raise WorkflowActionError(f"no such preset workflow: {workflow_id}")
-                if workflow["status"] not in ("queued", "running", "cancelling"):
-                    stages = await self.db.list_stage_runs(workflow_id)
-                    return {
-                        "workflow_id": workflow["id"], "status": workflow["status"],
-                        "result": workflow.get("result"),
-                        "stages": [
-                            {"stage_id": stage["stage_id"], "status": stage["status"],
-                             "summary": (stage.get("artifact") or {}).get("summary")
-                                or (stage.get("result") or {}).get("summary")
-                                or (stage.get("result") or {}).get("outcome")}
-                            for stage in stages
-                        ],
-                    }
-                await self._terminal_changed.wait()
+        workflow = await self.db.get_preset_workflow(workflow_id)
+        if workflow is None:
+            raise WorkflowActionError(f"no such preset workflow: {workflow_id}")
+        if workflow["status"] not in ("queued", "running", "cancelling"):
+            await self._deliver_completion(workflow)
+        return workflow
 
     async def available_actions(self, workflow: Mapping[str, Any]) -> list[dict[str, Any]]:
         # Registry is deliberately fail-closed.  Retry needs attempt journaling

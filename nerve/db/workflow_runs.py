@@ -221,6 +221,24 @@ class WorkflowRunStore:
         )
         return (result.rowcount or 0) == 1
 
+    async def enable_workflow_run_continuation(self, run_id: str, session_id: str) -> bool:
+        """Durably request owner-session restoration when this run completes."""
+        now = utc_now_iso()
+        result = await self._write(
+            """UPDATE workflow_runs
+               SET auto_continue = 1,
+                   continuation_state = CASE
+                       WHEN continuation_state IN ('none', 'suppressed')
+                            AND status IN ('done', 'failed', 'killed', 'budget_exhausted')
+                       THEN 'pending'
+                       ELSE continuation_state END,
+                   updated_at = ?
+               WHERE id = ? AND owner_session_id = ?
+                 AND continuation_state != 'claimed'""",
+            (now, run_id, session_id),
+        )
+        return (result.rowcount or 0) == 1
+
     async def claim_workflow_run_continuation(self, run_id: str):
         now = utc_now_iso()
         result = await self._write(

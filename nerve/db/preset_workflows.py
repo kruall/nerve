@@ -25,7 +25,7 @@ def _row(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
 
 class PresetWorkflowStore:
     async def reserve_preset_workflow_join(self, workflow_id: str, session_id: str) -> str:
-        """Atomically make join, rather than an observer wakeup, own completion."""
+        """Atomically request observer restoration when the workflow completes."""
         now = utc_now_iso()
         async with self._atomic():
             async with self.db.execute(
@@ -35,8 +35,6 @@ class PresetWorkflowStore:
                 workflow = await cursor.fetchone()
             if workflow is None or workflow["observer_session_id"] != session_id:
                 return "not_found"
-            if workflow["completion_mode"] == "join":
-                return "reserved"
             async with self.db.execute(
                 "SELECT state FROM workflow_completion_outbox WHERE workflow_id = ?",
                 (workflow_id,),
@@ -45,12 +43,12 @@ class PresetWorkflowStore:
             if completion is not None and completion["state"] in ("claimed", "completed", "failed"):
                 return "delivering"
             await self.db.execute(
-                "UPDATE preset_workflows SET completion_mode = 'join', updated_at = ? WHERE id = ?",
+                "UPDATE preset_workflows SET completion_mode = 'observer', updated_at = ? WHERE id = ?",
                 (now, workflow_id),
             )
             await self.db.execute(
-                """UPDATE workflow_completion_outbox SET state = 'suppressed', updated_at = ?
-                   WHERE workflow_id = ? AND state = 'pending'""",
+                """UPDATE workflow_completion_outbox SET state = 'pending', updated_at = ?
+                   WHERE workflow_id = ? AND state = 'suppressed'""",
                 (now, workflow_id),
             )
         return "reserved"
@@ -175,7 +173,7 @@ class PresetWorkflowStore:
                 await self.db.execute(
                     """INSERT OR IGNORE INTO workflow_completion_outbox
                     (workflow_id,state,created_at,updated_at)
-                    SELECT id, CASE WHEN ? = 'cancelled' OR completion_mode = 'join'
+                    SELECT id, CASE WHEN ? = 'cancelled'
                        THEN 'suppressed' ELSE 'pending' END, ?, ?
                     FROM preset_workflows WHERE id = ?""",
                     (to_status, now, now, workflow_id),

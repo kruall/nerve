@@ -35,11 +35,14 @@ async def _started():
     return {"id": "wfp-123abc", "status": "queued", "plan": {"inputs": {"prompt": "private prompt"}}}
 
 @pytest.mark.asyncio
-async def test_preset_join_uses_observer_session_and_returns_terminal_summary():
+async def test_preset_join_returns_acknowledgement_after_reserving_observer_session():
     service = SimpleNamespace(join=lambda workflow_id, session_id: _joined(workflow_id, session_id))
     engine = SimpleNamespace(workflow_preset_service=service)
     result = await join_handler(ToolContext(session_id="owner", engine=engine), {"workflow_id":"wfp-123"})
-    assert json.loads(result.content[0]["text"]) == {"workflow_id":"wfp-123", "status":"succeeded", "result":{"outcome":"succeeded"}, "stages":[]}
+    assert result.content[0]["text"] == (
+        "Join applied for preset workflow wfp-123. This session may stop now; "
+        "Nerve will restore it when the workflow finishes."
+    )
 
 async def _joined(workflow_id, session_id):
     assert session_id == "owner"

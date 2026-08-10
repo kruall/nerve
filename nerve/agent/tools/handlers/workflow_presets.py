@@ -47,7 +47,10 @@ async def start_handler(ctx, args):
 async def join_handler(ctx, args):
     service = getattr(ctx.engine, "workflow_preset_service", None)
     if service is None: return ToolResult.text("Workflow preset controller is not installed.", is_error=True)
-    try: return _out(await service.join(str(args.get("workflow_id") or ""), session_id=ctx.session_id))
+    workflow_id = str(args.get("workflow_id") or "")
+    try:
+        await service.join(workflow_id, session_id=ctx.session_id)
+        return ToolResult.text(f"Join applied for preset workflow {workflow_id}. This session may stop now; Nerve will restore it when the workflow finishes.")
     except Exception as error:
         # Import lazily: controller imports stage resolution, which imports the
         # tool registry while this handler module is still being initialized.
@@ -60,5 +63,5 @@ WORKFLOW_PRESET_SPECS = [
     ToolSpec("workflow_preset_describe", "Describe one workflow preset's static inputs and stages after discovery.", _NAME, describe_handler),
     ToolSpec("workflow_preset_validate", "Validate inputs and resolve a workflow preset without starting it.", _START, validate_handler),
     ToolSpec("workflow_preset_start", "Start a validated workflow preset through the installed workflow controller.", _START, start_handler),
-    ToolSpec("workflow_preset_join", "Wait for a preset workflow owned by this session. Joining consumes its automatic completion wakeup.", _JOIN, join_handler),
+    ToolSpec("workflow_preset_join", "Request automatic restoration of this session when a preset workflow finishes. Returns immediately after the durable join is applied.", _JOIN, join_handler),
 ]

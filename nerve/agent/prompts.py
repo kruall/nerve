@@ -157,7 +157,7 @@ def format_workflow_preset_section(
     if "workflow_preset_start" in tools:
         lines.append("Starting a preset remains your choice; it does not replace observer follow-up.")
     if "workflow_preset_join" in tools:
-        lines.append("Join a started preset when this session must wait explicitly and consume its completion wakeup.")
+        lines.append("Join a started preset to restore this session automatically when it completes; join returns immediately.")
     lines.append("The observer remains responsible for review, integration, and task lifecycle not supplied by the preset.")
     return "\n".join(lines)
 

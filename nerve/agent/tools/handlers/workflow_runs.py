@@ -212,7 +212,7 @@ async def workflow_run_start_handler(ctx: ToolContext, args: dict) -> ToolResult
             auto_continue=bool(args.get("detached", False)),
         )
         if not bool(args.get("detached", False)):
-            run = await service.join_run(run["id"], session_id=ctx.session_id)
+            run = await service.wait_run(run["id"], session_id=ctx.session_id)
     except WorkflowRunError as e:
         return ToolResult.text(str(e), is_error=True)
     except Exception as e:  # noqa: BLE001
@@ -240,7 +240,8 @@ async def workflow_run_join_handler(ctx: ToolContext, args: dict) -> ToolResult:
     except WorkflowRunError as e:
         return ToolResult.text(str(e), is_error=True)
     return ToolResult.text(
-        _format_run(run, service) + "\n\n" + json.dumps(service.public_run(run), indent=2, default=str)
+        f"Join applied for workflow run {run['id']}. This session may stop now; "
+        "Nerve will restore it when the run finishes."
     )
 
 
@@ -338,8 +339,8 @@ WORKFLOW_RUN_SPECS = [
     ToolSpec(
         name="workflow_run_join",
         description=(
-            "Wait for a workflow run started by this session. Joining consumes "
-            "its automatic completion wakeup."
+            "Request automatic restoration of this session when a workflow run "
+            "finishes. Returns immediately after the durable join is applied."
         ),
         input_schema=WORKFLOW_RUN_JOIN_SCHEMA,
         handler=workflow_run_join_handler,
