@@ -1120,6 +1120,37 @@ async def test_terminal_unleased_cancellation_settles_stale_queue_atomically(db,
 
 
 @pytest.mark.asyncio
+async def test_startup_reconciles_orphaned_terminal_resource_queue(db, owner, tmp_path, broadcast_stub):
+    plan = StubPlan().as_dict(redact_secrets=False)
+    plan["session_id"] = owner
+    row = await db.create_execution(
+        "exec-terminal-recovery-startup", session_id=owner, kind="test.wait",
+        profile_version="1", profile_hash="hash", profile_snapshot={}, plan=plan,
+        resource_requests=[],
+    )
+    assert await db.transition_execution(row["id"], to_status="succeeded", expect=("queued",))
+    await db.enqueue_resource_bundle(
+        bundle_id="bundle-startup-queue", execution_id=row["id"],
+        session_id=owner, requests=[{"id": "request-startup-queue", "slot": "worker", "pool": "builders"}],
+    )
+
+    service = ExecutionService(
+        db=db, engine=_engine(), workspace=tmp_path, catalog=SimpleNamespace(),
+        backend=ControlledBackend(), execution_root=tmp_path / "runs",
+    )
+    await service.initialize()
+
+    requests = await db.list_resource_requests()
+    assert not [request for request in requests if request["execution_id"] == row["id"]]
+    async with db.db.execute(
+        "SELECT state FROM resource_lease_bundles WHERE id=?",
+        ("bundle-startup-queue",),
+    ) as cursor:
+        bundle = await cursor.fetchone()
+    assert bundle is not None and bundle["state"] == "cancelled"
+
+
+@pytest.mark.asyncio
 async def test_session_archive_invokes_execution_cancellation_hook(db, owner):
     from nerve.agent.sessions import SessionManager
 

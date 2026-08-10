@@ -321,6 +321,10 @@ class ExecutionService:
         initialize_resources = getattr(self.resource_manager, "initialize", None)
         if callable(initialize_resources):
             await initialize_resources()
+        for row in await self.db.list_terminal_executions():
+            if await self._has_active_selected_lease(row):
+                continue
+            await self.db.cancel_resource_requests(row["id"])
         failed_claims = await self.db.fail_claimed_execution_continuations_on_restart()
         if failed_claims:
             logger.warning(
@@ -369,6 +373,16 @@ class ExecutionService:
                     self._schedule_continuation(row["id"])
         if dispatch_continuations:
             await self.start_continuations()
+
+    async def _has_active_selected_lease(self, row: Mapping[str, Any]) -> bool:
+        for lease in row.get("selected_leases") or []:
+            lease_id = str(lease.get("id", "")) if isinstance(lease, Mapping) else ""
+            if not lease_id:
+                continue
+            current = await self.db.get_resource_lease(lease_id)
+            if current is not None and current.get("state") in {"active", "revoking"}:
+                return True
+        return False
 
     async def start_continuations(self) -> None:
         """Enable outbox delivery after channels/MCP loopback are ready."""

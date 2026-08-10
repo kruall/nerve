@@ -117,6 +117,14 @@ class ExecutionStore:
         ) as cursor:
             return [_decode_execution(row) async for row in cursor]
 
+    async def list_terminal_executions(self) -> list[dict[str, Any]]:
+        async with self.db.execute(
+            """SELECT * FROM executions
+               WHERE status IN ('succeeded', 'failed', 'cancelled')
+               ORDER BY created_at ASC, id ASC""",
+        ) as cursor:
+            return [_decode_execution(row) async for row in cursor]
+
     async def session_execution_activity(
         self, session_ids: Sequence[str],
     ) -> dict[str, dict[str, Any]]:
