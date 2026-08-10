@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from datetime import datetime, timedelta, timezone
 from collections.abc import Mapping
 from typing import Any
 
@@ -853,6 +854,105 @@ class ResourceStore:
         assert row is not None
         return row
 
+    async def claim_host_recovery(self, host_id: str, *, lease_seconds: float = 360) -> dict[str, Any] | None:
+        """CAS one durable recovery lease; expired claims are safely reclaimed."""
+        now = utc_now_iso()
+        expires = (datetime.now(timezone.utc) + timedelta(seconds=max(1, lease_seconds))).isoformat()
+        async with self._atomic():
+            result = await self.db.execute(
+                """UPDATE resource_hosts
+                   SET recovery_generation=recovery_generation+1,
+                       recovery_claimed_generation=recovery_generation+1,
+                       recovery_claim_state='claimed', recovery_claimed_at=?,
+                       recovery_claim_expires_at=?, recovery_retry_at=NULL, updated_at=?
+                   WHERE id=? AND quarantined=1 AND permanently_unavailable=0
+                     AND (recovery_claim_state='idle'
+                          OR (recovery_claim_state='retry' AND (recovery_retry_at IS NULL OR recovery_retry_at<=?))
+                          OR (recovery_claim_state='claimed' AND (recovery_claim_expires_at IS NULL OR recovery_claim_expires_at<=?)))""",
+                (now, expires, now, host_id, now, now),
+            )
+            if not result.rowcount:
+                return None
+        return await self.get_resource_host(host_id)
+
+    async def fail_host_recovery(self, host_id: str, generation: int, *, retry_seconds: float = 30) -> bool:
+        """Release only the claimant's generation and make retry timing durable."""
+        now = utc_now_iso()
+        retry_at = (datetime.now(timezone.utc) + timedelta(seconds=max(0, retry_seconds))).isoformat()
+        result = await self._write(
+            """UPDATE resource_hosts SET recovery_claim_state='retry', recovery_retry_at=?,
+               recovery_claim_expires_at=NULL, updated_at=?
+               WHERE id=? AND quarantined=1 AND permanently_unavailable=0
+                 AND recovery_generation=? AND recovery_claimed_generation=?
+                 AND recovery_claim_state='claimed'""",
+            (retry_at, now, host_id, generation, generation),
+        )
+        return bool(result.rowcount)
+
+    async def complete_host_recovery(self, host_id: str, generation: int) -> dict[str, Any] | None:
+        """Open only the exact generation that proved remote host quiescence."""
+        now = utc_now_iso()
+        async with self._atomic():
+            result = await self.db.execute(
+                """UPDATE resource_hosts SET quarantined=0, quarantine_reason=NULL,
+                   recovery_claim_state='idle', recovery_claimed_at=NULL,
+                   recovery_claim_expires_at=NULL, recovery_retry_at=NULL,
+                   updated_at=?
+                   WHERE id=? AND quarantined=1 AND permanently_unavailable=0
+                     AND recovery_generation=? AND recovery_claimed_generation=?
+                     AND recovery_claim_state='claimed'""",
+                (now, host_id, generation, generation),
+            )
+            if not result.rowcount:
+                return None
+            await self.db.execute("UPDATE resource_leases SET state='released', released_at=? WHERE host_id=? AND state='quarantined'", (now, host_id))
+            await self.db.execute("UPDATE session_resource_reservations SET state='released', released_at=?, quarantine_reason=NULL WHERE host_id=? AND state='quarantined'", (now, host_id))
+            await self.db.execute(
+                """UPDATE session_resource_handles
+                   SET state='released', release_reason=NULL, updated_at=?,
+                       released_at=COALESCE(released_at, ?)
+                   WHERE host_id=? AND state='quarantined'""",
+                (now, now, host_id),
+            )
+        return await self.get_resource_host(host_id)
+
+    async def permanently_lose_host_and_terminalize_waits(self, host_id: str) -> tuple[dict[str, Any], list[str]]:
+        """One authoritative transition: fence recovery, cancel edges, settle exact waits."""
+        now = utc_now_iso()
+        async with self._atomic():
+            result = await self.db.execute(
+                """UPDATE resource_hosts SET enabled=0, quarantined=1, permanently_unavailable=1,
+                   recovery_generation=recovery_generation+1, recovery_claim_state='idle',
+                   recovery_claimed_at=NULL, recovery_claim_expires_at=NULL, recovery_retry_at=NULL,
+                   quarantine_reason='authoritatively permanently unavailable', updated_at=?
+                   WHERE id=? AND permanently_unavailable=0""", (now, host_id))
+            if not result.rowcount:
+                async with self.db.execute("SELECT 1 FROM resource_hosts WHERE id=?", (host_id,)) as c:
+                    if await c.fetchone() is None: raise KeyError(host_id)
+            async with self.db.execute("SELECT id, operation_id, wakeup_generation FROM resource_wait_operations WHERE state='pending'") as c:
+                waits = [dict(row) async for row in c]
+            settled: list[str] = []
+            for wait in waits:
+                async with self.db.execute("SELECT requested_hosts_json FROM resource_wait_operations WHERE id=?", (wait["id"],)) as c:
+                    raw = await c.fetchone()
+                try:
+                    requested = json.loads(raw[0]) if raw else []
+                except (TypeError, ValueError):
+                    requested = []
+                if not any(isinstance(item, dict) and item.get("host") == host_id for item in requested):
+                    continue
+                now_result = json.dumps({"outcome": "HOST_PERMANENTLY_UNAVAILABLE", "wait_id": wait["id"], "generation": int(wait["wakeup_generation"]) + 1})
+                await self.db.execute("UPDATE resource_lease_requests SET state='cancelled', settled_at=? WHERE execution_id=? AND state='queued'", (now, wait["operation_id"]))
+                await self.db.execute("UPDATE resource_lease_bundles SET state='cancelled', settled_at=? WHERE execution_id=? AND state='queued'", (now, wait["operation_id"]))
+                result = await self.db.execute("UPDATE resource_wait_operations SET state='failed', outcome='HOST_PERMANENTLY_UNAVAILABLE', wakeup_generation=wakeup_generation+1, settled_at=?, updated_at=? WHERE id=? AND state='pending'", (now, now, wait["id"]))
+                if result.rowcount:
+                    await self.db.execute("UPDATE executions SET status='failed', result=?, finished_at=?, continuation_state='pending', continuation_error=NULL, updated_at=?, revision=revision+1 WHERE id=? AND status IN ('queued','starting','running','cancelling')", (now_result, now, now, wait["operation_id"]))
+                    await self.db.execute("DELETE FROM operation_resource_refs WHERE operation_id=?", (wait["operation_id"],))
+                    settled.append(str(wait["id"]))
+        row = await self.get_resource_host(host_id)
+        assert row is not None
+        return row, settled
+
     async def acquire_resource_lease(self, *, lease_id: str, execution_id: str, session_id: str, pool: str, host_id: str) -> dict[str, Any] | None:
         """CAS acquire. IntegrityError means another pool already owns host."""
         now = utc_now_iso()
@@ -892,6 +992,20 @@ class ResourceStore:
             async with self.db.execute("SELECT host_id FROM resource_leases WHERE id=?", (lease_id,)) as c:
                 row = await c.fetchone()
             await self.db.execute("UPDATE resource_hosts SET quarantined=1, quarantine_reason=?, updated_at=? WHERE id=?", (reason[:500], now, row[0]))
+            await self.db.execute(
+                """UPDATE session_resource_handles
+                   SET state='quarantined', release_reason=?, updated_at=?,
+                       released_at=COALESCE(released_at, ?)
+                   WHERE lease_id=? AND state IN ('active', 'releasing')""",
+                (reason[:500], now, now, lease_id),
+            )
+            await self.db.execute(
+                """UPDATE session_resource_reservations
+                   SET state='quarantined', released_at=COALESCE(released_at, ?),
+                       quarantine_reason=?
+                   WHERE lease_id=? AND state='active'""",
+                (now, reason[:500], lease_id),
+            )
         return True
 
     async def list_resource_leases(self) -> list[dict[str, Any]]:

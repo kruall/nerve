@@ -45,6 +45,7 @@ _FRAME_OPERATIONS = frozenset({
     "artifact_transfer_prepare_source", "artifact_transfer_receive",
     "artifact_transfer_status", "artifact_transfer_cancel",
     "artifact_transfer_cleanup", "status", "cancel", "tail", "files",
+    "reconcile_host",
 })
 _PACK_OPERATIONS = frozenset({"sync", "artifact_put"})
 
@@ -784,6 +785,53 @@ def _artifact_transfer_cancel(request: Mapping[str, Any]) -> dict[str, Any]: ret
 def _artifact_transfer_status(request: Mapping[str, Any]) -> dict[str, Any]:
     _,state=_transfer_load(request); return {"ok":True,"state":state.get("state"),"quiescent":state.get("state") in {"succeeded","cleaned","cancelled"}}
 
+def _reconcile_host(request: Mapping[str, Any]) -> dict[str, Any]:
+    """Fenced host-wide proof over every durable job and transfer lineage."""
+    root = _safe_root(str(request["root"])); root.mkdir(parents=True, exist_ok=True)
+    generation = int(request["recovery_generation"])
+    fence = root / ".nerve-recovery-fence.json"
+    if fence.exists() and int(json.loads(fence.read_text()).get("generation", -1)) > generation:
+        raise PermissionError("stale recovery generation")
+    lock = open(root / ".nerve-host.lock", "a+")
+    try:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {"ok": True, "quiescent": False}
+        temporary = fence.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"generation": generation}))
+        temporary.replace(fence)
+        # A free lock alone is not proof: completed RPCs leave detached job and
+        # direct-transfer process groups behind.  Reconcile their durable state
+        # while holding the same lock used by start's monitor lineage.
+        jobs = root / ".nerve-jobs"
+        if jobs.is_dir():
+            for directory in jobs.iterdir():
+                state_file = directory / "state.json"
+                try:
+                    state = json.loads(state_file.read_text())
+                    if state.get("state") == "running" and _alive(int(state["process_group"])):
+                        return {"ok": True, "quiescent": False, "lineage": "job"}
+                except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+                    # An unreadable lineage is uncertainty, never quiescence.
+                    return {"ok": True, "quiescent": False, "lineage": "job-unknown"}
+        transfers = root / ".nerve-transfers"
+        if transfers.is_dir():
+            for directory in transfers.iterdir():
+                state_file = directory / "state.json"
+                try:
+                    state = json.loads(state_file.read_text())
+                    process_group = state.get("process_group", state.get("pid"))
+                    if state.get("state") in {"serving", "receiving"} and isinstance(process_group, int) and _alive(process_group):
+                        return {"ok": True, "quiescent": False, "lineage": "transfer"}
+                    if state.get("state") in {"serving", "receiving"}:
+                        return {"ok": True, "quiescent": False, "lineage": "transfer-unknown"}
+                except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+                    return {"ok": True, "quiescent": False, "lineage": "transfer-unknown"}
+        return {"ok": True, "quiescent": True, "generation": generation}
+    finally:
+        lock.close()
+
 def _artifact_send(ident: str, root: str) -> None:
     directory=_transfer_dir(_safe_root(root),ident); state=json.loads((directory/"state.json").read_text())
     if state.get("role")!="source" or state.get("state")!="serving": raise SystemExit(1)
@@ -794,7 +842,7 @@ def rpc() -> None:
         request, pack = _decode_frame(sys.stdin.buffer.read())
         operation = request.pop("operation")
         request.pop("version")
-        handlers = {"start": _start, "spin_prepare": _spin_prepare, "status": _status, "cancel": _cancel, "tail": _tail, "files": _files, "artifact_get": _artifact_get, "ydb_publish": _ydb_publish, "artifact_transfer_prepare_destination": _artifact_transfer_prepare_destination, "artifact_transfer_prepare_source": _artifact_transfer_prepare_source, "artifact_transfer_receive": _artifact_transfer_receive, "artifact_transfer_status": _artifact_transfer_status, "artifact_transfer_cancel": _artifact_transfer_cancel, "artifact_transfer_cleanup": _artifact_transfer_cleanup}
+        handlers = {"start": _start, "spin_prepare": _spin_prepare, "status": _status, "cancel": _cancel, "tail": _tail, "files": _files, "artifact_get": _artifact_get, "ydb_publish": _ydb_publish, "artifact_transfer_prepare_destination": _artifact_transfer_prepare_destination, "artifact_transfer_prepare_source": _artifact_transfer_prepare_source, "artifact_transfer_receive": _artifact_transfer_receive, "artifact_transfer_status": _artifact_transfer_status, "artifact_transfer_cancel": _artifact_transfer_cancel, "artifact_transfer_cleanup": _artifact_transfer_cleanup, "reconcile_host": _reconcile_host}
         result = _sync(request, pack) if operation == "sync" else (_artifact_put(request, pack) if operation == "artifact_put" else handlers[operation](request))
     except Exception as exc:
         # Keep errors useful to the control plane without turning this fixed

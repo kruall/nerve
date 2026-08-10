@@ -70,7 +70,7 @@ async def _legacy_snapshot(db: aiosqlite.Connection) -> tuple[tuple, tuple, tupl
 
 
 @pytest.mark.asyncio
-async def test_v56_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp_path):
+async def test_v057_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp_path):
     fresh = await aiosqlite.connect(tmp_path / "fresh.db")
     upgraded = await aiosqlite.connect(tmp_path / "upgrade.db")
     try:
@@ -79,12 +79,18 @@ async def test_v56_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp_
         await _legacy_rows(upgraded)
         legacy_before = await _legacy_snapshot(upgraded)
 
-        assert await runner.run_migrations(upgraded) == 56
+        assert await runner.run_migrations(upgraded) == 57
         fresh_schema = await _schema(fresh)
         assert fresh_schema == await _schema(upgraded)
         assert (await (await fresh.execute("SELECT next_ticket FROM resource_wait_allocator")).fetchone())[0] == 1
         assert "idx_resource_wait_operations_pending_ticket_host" in fresh_schema
-        assert await _legacy_snapshot(upgraded) == legacy_before
+        columns = {row[1] for row in await (await fresh.execute("PRAGMA table_info(resource_hosts)")).fetchall()}
+        assert {"recovery_generation", "recovery_claimed_generation", "permanently_unavailable", "recovery_claim_state", "recovery_claim_expires_at", "recovery_retry_at"} <= columns
+        assert "idx_resource_hosts_recovery_claim" in fresh_schema
+        # V057 only appends recovery columns with defaults; legacy values stay intact.
+        after = await _legacy_snapshot(upgraded)
+        assert after[0] == legacy_before[0] and after[2] == legacy_before[2]
+        assert after[1][:len(legacy_before[1])] == legacy_before[1]
     finally:
         await fresh.close()
         await upgraded.close()

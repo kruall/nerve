@@ -201,10 +201,14 @@ RESOURCE_RECOVER_SCHEMA = {
     "properties": {
         "host_id": {"type": "string"},
         "confirm_host_id": {"type": "string"},
-        "remote_quiescence_confirmed": {"type": "boolean"},
     },
-    "required": ["host_id", "confirm_host_id", "remote_quiescence_confirmed"],
+    "required": ["host_id", "confirm_host_id"],
     "additionalProperties": False,
+}
+RESOURCE_PERMANENT_LOSS_SCHEMA = {
+    "type": "object",
+    "properties": {"host_id": {"type": "string"}, "confirm_host_id": {"type": "string"}},
+    "required": ["host_id", "confirm_host_id"], "additionalProperties": False,
 }
 RESOURCE_QUARANTINE_SCHEMA = {
     "type": "object",

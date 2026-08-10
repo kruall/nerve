@@ -180,6 +180,7 @@ class RemoteSupervisor(Protocol):
     async def artifact_transfer_status(self, connection: SshConnection, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
     async def artifact_transfer_cancel(self, connection: SshConnection, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
     async def artifact_transfer_cleanup(self, connection: SshConnection, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
+    async def reconcile_host(self, connection: SshConnection, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
 
 
 class OpenSshSupervisor:
@@ -193,6 +194,7 @@ class OpenSshSupervisor:
     _OPERATIONS = frozenset({
         "start", "sync", "spin_prepare", "artifact_put", "artifact_get",
         "ydb_publish", "artifact_transfer_prepare_destination",
+        "reconcile_host",
         "artifact_transfer_prepare_source", "artifact_transfer_receive",
         "artifact_transfer_status", "artifact_transfer_cancel",
         "artifact_transfer_cleanup", "status", "cancel", "tail", "files",
@@ -300,6 +302,7 @@ class OpenSshSupervisor:
     async def artifact_transfer_status(self, connection, request): return await self._rpc(connection, "artifact_transfer_status", request)
     async def artifact_transfer_cancel(self, connection, request): return await self._rpc(connection, "artifact_transfer_cancel", request)
     async def artifact_transfer_cleanup(self, connection, request): return await self._rpc(connection, "artifact_transfer_cleanup", request)
+    async def reconcile_host(self, connection, request): return await self._rpc(connection, "reconcile_host", request)
 
 
 class SshExecutionBackend:
@@ -311,6 +314,17 @@ class SshExecutionBackend:
         self.poll_seconds = poll_seconds
         self._jobs: dict[str, tuple[SshConnection, str, int, str]] = {}
         self._transfers: dict[str, tuple[SshConnection, Mapping[str, Any], SshConnection, Mapping[str, Any], str]] = {}
+
+    async def reconcile_host(self, host_id: str, generation: int) -> bool:
+        """Require every configured supervisor root to prove its host lock idle."""
+        host = self.inventory.hosts.get(host_id)
+        if host is None:
+            return False
+        connection = self.connections.resolve(str(host["connection_ref"]))
+        replies = await asyncio.gather(*(self.supervisor.reconcile_host(connection, {
+            "root": root, "recovery_generation": generation,
+        }) for root in connection.remote_roots))
+        return bool(replies) and all(reply.get("quiescent") is True and int(reply.get("generation", -1)) == generation for reply in replies)
 
     def validate_artifact_endpoint(self, pool: str, artifact_root: str) -> None:
         """Reject unusable reviewed endpoints before an execution can queue."""

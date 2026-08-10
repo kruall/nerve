@@ -598,6 +598,7 @@ class AgentEngine:
         if ssh_connections:
             from nerve.executions.ssh import SshConnectionCatalog, SshExecutionBackend
             backend = SshExecutionBackend(inventory=inventory, connections=SshConnectionCatalog(getattr(self.config, "resources", {})))
+            resource_service._recovery_probe = backend.reconcile_host
         execution_service = ExecutionService(
             db=self.db,
             engine=self,

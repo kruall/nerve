@@ -42,8 +42,12 @@ async def test_quarantine_never_becomes_available_without_confirmed_recovery(db)
     waiting=asyncio.create_task(service.acquire(execution_id="two",session_id="s",requests=[{"pool":"test"}]))
     await asyncio.sleep(0.05)
     assert not waiting.done()
-    with pytest.raises(ResourceInventoryError): await service.recover_host(host_id="host-a",requested_by="u",remote_quiescence_confirmed=False)
-    await service.recover_host(host_id="host-a",requested_by="u",remote_quiescence_confirmed=True)
+    with pytest.raises(ResourceInventoryError): await service.recover_host(host_id="host-a", requested_by="u")
+    async def proved(*_): return True
+    service._recovery_probe = proved
+    await db.db.execute("UPDATE resource_hosts SET recovery_retry_at='2000-01-01T00:00:00+00:00' WHERE id='host-a'")
+    await db.db.commit()
+    await service.recover_host(host_id="host-a", requested_by="u")
     assert (await asyncio.wait_for(waiting, 1))[0]["host_id"] == "host-a"
 
 @pytest.mark.asyncio
@@ -156,9 +160,8 @@ async def _handle_service(db, *, ready=True):
     await inventory.initialize()
     for session_id in ("session-a", "session-b", "blocker"):
         await db.create_session(session_id)
-    return LeaseService(
-        db=db, inventory=inventory, recovery_gate=ResourceRecoveryGate(ready=ready),
-    )
+    async def proved(*_): return True
+    return LeaseService(db=db, inventory=inventory, recovery_gate=ResourceRecoveryGate(ready=ready), recovery_probe=proved)
 
 
 @pytest.mark.asyncio
@@ -228,8 +231,7 @@ async def test_recovery_reacquires_only_missing_member_of_retained_bundle(db):
     healthy = next(handle for handle in before if handle["host_id"] == "host-a")
     await service.quarantine(execution_id=failed["_lease"]["execution_id"],
                              leases=[failed["_lease"]], reason="transport lost")
-    await service.recover_host(host_id="host-b", requested_by="operator",
-                               remote_quiescence_confirmed=True)
+    await service.recover_host(host_id="host-b", requested_by="operator")
 
     reacquired = await service.acquire_handles("session-a", {
         "requests": [{"pool": "only-a"}, {"pool": "only-b"}],
@@ -360,8 +362,7 @@ async def test_handle_list_and_resolution_hide_stale_recovered_lease(db):
     private = await service._resolve_handle_lease("session-a", handle["id"])
     await service.quarantine(execution_id=private["lease"]["execution_id"],
                              leases=[private["lease"]], reason="lost")
-    await service.recover_host(host_id="host-a", requested_by="operator",
-                               remote_quiescence_confirmed=True)
+    await service.recover_host(host_id="host-a", requested_by="operator")
 
     assert await service.list_session_handles("session-a") == []
     with pytest.raises(ResourceHandleOwnershipError, match="does not belong"):

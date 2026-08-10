@@ -111,6 +111,19 @@ def test_framed_protocol_round_trips_binary_pack_and_rejects_bad_frames():
             remote_supervisor._decode_frame(frame)
 
 
+def test_reconcile_host_rejects_durable_active_job_and_transfer_lineages(tmp_path):
+    root = tmp_path / "remote"; root.mkdir()
+    job = root / ".nerve-jobs" / "job-active"; job.mkdir(parents=True)
+    job.joinpath("state.json").write_text('{"state":"running","process_group":%d}' % os.getpgrp())
+    reply = remote_supervisor._reconcile_host({"root": str(root), "recovery_generation": 1})
+    assert reply["quiescent"] is False and reply["lineage"] == "job"
+    job.joinpath("state.json").write_text('{"state":"succeeded","process_group":%d}' % os.getpgrp())
+    transfer = root / ".nerve-transfers" / "transfer-active"; transfer.mkdir(parents=True)
+    transfer.joinpath("state.json").write_text('{"state":"serving","process_group":%d}' % os.getpgrp())
+    reply = remote_supervisor._reconcile_host({"root": str(root), "recovery_generation": 2})
+    assert reply["quiescent"] is False and reply["lineage"] == "transfer"
+
+
 @pytest.mark.asyncio
 async def test_ssh_supervisor_operations_match_the_remote_frame_contract():
     assert OpenSshSupervisor._OPERATIONS == remote_supervisor._FRAME_OPERATIONS

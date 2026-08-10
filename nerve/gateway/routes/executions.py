@@ -39,7 +39,10 @@ class DrainHostRequest(BaseModel):
 
 class RecoverHostRequest(BaseModel):
     confirm_host_id: str
-    remote_quiescence_confirmed: bool
+
+
+class PermanentlyLoseHostRequest(BaseModel):
+    confirm_host_id: str
 
 
 class QuarantineHostRequest(BaseModel):
@@ -390,17 +393,26 @@ async def recover_host(
 ):
     if request.confirm_host_id != host_id:
         raise HTTPException(status_code=409, detail="host confirmation does not match")
-    if not request.remote_quiescence_confirmed:
-        raise HTTPException(
-            status_code=409,
-            detail="remote quiescence must be confirmed before quarantine recovery",
-        )
     raw = await _resource_call(
         "recover_host",
         host_id=host_id,
         requested_by=str(user.get("sub", "user")),
-        remote_quiescence_confirmed=True,
     )
+    snapshot = public_resource_snapshot({"hosts": [raw]}) if isinstance(raw, Mapping) else None
+    if snapshot is None or not snapshot["hosts"]:
+        raise HTTPException(status_code=503, detail="resource service returned an invalid host")
+    return {"host": snapshot["hosts"][0]}
+
+
+@router.post("/api/resources/hosts/{host_id}/permanently-unavailable")
+async def permanently_lose_host(
+    host_id: str, request: PermanentlyLoseHostRequest, user: dict = Depends(require_auth),
+):
+    if request.confirm_host_id != host_id:
+        raise HTTPException(status_code=409, detail="host confirmation does not match")
+    raw = await _resource_call("permanently_lose_host", host_id=host_id,
+                               confirm_host_id=request.confirm_host_id,
+                               requested_by=str(user.get("sub", "user")))
     snapshot = public_resource_snapshot({"hosts": [raw]}) if isinstance(raw, Mapping) else None
     if snapshot is None or not snapshot["hosts"]:
         raise HTTPException(status_code=503, detail="resource service returned an invalid host")

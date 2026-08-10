@@ -5,7 +5,7 @@ import json
 from nerve.agent.tools.registry import ToolContext, ToolResult, ToolSpec
 from nerve.agent.tools.schemas import (
     RESOURCE_DIAGNOSTICS_SCHEMA, RESOURCE_DRAIN_SCHEMA, RESOURCE_EMPTY_SCHEMA,
-    RESOURCE_QUARANTINE_SCHEMA, RESOURCE_RECOVER_SCHEMA,
+    RESOURCE_PERMANENT_LOSS_SCHEMA, RESOURCE_QUARANTINE_SCHEMA, RESOURCE_RECOVER_SCHEMA,
 )
 from nerve.executions.public import public_resource_snapshot
 
@@ -61,12 +61,11 @@ async def drain(ctx: ToolContext, args: dict) -> ToolResult:
 
 async def recover(ctx: ToolContext, args: dict) -> ToolResult:
     host_id = str(args.get("host_id") or "")
-    if host_id != args.get("confirm_host_id") or args.get("remote_quiescence_confirmed") is not True:
-        return ToolResult.text("Recovery requires matching host confirmation and confirmed remote quiescence.", is_error=True)
+    if host_id != args.get("confirm_host_id"):
+        return ToolResult.text("Recovery requires matching host confirmation.", is_error=True)
     try:
         host = await _service(ctx).recover_host(
             host_id=host_id, requested_by=f"session:{ctx.session_id}",
-            remote_quiescence_confirmed=True,
         )
     except Exception:
         return ToolResult.text("Host recovery was rejected.", is_error=True)
@@ -87,6 +86,19 @@ async def quarantine(ctx: ToolContext, args: dict) -> ToolResult:
     return _json({"host": public_resource_snapshot({"hosts": [host]})["hosts"][0]})
 
 
+async def permanently_lose(ctx: ToolContext, args: dict) -> ToolResult:
+    host_id = str(args.get("host_id") or "")
+    if host_id != args.get("confirm_host_id"):
+        return ToolResult.text("Permanent loss requires matching host confirmation.", is_error=True)
+    try:
+        host = await _service(ctx).permanently_lose_host(
+            host_id=host_id, confirm_host_id=host_id, requested_by=f"session:{ctx.session_id}",
+        )
+    except Exception:
+        return ToolResult.text("Permanent host-loss action was rejected.", is_error=True)
+    return _json({"host": public_resource_snapshot({"hosts": [host]})["hosts"][0]})
+
+
 async def diagnostics(ctx: ToolContext, args: dict) -> ToolResult:
     try:
         raw = await _service(ctx).diagnostics(limit=int(args.get("limit", 100)))
@@ -101,6 +113,7 @@ RESOURCE_SPECS = [
     ToolSpec("resource_leases", "List current and historical fenced leases and queued requests.", RESOURCE_EMPTY_SCHEMA, leases),
     ToolSpec("resource_host_drain", "Drain or un-drain a host after confirming its id.", RESOURCE_DRAIN_SCHEMA, drain),
     ToolSpec("resource_host_quarantine", "Quarantine a host globally across every pool after confirming its id.", RESOURCE_QUARANTINE_SCHEMA, quarantine),
-    ToolSpec("resource_host_recover", "Recover a quarantined host only after remote quiescence is confirmed.", RESOURCE_RECOVER_SCHEMA, recover),
+    ToolSpec("resource_host_recover", "Recover a quarantined host only after supervisor proof of quiescence.", RESOURCE_RECOVER_SCHEMA, recover),
+    ToolSpec("resource_host_permanently_unavailable", "Authoritatively permanently lose an exact confirmed host.", RESOURCE_PERMANENT_LOSS_SCHEMA, permanently_lose),
     ToolSpec("resource_diagnostics", "Inspect resource state and durable lease audit events.", RESOURCE_DIAGNOSTICS_SCHEMA, diagnostics),
 ]

@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import random
 from pathlib import Path
 import uuid
 from collections.abc import Mapping, Sequence
@@ -138,7 +139,7 @@ class ResourceInventory:
 
 class LeaseService:
     def __init__(self, *, db: Any, inventory: ResourceInventory,
-                 recovery_gate: ResourceRecoveryGate | None = None):
+                 recovery_gate: ResourceRecoveryGate | None = None, recovery_probe: Any = None):
         self.db, self.inventory = db, inventory
         self.recovery_gate = recovery_gate or ResourceRecoveryGate()
         raw = getattr(inventory, "config", {})
@@ -149,6 +150,11 @@ class LeaseService:
         self._wait_continuation_publisher: Any = None
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._service_started_at = utc_now_iso()
+        self._recovery_probe = recovery_probe
+        self._recovery_interval = max(1.0, float(raw.get("host_recovery_seconds", 300)))
+        self._recovery_claim_seconds = max(5.0, float(raw.get("host_recovery_claim_seconds", 360)))
+        self._recovery_concurrency = asyncio.Semaphore(max(1, int(raw.get("host_recovery_concurrency", 2))))
+        self._next_recovery_at: float | None = None
 
     @staticmethod
     def canonical_worktree_identity(worktree: str | Path) -> str:
@@ -336,6 +342,39 @@ class LeaseService:
         while True:
             await asyncio.sleep(min(30.0, max(1.0, self.ttl_seconds / 3)))
             await self.reconcile_expired()
+            # Spread restart cohorts while retaining a bounded, durable winner.
+            now = asyncio.get_running_loop().time()
+            if self._next_recovery_at is None:
+                self._next_recovery_at = now + random.uniform(0, min(30.0, self._recovery_interval))
+            if now >= self._next_recovery_at:
+                await self._recover_quarantined_hosts()
+                self._next_recovery_at = now + self._recovery_interval + random.uniform(0, min(30.0, self._recovery_interval / 10))
+
+    async def _recover_quarantined_hosts(self) -> None:
+        hosts = [h for h in await self.db.list_resource_hosts()
+                 if h.get("quarantined") and not h.get("permanently_unavailable")]
+        await asyncio.gather(*(self._recover_host_once(str(h["id"])) for h in hosts), return_exceptions=True)
+
+    async def _recover_host_once(self, host_id: str) -> Mapping[str, Any] | None:
+        async with self._recovery_concurrency:
+            # An unavailable backend is not a claimant: leaving a lease here
+            # would make a later configured supervisor wait for expiry.
+            if self._recovery_probe is None:
+                return None
+            claim = await self.db.claim_host_recovery(host_id, lease_seconds=self._recovery_claim_seconds)
+            if claim is None:
+                return None
+            # The database generation is the local fence; the supervisor also
+            # rejects a stale remote generation and proves its host lock idle.
+            try:
+                quiescent = bool(await self._recovery_probe(host_id, int(claim["recovery_generation"])))
+            except Exception:
+                await self.db.fail_host_recovery(host_id, int(claim["recovery_generation"]))
+                return None
+            if not quiescent:
+                await self.db.fail_host_recovery(host_id, int(claim["recovery_generation"]))
+                return None
+            return await self.db.complete_host_recovery(host_id, int(claim["recovery_generation"]))
 
     async def reconcile_expired(self) -> Sequence[Mapping[str, Any]]:
         # Expiry is evidence that ownership is stale, never that the remote is
@@ -1017,6 +1056,23 @@ class LeaseService:
         current = await self.db.get_resource_host(host_id)
         assert current is not None
         return current
-    async def recover_host(self, *, host_id: str, requested_by: str, remote_quiescence_confirmed: bool) -> Mapping[str, Any]:
-        if not remote_quiescence_confirmed: raise ResourceInventoryError("remote quiescence confirmation is required")
-        return await self.db.recover_resource_host(host_id)
+    async def recover_host(self, *, host_id: str, requested_by: str) -> Mapping[str, Any]:
+        """Manual recovery is the same fenced path as periodic reconciliation."""
+        result = await self._recover_host_once(host_id)
+        if result is None:
+            raise ResourceInventoryError("remote supervisor did not prove host quiescence")
+        return result
+
+    async def permanently_lose_host(self, *, host_id: str, confirm_host_id: str, requested_by: str) -> Mapping[str, Any]:
+        if host_id != confirm_host_id:
+            raise ResourceInventoryError("host confirmation does not match")
+        host, settled = await self.db.permanently_lose_host_and_terminalize_waits(host_id)
+        for wait_id in settled:
+            task = self._wait_tasks.get(wait_id)
+            if task is not None:
+                task.cancel()
+            if self._wait_continuation_publisher is not None:
+                wait = await self.db.get_resource_wait_operation(wait_id)
+                if wait is not None:
+                    self._wait_continuation_publisher(str(wait["operation_id"]))
+        return host

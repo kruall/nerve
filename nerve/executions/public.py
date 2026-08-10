@@ -66,7 +66,10 @@ class ResourceUiService(Protocol):
 
     async def recover_host(
         self, *, host_id: str, requested_by: str,
-        remote_quiescence_confirmed: bool,
+    ) -> Mapping[str, Any]: ...
+
+    async def permanently_lose_host(
+        self, *, host_id: str, confirm_host_id: str, requested_by: str,
     ) -> Mapping[str, Any]: ...
 
 
