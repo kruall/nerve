@@ -13,6 +13,7 @@ import contextlib
 import hashlib
 import ipaddress
 import json
+import logging
 import os
 import re
 import shutil
@@ -23,6 +24,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
 from nerve.executions.backend import BackendRecovery, BackendResult, ExecutionBackendError, ExecutionBackendUncertain, LogSink, StartedSink
+
+logger = logging.getLogger(__name__)
 
 
 class SshTransportError(ExecutionBackendError):
@@ -210,7 +213,10 @@ class OpenSshSupervisor:
         return response
 
     async def _rpc(self, connection: SshConnection, operation: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        # Never log connection coordinates, payload fields, or artifact data.
+        logger.info("ssh_rpc started operation=%s connection=%s", operation, connection.name)
         if shutil.which("ssh") is None:
+            logger.warning("ssh_rpc failed operation=%s connection=%s reason=no_client", operation, connection.name)
             raise SshTransportError("OpenSSH client is not installed")
         request = dict(payload)
         pack = b""
@@ -246,13 +252,22 @@ class OpenSshSupervisor:
         except (TimeoutError, OSError) as exc:
             proc.kill()
             await proc.wait()
+            logger.warning("ssh_rpc failed operation=%s connection=%s reason=unreachable error=%s", operation, connection.name, type(exc).__name__)
             raise SshTransportError("SSH supervisor is unreachable") from exc
         if proc.returncode != 0:
-            raise SshTransportError("SSH supervisor request failed: " + stderr.decode(errors="replace")[-300:])
-        response = self._response(stdout)
+            detail = stderr.decode(errors="replace")[-300:]
+            logger.warning("ssh_rpc failed operation=%s connection=%s reason=exit_%s detail=%s", operation, connection.name, proc.returncode, detail)
+            raise SshTransportError("SSH supervisor request failed: " + detail)
+        try:
+            response = self._response(stdout)
+        except SshTransportError as exc:
+            logger.warning("ssh_rpc failed operation=%s connection=%s reason=invalid_response detail=%s", operation, connection.name, str(exc))
+            raise
         if not isinstance(response, Mapping) or response.get("ok") is not True:
             detail = str(response.get("error", ""))[:300] if isinstance(response, Mapping) else ""
+            logger.warning("ssh_rpc failed operation=%s connection=%s reason=rejected detail=%s", operation, connection.name, detail)
             raise SshTransportError("SSH supervisor rejected request" + (": " + detail if detail else ""))
+        logger.info("ssh_rpc completed operation=%s connection=%s", operation, connection.name)
         return response
 
     async def start(self, connection, request): return await self._rpc(connection, "start", request)
@@ -438,7 +453,12 @@ class SshExecutionBackend:
                     result = BackendResult(status.get("exit_code"), summary=str(status.get("summary", "remote job finished")), error=status.get("error"))
                     publish = plan.get("ydb_publish")
                     if result.exit_code == 0 and isinstance(publish, Mapping):
-                        reply = await self.supervisor.ydb_publish(connection, {"root": root, "lease_id": next(x["id"] for x in plan["selected_leases"] if x.get("slot") == step.get("resource_slot")), "fencing_token": token, "workspace": str(remote_workspace), **dict(publish)})
+                        await emit("stdout", "network stage ydb_publish started\n")
+                        try:
+                            reply = await self.supervisor.ydb_publish(connection, {"root": root, "lease_id": next(x["id"] for x in plan["selected_leases"] if x.get("slot") == step.get("resource_slot")), "fencing_token": token, "workspace": str(remote_workspace), **dict(publish)})
+                        except SshTransportError as exc:
+                            await emit("stderr", "network stage ydb_publish failed: " + str(exc) + "\n")
+                            raise
                         await emit("stdout", "published artifact " + str(reply.get("artifact_root")) + "/" + str(reply.get("path")) + "\\n")
                     return result
                 await asyncio.sleep(self.poll_seconds)
