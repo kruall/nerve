@@ -220,61 +220,47 @@ async def test_ydb_make_publishes_one_confined_output_with_explicit_build_type(
 
 
 @pytest.mark.asyncio
-async def test_artifact_transfer_builds_one_or_two_resource_slots(db, owner, tmp_path, monkeypatch):
+async def test_artifact_transfer_requires_retained_handle_endpoints(db, owner, tmp_path):
     inventory = SimpleNamespace(local_artifact_roots={"control": tmp_path})
-    inventory.members = lambda pool: [pool + "-host"]
+    resources = SimpleNamespace(
+        inventory=inventory,
+        _resolve_handle_lease=AsyncMock(side_effect=[
+            {"pool": "workers", "host_id": "worker-1", "lease": {"id": "lease-destination"}},
+            {"pool": "builders", "host_id": "builder-1", "lease": {"id": "lease-source"}},
+            {"pool": "workers", "host_id": "worker-1", "lease": {"id": "lease-destination"}},
+        ]),
+    )
     service = ExecutionService(
         db=db, engine=_engine(), workspace=tmp_path, catalog=SimpleNamespace(),
-        resource_manager=SimpleNamespace(inventory=inventory),
+        resource_manager=resources,
     )
     service._start_serialized = AsyncMock(return_value={"id": "exec-transfer"})
 
     await service.start_artifact_transfer(
         session_id=owner,
         source={"host": "localhost", "artifact_root": "control", "path": "a.bin"},
-        destination={"pool": "workers", "artifact_root": "artifacts", "path": "b.bin"},
+        destination={"handle_id": "destination", "artifact_root": "artifacts", "path": "b.bin"},
         auto_continue=False,
     )
     plan = service._start_serialized.await_args.kwargs["plan"]
     assert plan["resources"] == {"destination": "workers"}
+    assert plan["retained_handle_ids"] == ["destination"]
     assert plan["artifact_transfer"]["source_local"] is True
 
     await service.start_artifact_transfer(
         session_id=owner,
-        source={"pool": "builders", "artifact_root": "artifacts", "path": "a.bin"},
-        destination={"pool": "workers", "artifact_root": "artifacts", "path": "b.bin"},
+        source={"handle_id": "source", "artifact_root": "artifacts", "path": "a.bin"},
+        destination={"handle_id": "destination", "artifact_root": "artifacts", "path": "b.bin"},
     )
     plan = service._start_serialized.await_args.kwargs["plan"]
-    assert plan["resources"] == {"source": "builders", "destination": "workers"}
-
-    await service.start_artifact_transfer(
-        session_id=owner,
-        source={"pool": "builders", "host": "builders-host", "artifact_root": "artifacts", "path": "a.bin"},
-        destination={"pool": "workers", "host": "workers-host", "artifact_root": "artifacts", "path": "b.bin"},
-    )
-    plan = service._start_serialized.await_args.kwargs["plan"]
-    assert plan["resource_hosts"] == {"source": "builders-host", "destination": "workers-host"}
+    assert plan["resource_hosts"] == {"source": "builder-1", "destination": "worker-1"}
     assert plan["source_session_reservation"] is False
 
-    monkeypatch.setattr(db, "get_session_resource_reservation", AsyncMock(return_value={
-        "state": "active", "pool": "builders", "lease_id": "reservation-lease",
-    }))
-    monkeypatch.setattr(db, "get_resource_lease", AsyncMock(return_value={
-        "state": "active", "host_id": "builders-host",
-    }))
-    await service.start_artifact_transfer(
-        session_id=owner,
-        source={"pool": "builders", "host": "builders-host", "artifact_root": "artifacts", "path": "a.bin"},
-        destination={"pool": "workers", "artifact_root": "artifacts", "path": "b.bin"},
-    )
-    plan = service._start_serialized.await_args.kwargs["plan"]
-    assert plan["source_session_reservation"] is True
-
-    with pytest.raises(ValueError, match="not a member"):
+    with pytest.raises(ValueError, match="endpoint is invalid"):
         await service.start_artifact_transfer(
             session_id=owner,
-            source={"pool": "builders", "host": "other-host", "artifact_root": "artifacts", "path": "a.bin"},
-            destination={"pool": "workers", "artifact_root": "artifacts", "path": "b.bin"},
+            source={"pool": "builders", "artifact_root": "artifacts", "path": "a.bin"},
+            destination={"handle_id": "destination", "artifact_root": "artifacts", "path": "b.bin"},
         )
 
     with pytest.raises(ValueError, match="localhost-to-localhost"):
@@ -296,7 +282,7 @@ async def test_artifact_transfer_validates_remote_endpoint_before_start(db, owne
     service = ExecutionService(
         db=db, engine=backend, workspace=tmp_path, catalog=SimpleNamespace(),
         backend=backend,
-        resource_manager=SimpleNamespace(inventory=inventory),
+        resource_manager=SimpleNamespace(inventory=inventory, _resolve_handle_lease=AsyncMock(return_value={"pool": "workers", "host_id": "host"})),
     )
     service._start_serialized = AsyncMock(return_value={"id": "must-not-start"})
 
@@ -304,31 +290,30 @@ async def test_artifact_transfer_validates_remote_endpoint_before_start(db, owne
         await service.start_artifact_transfer(
             session_id=owner,
             source={"host": "localhost", "artifact_root": "control", "path": "a.bin"},
-            destination={"pool": "workers", "artifact_root": "missing", "path": "b.bin"},
+            destination={"handle_id": "worker", "artifact_root": "missing", "path": "b.bin"},
         )
 
     service._start_serialized.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_resource_command_builds_shell_free_leased_plan(db, owner, tmp_path):
-    inventory = SimpleNamespace(members=Mock(return_value=["worker-1"]))
+async def test_resource_command_builds_shell_free_retained_handle_plan(db, owner, tmp_path):
+    inventory = SimpleNamespace()
     service = ExecutionService(
         db=db, engine=_engine(), workspace=tmp_path, catalog=SimpleNamespace(),
-        resource_manager=SimpleNamespace(inventory=inventory),
+        resource_manager=SimpleNamespace(inventory=inventory, _resolve_handle_lease=AsyncMock(return_value={"pool": "test-machines", "host_id": "worker-1"})),
     )
     service._start_serialized = AsyncMock(return_value={"id": "exec-command"})
 
     await service.start_resource_command(
         session_id=owner,
-        pool="test-machines",
+        handle_id="handle-1",
         executable="/opt/tests/run",
         args=["--case", "value with spaces; $(still-data)"],
         timeout_seconds=90,
         auto_continue=False,
     )
 
-    inventory.members.assert_called_once_with("test-machines")
     call = service._start_serialized.await_args.kwargs
     assert call["auto_continue"] is False
     assert call["plan"] == {
@@ -341,6 +326,8 @@ async def test_resource_command_builds_shell_free_leased_plan(db, owner, tmp_pat
             "args": ["--case", "value with spaces; $(still-data)"],
         },
         "resources": {"worker": "test-machines"},
+        "retained_handle_ids": ["handle-1"],
+        "resource_hosts": {"worker": "worker-1"},
         "steps": [{
             "id": "command", "transport": "resource",
             "resource_slot": "worker", "executable": "/opt/tests/run",
@@ -360,7 +347,7 @@ async def test_resource_command_builds_shell_free_leased_plan(db, owner, tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_resource_command_handle_is_pinned_while_legacy_pool_remains_compatible(db, owner, tmp_path):
+async def test_resource_command_rejects_pool_form_without_allocating(db, owner, tmp_path):
     inventory = SimpleNamespace(members=Mock(return_value=["worker-1"]))
     resources = SimpleNamespace(
         inventory=inventory,
@@ -372,16 +359,11 @@ async def test_resource_command_handle_is_pinned_while_legacy_pool_remains_compa
                                catalog=SimpleNamespace(), resource_manager=resources)
     service._start_serialized = AsyncMock(return_value={"id": "exec-command"})
 
-    await service.start_resource_command(session_id=owner, handle_id="handle-1",
-                                         executable="/bin/true", args=[])
-    explicit = service._start_serialized.await_args.kwargs
-    assert explicit["legacy_compatibility"] is False
-    assert explicit["plan"]["retained_handle_ids"] == ["handle-1"]
-    assert explicit["plan"]["resource_hosts"] == {"worker": "worker-1"}
-
-    await service.start_resource_command(session_id=owner, pool="test-machines",
-                                         executable="/bin/true", args=[])
-    assert service._start_serialized.await_args.kwargs["legacy_compatibility"] is True
+    with pytest.raises(TypeError):
+        await service.start_resource_command(session_id=owner, pool="test-machines",
+                                             executable="/bin/true", args=[])
+    resources._resolve_handle_lease.assert_not_awaited()
+    service._start_serialized.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -411,21 +393,21 @@ async def test_artifact_transfer_handle_endpoints_pin_order_and_reject_duplicate
 
 
 @pytest.mark.asyncio
-async def test_resource_command_rejects_unknown_pool_and_malformed_argv(db, owner, tmp_path):
-    inventory = SimpleNamespace(members=Mock(side_effect=KeyError("missing")))
+async def test_resource_command_rejects_missing_handle_and_malformed_argv(db, owner, tmp_path):
+    inventory = SimpleNamespace()
     service = ExecutionService(
         db=db, engine=_engine(), workspace=tmp_path, catalog=SimpleNamespace(),
-        resource_manager=SimpleNamespace(inventory=inventory),
+        resource_manager=SimpleNamespace(inventory=inventory, _resolve_handle_lease=AsyncMock()),
     )
     service._start_serialized = AsyncMock()
 
-    with pytest.raises(KeyError):
+    with pytest.raises(ValueError, match="handle"):
         await service.start_resource_command(
-            session_id=owner, pool="missing", executable="/bin/true", args=[],
+            session_id=owner, handle_id=None, executable="/bin/true", args=[],
         )
     with pytest.raises(ValueError, match="literal strings"):
         await service.start_resource_command(
-            session_id=owner, pool="workers", executable="/bin/true", args=[1],
+            session_id=owner, handle_id="worker", executable="/bin/true", args=[1],
         )
     service._start_serialized.assert_not_awaited()
 
@@ -786,7 +768,7 @@ async def test_local_backend_cancellation_reaps_process_group(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_service_acquires_persists_and_releases_resource_leases(
+async def test_resource_bearing_start_without_handles_fails_before_backend_or_allocation(
     db, owner, tmp_path, broadcast_stub,
 ):
     class ResourcePlan(StubPlan):
@@ -811,26 +793,15 @@ async def test_service_acquires_persists_and_releases_resource_leases(
         execution_root=tmp_path / "runs",
     )
     await service.initialize()
-    execution_id = (await service.start(session_id=owner, plan=ResourcePlan()))["id"]
-    await backend.started_event.wait()
-    row = await db.get_execution(execution_id)
-    assert row["selected_leases"][0]["id"] == "lease-1"
-    leases.acquire.assert_awaited_once()
-    backend.release_event.set()
-
-    async def released():
-        return leases.release.await_count == 1
-
-    await _eventually(released)
-    leases.release.assert_awaited_once_with(
-        execution_id=execution_id,
-        leases=[{"id": "lease-1", "host_id": "host-1", "state": "acquired"}],
-    )
+    with pytest.raises(ValueError, match="resource-bearing operations require retained handle ids"):
+        await service.start(session_id=owner, plan=ResourcePlan())
+    leases.acquire.assert_not_awaited()
+    backend.started_event.clear()
     await service.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_uncertain_remote_cleanup_quarantines_instead_of_releasing(
+async def test_resource_bearing_start_without_handles_never_dispatches_uncertain_backend(
     db, owner, tmp_path, broadcast_stub,
 ):
     class ResourcePlan(StubPlan):
@@ -857,15 +828,10 @@ async def test_uncertain_remote_cleanup_quarantines_instead_of_releasing(
         backend=Backend(), resource_manager=leases, execution_root=tmp_path / "runs",
     )
     await service.initialize()
-    execution_id = (await service.start(session_id=owner, plan=ResourcePlan()))["id"]
-
-    async def terminal():
-        row = await db.get_execution(execution_id)
-        return row if row["status"] == "failed" else None
-
-    row = await _eventually(terminal)
-    assert row["result"]["error"] == "remote_quiescence_unknown"
-    leases.quarantine.assert_awaited_once()
+    with pytest.raises(ValueError, match="resource handle ids must match execution resource slots"):
+        await service.start(session_id=owner, plan=ResourcePlan(), handle_ids=[])
+    leases.acquire.assert_not_awaited()
+    leases.quarantine.assert_not_awaited()
     leases.release.assert_not_awaited()
     await service.shutdown()
 

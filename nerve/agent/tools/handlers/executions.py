@@ -98,7 +98,10 @@ async def execution_kind_start_handler(ctx: ToolContext, args: dict) -> ToolResu
     try:
         detached = bool(args.get("detached", False))
         started = await service.start(
-            session_id=ctx.session_id, plan=plan, auto_continue=detached,
+            # Always send an explicit list.  Resource-bearing plans reject an
+            # empty list before a row or backend allocation is created.
+            session_id=ctx.session_id, plan=plan, handle_ids=args.get("handle_ids", []),
+            auto_continue=detached,
         )
         if not isinstance(started, Mapping):
             raise TypeError("ExecutionService.start must return a mapping")
@@ -167,7 +170,6 @@ async def resource_command_handler(ctx: ToolContext, args: dict) -> ToolResult:
         row = await service.start_resource_command(
             session_id=ctx.session_id,
             handle_id=args.get("handle_id"),
-            pool=args.get("pool"),
             executable=args.get("executable"),
             args=args.get("args", []),
             timeout_seconds=args.get("timeout_seconds", 3600),
@@ -180,7 +182,7 @@ async def resource_command_handler(ctx: ToolContext, args: dict) -> ToolResult:
     except Exception as exc:
         logger.warning("resource command rejected (%s)", type(exc).__name__)
         return ToolResult.text(
-            "Could not start resource command: pool or command arguments were rejected.",
+            "Could not start resource command: handle or command arguments were rejected.",
             is_error=True,
         )
     return _json({"kind": "resource_command", "execution": public_execution(row)})
@@ -322,8 +324,8 @@ async def execution_list_handler(ctx: ToolContext, args: dict) -> ToolResult:
 
 
 EXECUTION_SPECS = [
-    ToolSpec("artifact_transfer", "Copy one confined artifact directly between two leased remote pools; Nerve never relays bytes.", ARTIFACT_TRANSFER_SCHEMA, artifact_transfer_handler),
-    ToolSpec("resource_command", "Run a shell-free executable and literal argv on one exclusively leased host from a configured resource pool.", RESOURCE_COMMAND_SCHEMA, resource_command_handler),
+    ToolSpec("artifact_transfer", "Copy one confined artifact between retained resource handles; acquire handles before starting and release them afterwards.", ARTIFACT_TRANSFER_SCHEMA, artifact_transfer_handler),
+    ToolSpec("resource_command", "Run a shell-free executable and literal argv through one retained resource handle.", RESOURCE_COMMAND_SCHEMA, resource_command_handler),
     ToolSpec("ydb_make", "Synchronize a configured YDB worktree to the session's reviewed builder and run ya make.", YDB_MAKE_SCHEMA, ydb_make_handler),
     ToolSpec("ydb_test", "Synchronize a configured YDB worktree to the session's reviewed builder and run ya tests.", YDB_TEST_SCHEMA, ydb_test_handler),
     ToolSpec("ydb_file_list", "List bounded paths in this session's synchronized YDB checkout.", YDB_FILE_LIST_SCHEMA, ydb_file_list_handler),

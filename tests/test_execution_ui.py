@@ -126,17 +126,18 @@ def test_public_execution_exposes_dismissal_and_boolean_auto_continue():
     assert public["dismissed_at"] == "2026-01-01T00:00:00+00:00"
 
 
-def test_public_execution_redacts_capabilities_only_for_explicit_retained_handles():
+def test_public_execution_always_redacts_lease_capabilities():
     lease = {
         "id": "lease-secret", "state": "active", "host_id": "host-a",
         "execution_id": "exec-secret", "session_id": "session-secret",
         "pool": "builders", "fencing_token": 9,
     }
-    legacy = public_execution({"lease": lease, "plan": {"retained_handle_ids": ["legacy"], "legacy_resource_handles": True}})
+    persisted = public_execution({"lease": lease, "plan": {}})
     explicit = public_execution({"lease": lease, "plan": {"retained_handle_ids": ["handle-a"]}})
 
-    assert legacy["lease"] == lease
-    assert explicit["lease"] == {"state": "active", "host_id": "host-a", "pool": "builders"}
+    safe = {"state": "active", "host_id": "host-a", "pool": "builders"}
+    assert persisted["lease"] == safe
+    assert explicit["lease"] == safe
 
 
 def test_public_resource_snapshot_drops_connection_material():

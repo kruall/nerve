@@ -59,7 +59,6 @@ class ExecutionStore:
         completion_target_type: str = "session",
         completion_target_id: str | None = None,
         auto_continue: bool = True,
-        legacy_compatibility: bool = False,
         parent_operation_id: str | None = None,
         stage_run_id: str | None = None,
         return_created: bool = False,
@@ -157,34 +156,6 @@ class ExecutionStore:
                             f"DELETE FROM operation_resource_refs WHERE operation_id=? AND handle_id IN ({marks})",
                             (parent_operation_id, *handle_ids),
                         )
-                # R9 serialized every session.  Calls that did not opt into
-                # explicit handles retain that behaviour, including races,
-                # while explicit Operations can run beside disjoint explicit
-                # Operations.  The marker is persisted in the plan so this
-                # remains true after a restart.
-                if legacy_compatibility:
-                    async with self.db.execute(
-                        """SELECT id FROM executions WHERE session_id=?
-                           AND status IN ('queued', 'starting', 'running', 'cancelling')
-                           AND private_operation = 0
-                           ORDER BY id LIMIT 1""",
-                        (session_id,),
-                    ) as cursor:
-                        conflict = await cursor.fetchone()
-                    if conflict is not None:
-                        raise ValueError("session already owns an active execution")
-                else:
-                    async with self.db.execute(
-                        """SELECT id FROM executions WHERE session_id=?
-                           AND status IN ('queued', 'starting', 'running', 'cancelling')
-                             AND private_operation = 0
-                             AND json_extract(plan, '$.legacy_resource_handles') = 1
-                           ORDER BY id LIMIT 1""",
-                        (session_id,),
-                    ) as cursor:
-                        conflict = await cursor.fetchone()
-                    if conflict is not None:
-                        raise ValueError("session already owns an active execution")
                 for position, handle_id in enumerate(handle_ids):
                     async with self.db.execute(
                         """SELECT 1

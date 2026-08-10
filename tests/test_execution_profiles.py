@@ -240,16 +240,28 @@ def test_profile_files_and_directories_cannot_be_symlinks(tmp_path):
 
 @pytest.mark.asyncio
 async def test_progressive_tools_and_start_service(tmp_path):
-    _write(tmp_path)
+    _write(tmp_path, _profile(
+        resource_slots={},
+        steps=[
+            {
+                "id": "echo", "type": "command", "transport": "local",
+                "executable": "/usr/bin/printf",
+                "argv": [{"literal": "%s"}, {"arg": "message"}],
+                "capture_stdout": "echoed",
+            },
+        ],
+    ))
     catalog = ExecutionCatalog(tmp_path)
     catalog.reload()
 
     class Service:
         def __init__(self):
             self.plan = None
+            self.handle_ids = None
 
-        async def start(self, *, session_id, plan, auto_continue=True):
+        async def start(self, *, session_id, plan, handle_ids, auto_continue=True):
             self.plan = plan
+            self.handle_ids = handle_ids
             return {"id": "exec-1", "session_id": session_id}
 
         async def join_execution(self, *, execution_id, session_id):
@@ -279,6 +291,11 @@ async def test_progressive_tools_and_start_service(tmp_path):
     )
     assert started.is_error is False
     assert service.plan.profile_hash == catalog.snapshot.profiles["local.echo"].profile_hash
+    assert service.plan.resources == {}
+    assert service.handle_ids == []
+    assert {"session_id", "lease_id", "fencing_token", "handle_id"}.isdisjoint(
+        service.plan.arguments,
+    )
 
 
 @pytest.mark.asyncio
@@ -321,14 +338,14 @@ async def test_resource_command_tool_forwards_literal_argv_and_waits():
         "resource_command",
         ToolContext(session_id="s", execution_service=service),
         {
-            "pool": "test-machines", "executable": "/bin/echo",
+            "handle_id": "handle-1", "executable": "/bin/echo",
             "args": ["hello world"], "timeout_seconds": 30,
         },
     )
 
     assert result.is_error is False
     service.start_resource_command.assert_awaited_once_with(
-        session_id="s", pool="test-machines", executable="/bin/echo",
+        session_id="s", handle_id="handle-1", executable="/bin/echo",
         args=["hello world"], timeout_seconds=30, auto_continue=False,
     )
     service.join_execution.assert_awaited_once_with(
@@ -392,10 +409,15 @@ async def test_rest_discovery_validation_and_start(tmp_path, monkeypatch):
     catalog.reload()
 
     class Service:
-        async def start(self, *, session_id, plan):
+        def __init__(self):
+            self.handle_ids = None
+
+        async def start(self, *, session_id, plan, handle_ids):
+            self.handle_ids = handle_ids
             return {"id": "exec-api", "session_id": session_id, "hash": plan.profile_hash}
 
-    engine = SimpleNamespace(execution_catalog=catalog, execution_service=Service())
+    service = Service()
+    engine = SimpleNamespace(execution_catalog=catalog, execution_service=service)
     monkeypatch.setattr(_deps, "_deps", _deps.RouteDeps(engine=engine, db=None))
     listed = await list_execution_kinds(user={})
     assert listed["kinds"][0]["kind"] == "local.echo"
@@ -410,6 +432,7 @@ async def test_rest_discovery_validation_and_start(tmp_path, monkeypatch):
     )
     assert started["execution"]["id"] == "exec-api"
     assert started["profile_hash"] == catalog.snapshot.profiles["local.echo"].profile_hash
+    assert service.handle_ids == []
 
 
 def test_shipped_example_profiles_are_valid(tmp_path):

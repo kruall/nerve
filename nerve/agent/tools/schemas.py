@@ -59,6 +59,10 @@ EXECUTION_KIND_START_SCHEMA = {
     "type": "object",
     "properties": {
         **_EXECUTION_OPERATION_PROPERTIES,
+        "handle_ids": {
+            "type": "array", "items": {"type": "string"},
+            "description": "Ordered session-owned retained handles for resource slots",
+        },
         "detached": {
             "type": "boolean",
             "description": "Return immediately and resume this session when the execution completes.",
@@ -71,8 +75,8 @@ EXECUTION_KIND_START_SCHEMA = {
 
 ARTIFACT_TRANSFER_SCHEMA = {
     "type": "object", "properties": {
-        "source": {"oneOf": [{"type": "object", "properties": {"host": {"const": "localhost"}, "path": {"type": "string"}, "artifact_root": {"type": "string"}}, "required": ["host", "path", "artifact_root"], "additionalProperties": False}, {"type": "object", "properties": {"pool": {"type": "string"}, "host": {"type": "string"}, "path": {"type": "string"}, "artifact_root": {"type": "string"}}, "required": ["pool", "path", "artifact_root"], "additionalProperties": False}, {"type": "object", "properties": {"handle_id": {"type": "string"}, "path": {"type": "string"}, "artifact_root": {"type": "string"}}, "required": ["handle_id", "path", "artifact_root"], "additionalProperties": False}]},
-        "destination": {"oneOf": [{"type": "object", "properties": {"host": {"const": "localhost"}, "path": {"type": "string"}, "artifact_root": {"type": "string"}}, "required": ["host", "path", "artifact_root"], "additionalProperties": False}, {"type": "object", "properties": {"pool": {"type": "string"}, "host": {"type": "string"}, "path": {"type": "string"}, "artifact_root": {"type": "string"}}, "required": ["pool", "path", "artifact_root"], "additionalProperties": False}, {"type": "object", "properties": {"handle_id": {"type": "string"}, "path": {"type": "string"}, "artifact_root": {"type": "string"}}, "required": ["handle_id", "path", "artifact_root"], "additionalProperties": False}]},
+        "source": {"oneOf": [{"type": "object", "properties": {"host": {"const": "localhost"}, "path": {"type": "string"}, "artifact_root": {"type": "string"}}, "required": ["host", "path", "artifact_root"], "additionalProperties": False}, {"type": "object", "properties": {"handle_id": {"type": "string"}, "path": {"type": "string"}, "artifact_root": {"type": "string"}}, "required": ["handle_id", "path", "artifact_root"], "additionalProperties": False}]},
+        "destination": {"oneOf": [{"type": "object", "properties": {"host": {"const": "localhost"}, "path": {"type": "string"}, "artifact_root": {"type": "string"}}, "required": ["host", "path", "artifact_root"], "additionalProperties": False}, {"type": "object", "properties": {"handle_id": {"type": "string"}, "path": {"type": "string"}, "artifact_root": {"type": "string"}}, "required": ["handle_id", "path", "artifact_root"], "additionalProperties": False}]},
         "detached": {"type": "boolean", "default": False},
     }, "required": ["source", "destination"], "additionalProperties": False,
 }
@@ -83,10 +87,6 @@ RESOURCE_COMMAND_SCHEMA = {
         "handle_id": {
             "type": "string",
             "description": "One active retained resource handle owned by this session",
-        },
-        "pool": {
-            "type": "string",
-            "description": "Configured resource pool from resource_inventory (legacy through R17)",
         },
         "executable": {
             "type": "string",
@@ -106,11 +106,7 @@ RESOURCE_COMMAND_SCHEMA = {
         },
         "detached": {"type": "boolean", "default": False},
     },
-    "required": ["executable"],
-    "oneOf": [
-        {"required": ["handle_id"], "not": {"required": ["pool"]}},
-        {"required": ["pool"], "not": {"required": ["handle_id"]}},
-    ],
+    "required": ["handle_id", "executable"],
     "additionalProperties": False,
 }
 

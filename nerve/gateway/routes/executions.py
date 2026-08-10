@@ -176,7 +176,7 @@ async def describe_execution_kind(kind: str, user: dict = Depends(require_auth))
 def _compile(kind: str, body: Any):
     if not isinstance(body, dict):
         raise HTTPException(status_code=422, detail="request body must be an object")
-    unknown = sorted(set(body) - {"arguments", "resources"})
+    unknown = sorted(set(body) - {"arguments", "resources", "handle_ids"})
     if unknown:
         raise HTTPException(status_code=422, detail=f"unknown field(s): {', '.join(unknown)}")
     try:
@@ -218,7 +218,7 @@ async def start_execution_kind(
                 "system", title="System executions", source="web",
             )
         execution = await engine.execution_service.start(
-            session_id="system", plan=plan,
+            session_id="system", plan=plan, handle_ids=body.get("handle_ids", []) if isinstance(body, Mapping) else [],
         )
         if not isinstance(execution, Mapping):
             raise TypeError("ExecutionService.start must return a mapping")

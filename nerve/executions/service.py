@@ -91,7 +91,6 @@ class ExecutionService:
         self.execution_root = execution_root or (self.workspace / ".nerve" / "executions")
         self._tasks: dict[str, asyncio.Task[Any]] = {}
         self._continuations: dict[str, asyncio.Task[Any]] = {}
-        self._compatibility_start_locks: dict[str, asyncio.Lock] = {}
         self._stopping = False
         self._continuations_ready = False
         self._terminal_changed = asyncio.Condition()
@@ -190,7 +189,7 @@ class ExecutionService:
         try:
             return await self._start_serialized(session_id=session_id, plan=plan,
                 profile_snapshot={"kind": kind, "title": kind, "source": "built-in reviewed YDB operation"},
-                auto_continue=auto_continue, legacy_compatibility=False)
+                auto_continue=auto_continue)
         except BaseException:
             with contextlib.suppress(OSError):
                 pack_path.unlink()
@@ -225,13 +224,9 @@ class ExecutionService:
             if not isinstance(value, Mapping):
                 raise ValueError("artifact transfer " + name + " endpoint is invalid")
             local = value.get("host") == "localhost"
-            # R15 public callers name a retained handle, never a pool or
-            # transport coordinate.  Keep the former endpoint form here only
-            # as the R17 compatibility adapter for trusted legacy callers.
             explicit_handle = value.get("handle_id")
             allowed = ({"host", "path", "artifact_root"} if local else
-                       ({"handle_id", "path", "artifact_root"} if explicit_handle is not None
-                        else {"pool", "host", "path", "artifact_root"}))
+                       {"handle_id", "path", "artifact_root"})
             if set(value) - allowed or (local and set(value) != allowed):
                 raise ValueError("artifact transfer " + name + " endpoint is invalid")
             if not local and explicit_handle is not None:
@@ -240,7 +235,7 @@ class ExecutionService:
                 resolved = await self.resource_manager._resolve_handle_lease(session_id, explicit_handle)
                 pool, host, handle_id = resolved["pool"], resolved["host_id"], explicit_handle
             else:
-                pool, host, handle_id = ("localhost", None, None) if local else (value.get("pool"), value.get("host"), None)
+                pool, host, handle_id = "localhost", None, None
             path, root = value.get("path"), value.get("artifact_root")
             if not all(isinstance(x, str) and x and "\x00" not in x for x in (pool, path, root)) or (host is not None and (not isinstance(host, str) or not host or "\x00" in host)):
                 raise ValueError("artifact transfer " + name + " endpoint is invalid")
@@ -254,9 +249,6 @@ class ExecutionService:
         dp, dx, dr, destination_local, dh, destination_handle = await endpoint(destination, "destination")
         if source_local and destination_local:
             raise ValueError("localhost-to-localhost artifact transfer is not supported")
-        if (not source_local and not destination_local
-                and (source_handle is None) != (destination_handle is None)):
-            raise ValueError("artifact transfer remote endpoints must both use handles or legacy pools")
         local_roots = getattr(getattr(self.resource_manager, "inventory", None), "local_artifact_roots", {})
         for local, root in ((source_local, sr), (destination_local, dr)):
             if local and root not in local_roots:
@@ -267,15 +259,8 @@ class ExecutionService:
             (destination_local, dp, dr, dh, destination_handle, "destination"),
         ):
             if not local:
-                if handle_id is None:
-                    if host is not None and host not in self.resource_manager.inventory.members(pool):
-                        raise ValueError(f"artifact transfer {name} host is not a member of its pool")
-                    if callable(validate_remote):
-                        validate_remote(pool, root)
-                    else:
-                        # Even backends without an endpoint-specific validator must
-                        # reject unknown pools before durable queue state is made.
-                        self.resource_manager.inventory.members(pool)
+                if callable(validate_remote):
+                    validate_remote(pool, root)
         resources = ({"destination": dp} if source_local else {"source": sp} if destination_local else {"source": sp, "destination": dp})
         source_reservation = False
         if sh is not None:
@@ -292,29 +277,20 @@ class ExecutionService:
                 "cancellation": {"mode": "terminate", "grace_seconds": 10, "run_cleanup": False}}
         if handle_ids:
             plan["retained_handle_ids"] = handle_ids
-        return await self._start_serialized(session_id=session_id, plan=plan, profile_snapshot={"kind": "artifact_transfer", "title": "direct artifact transfer", "source": "built-in reviewed transfer"}, auto_continue=auto_continue, legacy_compatibility=not bool(handle_ids))
+        return await self._start_serialized(session_id=session_id, plan=plan, profile_snapshot={"kind": "artifact_transfer", "title": "direct artifact transfer", "source": "built-in reviewed transfer"}, auto_continue=auto_continue)
 
     async def start_resource_command(
         self, *, session_id: str, executable: Any, args: Any,
-        handle_id: Any = None, pool: Any = None,
+        handle_id: Any,
         timeout_seconds: Any = 3600,
         auto_continue: bool = True,
     ) -> Mapping[str, Any]:
         self.recovery_gate.require_ready()
         """Run one literal argv command on an exclusively leased resource host."""
-        explicit_handle = handle_id is not None
-        if explicit_handle:
-            if not isinstance(handle_id, str) or not handle_id:
-                raise ValueError("resource command handle is invalid")
-            resolved = await self.resource_manager._resolve_handle_lease(session_id, handle_id)
-            if pool is not None and pool != resolved["pool"]:
-                raise ValueError("resource command handle does not match pool")
-            pool = resolved["pool"]
-            host_id = resolved["host_id"]
-        else:
-            host_id = None
-        if not isinstance(pool, str) or not pool or "\x00" in pool:
-            raise ValueError("resource command pool is invalid")
+        if not isinstance(handle_id, str) or not handle_id:
+            raise ValueError("resource command handle is invalid")
+        resolved = await self.resource_manager._resolve_handle_lease(session_id, handle_id)
+        pool, host_id = resolved["pool"], resolved["host_id"]
         if (
             not isinstance(executable, str) or not executable
             or "\x00" in executable or "\n" in executable
@@ -333,8 +309,6 @@ class ExecutionService:
         inventory = getattr(self.resource_manager, "inventory", None)
         if inventory is None:
             raise ValueError("resource inventory is unavailable")
-        if not explicit_handle:
-            inventory.members(pool)
         plan = {
             "kind": "resource_command",
             "profile_version": "1",
@@ -343,7 +317,7 @@ class ExecutionService:
                 "pool": pool, "executable": executable, "args": list(args),
             },
             "resources": {"worker": pool},
-            **({"retained_handle_ids": [handle_id], "resource_hosts": {"worker": host_id}} if explicit_handle else {}),
+            "retained_handle_ids": [handle_id], "resource_hosts": {"worker": host_id},
             "steps": [{
                 "id": "command", "transport": "resource",
                 "resource_slot": "worker", "executable": executable,
@@ -366,7 +340,6 @@ class ExecutionService:
                 "source": "built-in approval-gated operation",
             },
             auto_continue=auto_continue,
-            legacy_compatibility=not explicit_handle,
         )
 
     async def inspect_ydb_files(self, *, session_id: str, operation: str, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -559,8 +532,7 @@ class ExecutionService:
         ):
             raise ValueError("execution owner session is unavailable")
         serialized = plan.as_dict(redact_secrets=False)
-        explicit_handles = handle_ids is not None
-        if explicit_handles:
+        if handle_ids is not None:
             if (isinstance(handle_ids, (str, bytes))
                     or not all(isinstance(handle_id, str) and handle_id for handle_id in handle_ids)):
                 raise ValueError("resource handle ids are invalid")
@@ -574,13 +546,14 @@ class ExecutionService:
             if slots and len(slots) != len(resolved):
                 raise ValueError("resource handle ids must match execution resource slots")
             serialized["retained_handle_ids"] = list(handle_ids)
+        elif serialized.get("resources"):
+            raise ValueError("resource-bearing operations require retained handle ids")
         return await self._start_serialized(
             session_id=session_id,
             plan=serialized,
             profile_snapshot={**plan.profile.describe(), "source": plan.profile.source},
             completion_target=completion_target,
             auto_continue=auto_continue,
-            legacy_compatibility=not explicit_handles,
             execution_id=execution_id,
             parent_operation_id=parent_operation_id,
             stage_run_id=stage_run_id,
@@ -594,29 +567,15 @@ class ExecutionService:
         profile_snapshot: Mapping[str, Any],
         completion_target: Mapping[str, str] | None = None,
         auto_continue: bool = True,
-        legacy_compatibility: bool = True,
         execution_id: str | None = None,
         parent_operation_id: str | None = None,
         stage_run_id: str | None = None,
     ) -> Mapping[str, Any]:
-        if legacy_compatibility:
-            lock = self._compatibility_start_locks.setdefault(session_id, asyncio.Lock())
-            async with lock:
-                return await self._start_serialized_unlocked(
-                    session_id=session_id, plan=plan,
-                    profile_snapshot=profile_snapshot,
-                    completion_target=completion_target,
-                    auto_continue=auto_continue,
-                    legacy_compatibility=True,
-                    execution_id=execution_id, parent_operation_id=parent_operation_id,
-                    stage_run_id=stage_run_id,
-                )
         return await self._start_serialized_unlocked(
             session_id=session_id, plan=plan,
             profile_snapshot=profile_snapshot,
             completion_target=completion_target,
             auto_continue=auto_continue,
-            legacy_compatibility=False,
             execution_id=execution_id, parent_operation_id=parent_operation_id,
             stage_run_id=stage_run_id,
         )
@@ -629,7 +588,6 @@ class ExecutionService:
         profile_snapshot: Mapping[str, Any],
         completion_target: Mapping[str, str] | None = None,
         auto_continue: bool = True,
-        legacy_compatibility: bool = True,
         execution_id: str | None = None,
         parent_operation_id: str | None = None,
         stage_run_id: str | None = None,
@@ -638,43 +596,13 @@ class ExecutionService:
         execution_id = execution_id or f"exec-{uuid.uuid4().hex[:12]}"
         plan_data = dict(plan)
         plan_data["session_id"] = session_id
-        if legacy_compatibility:
-            # This durable compatibility marker retains R9's one-operation
-            # semantics for callers of the pre-handle start API.
-            plan_data["legacy_resource_handles"] = True
         requests = [
             {"slot": slot, "pool": pool, "mode": "exclusive", "state": "requested"}
             for slot, pool in dict(plan_data.get("resources", {})).items()
         ]
         handle_ids = tuple(plan_data.get("retained_handle_ids", ()))
-        legacy_handle_ids: tuple[str, ...] = ()
-        # Compatibility adapter: callers of the established start API still
-        # provide plan resources, not handles.  Retain those leases at session
-        # scope and dispatch the operation through the resulting handles.
-        acquire_handles = getattr(self.resource_manager, "acquire_handles", None)
-        # ``retained_handle_ids: []`` is an explicit zero-slot operation.  It
-        # must never fall through to the pre-handle adapter: only callers that
-        # omitted handles altogether retain the legacy allocation behaviour.
-        if (legacy_compatibility and not handle_ids and plan_data.get("resources")
-                and callable(acquire_handles)):
-            spec = [
-                {"pool": pool, "host": dict(plan_data.get("resource_hosts", {})).get(slot)}
-                for slot, pool in dict(plan_data["resources"]).items()
-            ]
-            existing_handle_ids = {
-                str(handle["id"])
-                for handle in await self.db.list_session_resource_handles(session_id)
-            }
-            acquired = await acquire_handles(
-                session_id, spec, auto_release_when_session_idle=True,
-            )
-            handle_ids = tuple(str(item["id"]) for item in acquired)
-            legacy_handle_ids = tuple(
-                handle_id for handle_id in handle_ids
-                if handle_id not in existing_handle_ids
-            )
-            plan_data = {**plan_data, "retained_handle_ids": list(handle_ids),
-                         "legacy_resource_handles": True}
+        if not handle_ids and plan_data.get("resources"):
+            raise ValueError("resource-bearing operations require retained handle ids")
         if handle_ids:
             requests = []
         try:
@@ -691,18 +619,11 @@ class ExecutionService:
                 completion_target_type=str((completion_target or {}).get("type", "session")),
                 completion_target_id=(completion_target or {}).get("id"),
                 auto_continue=auto_continue,
-                legacy_compatibility=legacy_compatibility,
                 parent_operation_id=parent_operation_id,
                 stage_run_id=stage_run_id,
                 return_created=True,
             )
         except Exception:
-            # The compatibility adapter acquired these only for this start.
-            # Do not leave them retained when its atomic execution insert loses
-            # a race (for example, another active execution in the session).
-            for handle_id in legacy_handle_ids:
-                with contextlib.suppress(Exception):
-                    await self.resource_manager.release_handle(session_id, handle_id)
             raise
         row, created = created_row
         # A deterministic child may already be committed when a process dies
@@ -1519,13 +1440,12 @@ class ExecutionService:
                 row["plan"].get("arguments", {}),
                 row["plan"].get("resources", {}),
             )
-            return await self.start(session_id=row["session_id"], plan=plan)
+            return await self.start(
+                session_id=row["session_id"], plan=plan,
+                handle_ids=row["plan"].get("retained_handle_ids", []),
+            )
         return await self._start_serialized(
             session_id=row["session_id"],
             plan=row["plan"],
             profile_snapshot=row["profile_snapshot"],
-            # The presence of retained handles is not the compatibility
-            # boundary: an explicit no-resource operation has an empty set.
-            # Preserve the durable marker chosen by the original start.
-            legacy_compatibility=bool(row["plan"].get("legacy_resource_handles")),
         )

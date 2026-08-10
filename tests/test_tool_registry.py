@@ -212,6 +212,16 @@ class TestDefaultRegistry:
                 f"{spec.name}: defaulted fields marked required: {sorted(leaked)}"
             )
 
+    def test_remote_operation_schemas_require_retained_handles_only(self):
+        registry = build_default_registry()
+        command = registry.get("resource_command").input_schema
+        transfer = registry.get("artifact_transfer").input_schema
+        assert command["required"] == ["handle_id", "executable"]
+        assert {"pool", "host", "session_id", "fencing_token"}.isdisjoint(command["properties"])
+        for endpoint in (transfer["properties"]["source"], transfer["properties"]["destination"]):
+            remote = endpoint["oneOf"][1]
+            assert set(remote["properties"]) == {"handle_id", "path", "artifact_root"}
+
 
 # ---------------------------------------------------------------------------
 # Schema adapter

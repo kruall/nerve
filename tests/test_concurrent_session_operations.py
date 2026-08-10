@@ -61,44 +61,16 @@ async def test_shared_handle_conflict_is_stable_before_second_backend_start(db, 
 
 
 @pytest.mark.asyncio
-async def test_legacy_starts_remain_session_serialized_during_race(db, tmp_path):
+async def test_concurrent_resource_starts_without_handles_are_rejected_before_backend(db, tmp_path):
     service, resources, backend = await _service(db, tmp_path)
-    second_service = ExecutionService(
-        db=db, engine=service.engine, workspace=service.workspace,
-        catalog=service.catalog, backend=backend,
-        resource_manager=resources, execution_root=service.execution_root,
-    )
-    await resources.acquire_handles("owner", [{"pool": "a"}])
-    barrier = asyncio.Barrier(2)
-    acquire_handles = resources.acquire_handles
-
-    async def synchronized_acquire(*args, **kwargs):
-        await barrier.wait()
-        return await acquire_handles(*args, **kwargs)
-
-    resources.acquire_handles = synchronized_acquire
     results = await asyncio.gather(
-        service.start(session_id="owner", plan=_Plan({"slot": "a"}), auto_continue=False),
-        second_service.start(session_id="owner", plan=_Plan({"slot": "a"}), auto_continue=False),
+        service.start(session_id="owner", plan=_Plan({"slot": "a"}), handle_ids=[], auto_continue=False),
+        service.start(session_id="owner", plan=_Plan({"slot": "a"}), handle_ids=[], auto_continue=False),
         return_exceptions=True,
     )
-    winners = [result for result in results if isinstance(result, dict)]
-    losers = [result for result in results if isinstance(result, ValueError)]
-    assert len(winners) == 1 and len(losers) == 1
-    assert str(losers[0]) == "session already owns an active execution"
-    winner = winners[0]
-    await _wait_for(backend.started)
-    assert len(backend.plans) == 1
-    assert await db.list_operation_resource_refs(winner["id"])
-    handle_id = (await db.list_session_resource_handles("owner", states=("active",)))[0]["id"]
-    assert (await db.get_session_resource_handle(handle_id))["state"] == "active"
-
-    backend.release.set()
-    await asyncio.gather(
-        *[instance._tasks[winner["id"]]
-          for instance in (service, second_service)
-          if winner["id"] in instance._tasks]
-    )
+    assert all(isinstance(result, ValueError) for result in results)
+    assert backend.plans == []
+    assert await db.list_session_resource_handles("owner", states=("active",)) == []
 
 
 @pytest.mark.asyncio

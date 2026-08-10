@@ -96,10 +96,10 @@ def _public_lease(raw: Any, *, redact_capabilities: bool = False) -> dict[str, A
         "revoking_at", "released_at", "quarantine_reason",
     )
     if redact_capabilities:
-        # Explicit retained handles are capabilities.  Do not expose any
-        # material that can identify their lease, execution, session, fence,
-        # or transport lineage.  Legacy execution payloads stay byte-for-byte
-        # shape compatible until their R17 removal.
+        # Retained handles are capabilities.  Do not expose any material that
+        # can identify their lease, execution, session, fence, or transport
+        # lineage.  Persisted pre-handle rows still decode through the normal
+        # safe allowlist below.
         keys = tuple(key for key in keys if key not in {
             "id", "execution_id", "session_id", "fencing_token",
         })
@@ -152,13 +152,9 @@ def public_execution(raw: Mapping[str, Any]) -> dict[str, Any]:
                 public_requests.append(item)
         result["resource_requests"] = public_requests
 
-    plan = raw.get("plan")
-    redact_capabilities = (
-        isinstance(plan, Mapping)
-        and bool(plan.get("retained_handle_ids"))
-        and not bool(plan.get("legacy_resource_handles"))
-    )
-    lease = _public_lease(raw.get("lease"), redact_capabilities=redact_capabilities)
+    # Both retained-handle operations and persisted pre-R17 rows may carry a
+    # lease.  Its id and fence are never public capability material.
+    lease = _public_lease(raw.get("lease"), redact_capabilities=True)
     if lease is not None:
         result["lease"] = lease
 

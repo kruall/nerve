@@ -323,24 +323,38 @@ async def test_quarantine_groups_operation_and_retained_lease_lineage(db, tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_legacy_start_retains_auto_release_handle_until_idle_cleanup(db, tmp_path):
+async def test_resource_bearing_start_without_handles_has_no_compat_handles_and_preserves_explicit_auto_release(db, tmp_path):
     service, resources, backend = await _service(db, tmp_path)
-    response = await service.start(
-        session_id="owner", plan=_Plan({"slot": "a"}), auto_continue=False,
+    explicit = (await resources.acquire_handles("owner", [{"pool": "a"}], auto_release_when_session_idle=True))[0]
+    explicit_id = explicit["id"]
+    async with db.db.execute("SELECT COUNT(*) FROM session_resource_handles") as c:
+        handle_counts = await c.fetchone()
+    async with db.db.execute("SELECT COUNT(*) FROM resource_leases") as c:
+        lease_counts = await c.fetchone()
+    async with db.db.execute("SELECT COUNT(*) FROM operation_resource_refs") as c:
+        ref_counts = await c.fetchone()
+    explicit_state = (await db.get_session_resource_handle(explicit_id))["auto_release_when_session_idle"]
+    assert explicit_state == 1
+
+    with pytest.raises(ValueError, match="resource-bearing operations require retained handle ids"):
+        await service.start(session_id="owner", plan=_Plan({"slot": "a"}), auto_continue=False)
+    assert backend.plans == []
+    async with db.db.execute("SELECT COUNT(*) FROM session_resource_handles") as c:
+        assert await c.fetchone() == handle_counts
+    async with db.db.execute("SELECT COUNT(*) FROM resource_leases") as c:
+        assert await c.fetchone() == lease_counts
+    async with db.db.execute("SELECT COUNT(*) FROM operation_resource_refs") as c:
+        assert await c.fetchone() == ref_counts
+
+    execution = await service.start(
+        session_id="owner", plan=_Plan({"slot": "a"}), handle_ids=[explicit_id], auto_continue=False,
     )
     await _wait_for(backend.started)
-    running = await db.get_execution(response["id"])
-    handle_id = running["plan"]["retained_handle_ids"][0]
-    handle = await db.get_session_resource_handle(handle_id)
-    assert handle["auto_release_when_session_idle"] == 1
-    assert response["id"] == running["id"]
-
-    task = service._tasks[response["id"]]
+    task = service._tasks[execution["id"]]
     backend.release.set()
     await task
-    assert (await db.get_session_resource_handle(handle_id))["state"] == "active"
-    assert await resources.release_all_session_handles("owner") == [handle_id]
-    assert (await db.get_session_resource_handle(handle_id))["state"] == "released"
+    assert (await db.get_session_resource_handle(explicit_id))["state"] == "active"
+    assert (await db.get_session_resource_handle(explicit_id))["auto_release_when_session_idle"] == 1
 
 
 @pytest.mark.asyncio

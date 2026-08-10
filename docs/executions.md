@@ -143,12 +143,14 @@ acquisition and release remain service-owned and are never model-managed.
 
 ## Approval-gated resource commands
 
-`resource_command(pool, executable, args)` runs one executable on an exclusively
-leased host from a configured pool. The executable and every argument are sent
-as separate process arguments; Nerve does not add a shell, accept SSH
-coordinates, or let the caller select a physical host. The command runs in its
-isolated execution directory and uses the normal durable status, tail,
-cancellation, fencing, and uncertain-cleanup behavior.
+Use the retained-handle flow for remote commands: inspect `resource_inventory`,
+call `resource_handle_acquire(requests)`, then call
+`resource_command(handle_id, executable, args)` and finally
+`resource_handle_release(handle_id)` when no operation uses it. A command never
+accepts a pool, host, session id, lease, or fence. The executable and every
+argument are separate process arguments; Nerve does not add a shell. The
+command uses the normal durable status, tail, cancellation, fencing, and
+uncertain-cleanup behavior.
 
 This capability permits arbitrary code execution within the remote worker
 account. Keep its MCP approval mode at `prompt`; do not add a per-tool `approve`
@@ -158,10 +160,10 @@ shell invocation remains visible in the approval request.
 ## Remote artifacts
 
 The SSH supervisor exposes a fixed `artifact_put` RPC for copying a verified
-local control-host file to a leased resource host. The caller provides a local
-source that is pre-checked for its exact size and SHA-256, a lease id/fencing
-token, and a relative destination below the connection's configured artifact
-root. The supervisor checks the fence, rejects traversal and symlink escapes,
+local control-host file to a leased resource host. The handle-bound operation
+provides a local source and relative destination below the connection's
+configured artifact root; Nerve supplies and verifies the lease id/fencing
+token internally. The supervisor checks the fence, rejects traversal and symlink escapes,
 writes a private temporary sibling, verifies size and SHA-256 again, then
 atomically renames it into place and removes temporary state on failure.
 
@@ -170,15 +172,11 @@ bundle: either every slot is fenced and assigned in one transaction or no slot
 is assigned. Queue ordering is durable and deterministic across restarts, so a
 two-host operation cannot hold one pool while waiting on another.
 
-`artifact_transfer` accepts tagged endpoints. A remote endpoint contains `pool`,
-a configured relative connection artifact root, and relative path. It may also
-contain an explicit `host` that must be a member of the selected pool; this
-pins that transfer slot to the named host. A
+`artifact_transfer` accepts tagged endpoints. A remote endpoint is
+`{handle_id, artifact_root, path}`: acquire the retained handles first and
+release them after the transfer settles. A
 localhost endpoint is exactly `{host: localhost, artifact_root: <configured
 local root id>, path: <relative path>}`. localhost-to-localhost is rejected.
-When a pinned source is the active YDB session-reservation host for the same
-session, the transfer reuses that fenced lease instead of attempting to acquire
-a second lease for it.
 Plans retain stable pool, host, and root ids with relative paths, never
 connection coordinates. Remote-to-remote creates
 `source` and `destination` slots; local-to-remote creates only `destination`,
@@ -295,8 +293,9 @@ a lease or clear quarantine merely because a heartbeat/TTL expired.
 ## SSH resource inventory and leases
 
 `resources` defines opaque `connection_ref` names, hosts, and named pools.
-Operations request only a declared pool through their resource slot; raw host,
-user, port, and SSH options are rejected. A pool can list members and/or select
+Profiles declare the pools their slots permit, while callers bind those slots
+only with retained handles; raw host, user, port, lease, fence, and SSH options
+are rejected. A pool can list members and/or select
 them by labels. Overlap is safe because a partial-unique database index covers
 the physical host, independent of the pool through which it was selected.
 
