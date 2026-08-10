@@ -86,6 +86,18 @@ def test_connection_catalog_defaults_transfer_user_to_connection_user(tmp_path):
     assert catalog.resolve("worker").transfer_user == "alice"
 
 
+def test_artifact_fence_accepts_one_transfer_lineage_but_rejects_stale_or_foreign(tmp_path):
+    request = {"fencing_token": 7, "lease_id": "lease-a"}
+    remote_supervisor._advance_artifact_fence(tmp_path, request)
+    # Destination prepare, source prepare, and receive may all carry the same
+    # fence lineage; a same-lineage replay is valid.
+    remote_supervisor._advance_artifact_fence(tmp_path, request)
+    with pytest.raises(PermissionError, match="different lease"):
+        remote_supervisor._advance_artifact_fence(tmp_path, {"fencing_token": 7, "lease_id": "lease-b"})
+    with pytest.raises(PermissionError, match="stale"):
+        remote_supervisor._advance_artifact_fence(tmp_path, {"fencing_token": 6, "lease_id": "lease-a"})
+
+
 @pytest.mark.parametrize("value", ["bad user", "-alpha", ""])
 def test_connection_catalog_validates_transfer_user(tmp_path, value):
     known = tmp_path / "known_hosts"; known.write_text("x")

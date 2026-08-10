@@ -608,8 +608,12 @@ def _advance_artifact_fence(root: Path, request: Mapping[str, Any]) -> tuple[int
     fence = root / ".nerve-artifact-fence.json"
     if fence.exists():
         previous = json.loads(fence.read_text())
-        if int(previous.get("fencing_token", -1)) > token:
+        previous_token = int(previous.get("fencing_token", -1))
+        previous_lease_id = str(previous.get("lease_id") or "")
+        if previous_token > token:
             raise PermissionError("stale fencing token")
+        if previous_token == token and previous_lease_id != lease_id:
+            raise PermissionError("artifact fence belongs to a different lease")
     temporary = fence.with_suffix(".tmp")
     temporary.write_text(json.dumps({
         "fencing_token": token, "lease_id": lease_id, "updated_at": time.time(),
@@ -714,6 +718,7 @@ def _transfer_load(request: Mapping[str, Any]) -> tuple[Path, dict[str, Any]]:
     return directory, state
 
 def _artifact_transfer_prepare_destination(request: Mapping[str, Any]) -> dict[str, Any]:
+    _advance_artifact_fence(_artifact_root(request), request)
     directory = _transfer_dir(_safe_root(str(request["root"])), request.get("transfer_id")); key = directory / "client_key"; keygen = str(request.get("ssh_keygen_path"))
     if not keygen.startswith("/") or ".." in PurePosixPath(keygen).parts: raise ValueError("invalid ssh-keygen path")
     subprocess.run([keygen, "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); os.chmod(key, 0o600)
@@ -721,6 +726,7 @@ def _artifact_transfer_prepare_destination(request: Mapping[str, Any]) -> dict[s
     return {"ok":True, "client_public_key":key.with_suffix(".pub").read_text().strip()}
 
 def _artifact_transfer_prepare_source(request: Mapping[str, Any]) -> dict[str, Any]:
+    _advance_artifact_fence(_artifact_root(request), request)
     root = _safe_root(str(request["root"])); directory = _transfer_dir(root, request.get("transfer_id")); source = _artifact_target(_artifact_root(request), request.get("path"))
     public, sshd, supervisor = request.get("client_public_key"), str(request.get("sshd_path")), str(request.get("supervisor_path"))
     transfer_user = _validate_unix_account(request.get("transfer_user"), "transfer_user")

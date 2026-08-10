@@ -166,6 +166,7 @@ async def resource_command_handler(ctx: ToolContext, args: dict) -> ToolResult:
     try:
         row = await service.start_resource_command(
             session_id=ctx.session_id,
+            handle_id=args.get("handle_id"),
             pool=args.get("pool"),
             executable=args.get("executable"),
             args=args.get("args", []),

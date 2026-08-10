@@ -93,13 +93,18 @@ class FakeExecutionService:
         return {"id": kwargs["host_id"], "state": "healthy", "quarantined": False}
 
 
+class FakeUiDatabase:
+    async def active_preset_workflow_count(self, session_id):
+        return 0
+
+
 @pytest.fixture
 def ui_service(monkeypatch):
     from nerve.gateway.routes import _deps
 
     service = FakeExecutionService()
     engine = SimpleNamespace(execution_service=service, resource_service=service)
-    monkeypatch.setattr(_deps, "_deps", _deps.RouteDeps(engine=engine, db=None))
+    monkeypatch.setattr(_deps, "_deps", _deps.RouteDeps(engine=engine, db=FakeUiDatabase()))
     return service
 
 
@@ -119,6 +124,19 @@ def test_public_execution_exposes_dismissal_and_boolean_auto_continue():
     })
     assert public["auto_continue"] is False
     assert public["dismissed_at"] == "2026-01-01T00:00:00+00:00"
+
+
+def test_public_execution_redacts_capabilities_only_for_explicit_retained_handles():
+    lease = {
+        "id": "lease-secret", "state": "active", "host_id": "host-a",
+        "execution_id": "exec-secret", "session_id": "session-secret",
+        "pool": "builders", "fencing_token": 9,
+    }
+    legacy = public_execution({"lease": lease, "plan": {"retained_handle_ids": ["legacy"], "legacy_resource_handles": True}})
+    explicit = public_execution({"lease": lease, "plan": {"retained_handle_ids": ["handle-a"]}})
+
+    assert legacy["lease"] == lease
+    assert explicit["lease"] == {"state": "active", "host_id": "host-a", "pool": "builders"}
 
 
 def test_public_resource_snapshot_drops_connection_material():
@@ -178,7 +196,7 @@ async def test_dismiss_route_is_session_scoped_and_returns_the_dismissed_record(
 
 
 @pytest.mark.asyncio
-async def test_host_actions_require_matching_confirmation_and_quiescence(ui_service):
+async def test_host_actions_require_matching_confirmation(ui_service):
     from nerve.gateway.routes.executions import (
         DrainHostRequest,
         RecoverHostRequest,
@@ -190,20 +208,15 @@ async def test_host_actions_require_matching_confirmation_and_quiescence(ui_serv
         await set_host_draining(
             "host-a", DrainHostRequest(draining=True, confirm_host_id="host-b"), user={},
         )
-    with pytest.raises(HTTPException, match="remote quiescence"):
-        await recover_host(
-            "host-a",
-            RecoverHostRequest(confirm_host_id="host-a", remote_quiescence_confirmed=False),
-            user={},
-        )
-
     recovered = await recover_host(
         "host-a",
-        RecoverHostRequest(confirm_host_id="host-a", remote_quiescence_confirmed=True),
+        RecoverHostRequest(confirm_host_id="host-a"),
         user={"sub": "operator"},
     )
     assert recovered["host"]["state"] == "healthy"
-    assert ui_service.calls[-1][1]["remote_quiescence_confirmed"] is True
+    assert ui_service.calls[-1][1] == {
+        "host_id": "host-a", "requested_by": "operator",
+    }
 
 
 @pytest.mark.asyncio

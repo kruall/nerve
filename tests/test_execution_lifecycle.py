@@ -360,6 +360,57 @@ async def test_resource_command_builds_shell_free_leased_plan(db, owner, tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_resource_command_handle_is_pinned_while_legacy_pool_remains_compatible(db, owner, tmp_path):
+    inventory = SimpleNamespace(members=Mock(return_value=["worker-1"]))
+    resources = SimpleNamespace(
+        inventory=inventory,
+        _resolve_handle_lease=AsyncMock(return_value={
+            "pool": "test-machines", "host_id": "worker-1", "lease": {"id": "lease-1"},
+        }),
+    )
+    service = ExecutionService(db=db, engine=_engine(), workspace=tmp_path,
+                               catalog=SimpleNamespace(), resource_manager=resources)
+    service._start_serialized = AsyncMock(return_value={"id": "exec-command"})
+
+    await service.start_resource_command(session_id=owner, handle_id="handle-1",
+                                         executable="/bin/true", args=[])
+    explicit = service._start_serialized.await_args.kwargs
+    assert explicit["legacy_compatibility"] is False
+    assert explicit["plan"]["retained_handle_ids"] == ["handle-1"]
+    assert explicit["plan"]["resource_hosts"] == {"worker": "worker-1"}
+
+    await service.start_resource_command(session_id=owner, pool="test-machines",
+                                         executable="/bin/true", args=[])
+    assert service._start_serialized.await_args.kwargs["legacy_compatibility"] is True
+
+
+@pytest.mark.asyncio
+async def test_artifact_transfer_handle_endpoints_pin_order_and_reject_duplicate(db, owner, tmp_path):
+    inventory = SimpleNamespace(local_artifact_roots={"control": tmp_path})
+    inventory.members = lambda pool: [pool + "-host"]
+    resources = SimpleNamespace(
+        inventory=inventory,
+        _resolve_handle_lease=AsyncMock(side_effect=[
+            {"pool": "builders", "host_id": "builder-1", "lease": {"id": "lease-source"}},
+            {"pool": "workers", "host_id": "worker-1", "lease": {"id": "lease-destination"}},
+        ]),
+    )
+    service = ExecutionService(db=db, engine=_engine(), workspace=tmp_path,
+                               catalog=SimpleNamespace(), resource_manager=resources)
+    service._start_serialized = AsyncMock(return_value={"id": "exec-transfer"})
+    endpoint = lambda handle: {"handle_id": handle, "artifact_root": "artifacts", "path": "artifact.bin"}
+
+    await service.start_artifact_transfer(session_id=owner, source=endpoint("source"), destination=endpoint("destination"))
+    plan = service._start_serialized.await_args.kwargs["plan"]
+    assert plan["retained_handle_ids"] == ["source", "destination"]
+    assert plan["resource_hosts"] == {"source": "builder-1", "destination": "worker-1"}
+
+    resources._resolve_handle_lease = AsyncMock(return_value={"pool": "workers", "host_id": "worker-1", "lease": {"id": "lease"}})
+    with pytest.raises(ValueError, match="distinct"):
+        await service.start_artifact_transfer(session_id=owner, source=endpoint("same"), destination=endpoint("same"))
+
+
+@pytest.mark.asyncio
 async def test_resource_command_rejects_unknown_pool_and_malformed_argv(db, owner, tmp_path):
     inventory = SimpleNamespace(members=Mock(side_effect=KeyError("missing")))
     service = ExecutionService(

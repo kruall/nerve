@@ -221,15 +221,26 @@ class ExecutionService:
     async def start_artifact_transfer(self, *, session_id: str, source: Mapping[str, Any], destination: Mapping[str, Any], auto_continue: bool = True) -> Mapping[str, Any]:
         self.recovery_gate.require_ready()
         """Persist a fenced remote/local transfer plan; endpoints have no coordinates."""
-        def endpoint(value: Mapping[str, Any], name: str) -> tuple[str, str, str, bool, str | None]:
+        async def endpoint(value: Mapping[str, Any], name: str) -> tuple[str, str, str, bool, str | None, str | None]:
             if not isinstance(value, Mapping):
                 raise ValueError("artifact transfer " + name + " endpoint is invalid")
             local = value.get("host") == "localhost"
-            allowed = {"host", "path", "artifact_root"} if local else {"pool", "host", "path", "artifact_root"}
+            # R15 public callers name a retained handle, never a pool or
+            # transport coordinate.  Keep the former endpoint form here only
+            # as the R17 compatibility adapter for trusted legacy callers.
+            explicit_handle = value.get("handle_id")
+            allowed = ({"host", "path", "artifact_root"} if local else
+                       ({"handle_id", "path", "artifact_root"} if explicit_handle is not None
+                        else {"pool", "host", "path", "artifact_root"}))
             if set(value) - allowed or (local and set(value) != allowed):
                 raise ValueError("artifact transfer " + name + " endpoint is invalid")
-            pool = "localhost" if local else value.get("pool")
-            host = None if local else value.get("host")
+            if not local and explicit_handle is not None:
+                if not isinstance(explicit_handle, str) or not explicit_handle:
+                    raise ValueError("artifact transfer " + name + " handle is invalid")
+                resolved = await self.resource_manager._resolve_handle_lease(session_id, explicit_handle)
+                pool, host, handle_id = resolved["pool"], resolved["host_id"], explicit_handle
+            else:
+                pool, host, handle_id = ("localhost", None, None) if local else (value.get("pool"), value.get("host"), None)
             path, root = value.get("path"), value.get("artifact_root")
             if not all(isinstance(x, str) and x and "\x00" not in x for x in (pool, path, root)) or (host is not None and (not isinstance(host, str) or not host or "\x00" in host)):
                 raise ValueError("artifact transfer " + name + " endpoint is invalid")
@@ -238,27 +249,33 @@ class ExecutionService:
                 parsed = PurePosixPath(part)
                 if parsed.is_absolute() or ".." in parsed.parts or not parsed.parts:
                     raise ValueError("artifact transfer paths must be confined relative paths")
-            return pool, path, root, local, host
-        sp, sx, sr, source_local, sh = endpoint(source, "source"); dp, dx, dr, destination_local, dh = endpoint(destination, "destination")
+            return pool, path, root, local, host, handle_id
+        sp, sx, sr, source_local, sh, source_handle = await endpoint(source, "source")
+        dp, dx, dr, destination_local, dh, destination_handle = await endpoint(destination, "destination")
         if source_local and destination_local:
             raise ValueError("localhost-to-localhost artifact transfer is not supported")
+        if (not source_local and not destination_local
+                and (source_handle is None) != (destination_handle is None)):
+            raise ValueError("artifact transfer remote endpoints must both use handles or legacy pools")
         local_roots = getattr(getattr(self.resource_manager, "inventory", None), "local_artifact_roots", {})
         for local, root in ((source_local, sr), (destination_local, dr)):
             if local and root not in local_roots:
                 raise ValueError("artifact transfer local artifact root is not configured")
         validate_remote = getattr(self.backend, "validate_artifact_endpoint", None)
-        for local, pool, root, host, name in (
-            (source_local, sp, sr, sh, "source"), (destination_local, dp, dr, dh, "destination"),
+        for local, pool, root, host, handle_id, name in (
+            (source_local, sp, sr, sh, source_handle, "source"),
+            (destination_local, dp, dr, dh, destination_handle, "destination"),
         ):
             if not local:
-                if host is not None and host not in self.resource_manager.inventory.members(pool):
-                    raise ValueError(f"artifact transfer {name} host is not a member of its pool")
-                if callable(validate_remote):
-                    validate_remote(pool, root)
-                else:
-                    # Even backends without an endpoint-specific validator must
-                    # reject unknown pools before durable queue state is made.
-                    self.resource_manager.inventory.members(pool)
+                if handle_id is None:
+                    if host is not None and host not in self.resource_manager.inventory.members(pool):
+                        raise ValueError(f"artifact transfer {name} host is not a member of its pool")
+                    if callable(validate_remote):
+                        validate_remote(pool, root)
+                    else:
+                        # Even backends without an endpoint-specific validator must
+                        # reject unknown pools before durable queue state is made.
+                        self.resource_manager.inventory.members(pool)
         resources = ({"destination": dp} if source_local else {"source": sp} if destination_local else {"source": sp, "destination": dp})
         source_reservation = False
         if sh is not None:
@@ -266,19 +283,36 @@ class ExecutionService:
             if reservation is not None and reservation.get("state") == "active" and reservation.get("pool") == sp:
                 lease = await self.db.get_resource_lease(str(reservation.get("lease_id") or ""))
                 source_reservation = lease is not None and lease.get("state") == "active" and lease.get("host_id") == sh
+        handle_ids = [handle for handle in (source_handle, destination_handle) if handle is not None]
+        if len(handle_ids) != len(set(handle_ids)):
+            raise ValueError("artifact transfer source and destination handles must be distinct")
         plan = {"kind": "artifact_transfer", "profile_version": "1", "profile_hash": "built-in-artifact-transfer-v1",
                 "resources": resources, "resource_hosts": {slot: host for slot, host in (("source", sh), ("destination", dh)) if host is not None}, "source_session_reservation": source_reservation, "artifact_transfer": {"transfer_id": "transfer-" + uuid.uuid4().hex, "source_path": sx, "source_root": sr, "source_local": source_local, "destination_path": dx, "destination_root": dr, "destination_local": destination_local},
                 "steps": [], "result": {"success_exit_codes": [0]}, "timeout_seconds": 86400,
                 "cancellation": {"mode": "terminate", "grace_seconds": 10, "run_cleanup": False}}
-        return await self._start_serialized(session_id=session_id, plan=plan, profile_snapshot={"kind": "artifact_transfer", "title": "direct artifact transfer", "source": "built-in reviewed transfer"}, auto_continue=auto_continue)
+        if handle_ids:
+            plan["retained_handle_ids"] = handle_ids
+        return await self._start_serialized(session_id=session_id, plan=plan, profile_snapshot={"kind": "artifact_transfer", "title": "direct artifact transfer", "source": "built-in reviewed transfer"}, auto_continue=auto_continue, legacy_compatibility=not bool(handle_ids))
 
     async def start_resource_command(
-        self, *, session_id: str, pool: Any, executable: Any,
-        args: Any, timeout_seconds: Any = 3600,
+        self, *, session_id: str, executable: Any, args: Any,
+        handle_id: Any = None, pool: Any = None,
+        timeout_seconds: Any = 3600,
         auto_continue: bool = True,
     ) -> Mapping[str, Any]:
         self.recovery_gate.require_ready()
         """Run one literal argv command on an exclusively leased resource host."""
+        explicit_handle = handle_id is not None
+        if explicit_handle:
+            if not isinstance(handle_id, str) or not handle_id:
+                raise ValueError("resource command handle is invalid")
+            resolved = await self.resource_manager._resolve_handle_lease(session_id, handle_id)
+            if pool is not None and pool != resolved["pool"]:
+                raise ValueError("resource command handle does not match pool")
+            pool = resolved["pool"]
+            host_id = resolved["host_id"]
+        else:
+            host_id = None
         if not isinstance(pool, str) or not pool or "\x00" in pool:
             raise ValueError("resource command pool is invalid")
         if (
@@ -299,7 +333,8 @@ class ExecutionService:
         inventory = getattr(self.resource_manager, "inventory", None)
         if inventory is None:
             raise ValueError("resource inventory is unavailable")
-        inventory.members(pool)
+        if not explicit_handle:
+            inventory.members(pool)
         plan = {
             "kind": "resource_command",
             "profile_version": "1",
@@ -308,6 +343,7 @@ class ExecutionService:
                 "pool": pool, "executable": executable, "args": list(args),
             },
             "resources": {"worker": pool},
+            **({"retained_handle_ids": [handle_id], "resource_hosts": {"worker": host_id}} if explicit_handle else {}),
             "steps": [{
                 "id": "command", "transport": "resource",
                 "resource_slot": "worker", "executable": executable,
@@ -330,6 +366,7 @@ class ExecutionService:
                 "source": "built-in approval-gated operation",
             },
             auto_continue=auto_continue,
+            legacy_compatibility=not explicit_handle,
         )
 
     async def inspect_ydb_files(self, *, session_id: str, operation: str, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -680,6 +717,17 @@ class ExecutionService:
                     row["session_id"], handle_id,
                 ) for handle_id in row["plan"]["retained_handle_ids"]]
                 slots = list(dict(row["plan"].get("resources", {})))
+                if len(resolved) != len(slots):
+                    raise ValueError("retained handle slots no longer match execution plan")
+                expected_hosts = dict(row["plan"].get("resource_hosts", {}))
+                for slot, held in zip(slots, resolved, strict=True):
+                    if (held.get("pool") != row["plan"]["resources"].get(slot)
+                            or (slot in expected_hosts
+                                and held.get("host_id") != expected_hosts[slot])):
+                        # Retrying must either reuse this exact owner-bound
+                        # host or fail with the same ownership/stale lineage
+                        # boundary; it may never reschedule to another host.
+                        raise ValueError("retained handle no longer matches execution plan")
                 leases = [{**item["lease"], **({"slot": slots[index]} if index < len(slots) else {})}
                           for index, item in enumerate(resolved)]
                 if row["plan"].get("ydb_session_handle"):

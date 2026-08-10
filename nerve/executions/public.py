@@ -85,15 +85,25 @@ def _scalar(value: Any) -> str | int | float | bool | None:
     return value if isinstance(value, (int, float, bool)) else None
 
 
-def _public_lease(raw: Any) -> dict[str, Any] | None:
+def _public_lease(raw: Any, *, redact_capabilities: bool = False) -> dict[str, Any] | None:
     if not isinstance(raw, Mapping):
         return None
     result: dict[str, Any] = {}
-    for key in (
+    keys = (
         "id", "state", "host_id", "execution_id", "session_id", "pool",
-        "fencing_token", "requested_at", "acquired_at", "heartbeat_at",
+        "fencing_token",
+        "requested_at", "acquired_at", "heartbeat_at",
         "revoking_at", "released_at", "quarantine_reason",
-    ):
+    )
+    if redact_capabilities:
+        # Explicit retained handles are capabilities.  Do not expose any
+        # material that can identify their lease, execution, session, fence,
+        # or transport lineage.  Legacy execution payloads stay byte-for-byte
+        # shape compatible until their R17 removal.
+        keys = tuple(key for key in keys if key not in {
+            "id", "execution_id", "session_id", "fencing_token",
+        })
+    for key in keys:
         value = _scalar(raw.get(key))
         if value is not None:
             result[key] = value
@@ -142,7 +152,13 @@ def public_execution(raw: Mapping[str, Any]) -> dict[str, Any]:
                 public_requests.append(item)
         result["resource_requests"] = public_requests
 
-    lease = _public_lease(raw.get("lease"))
+    plan = raw.get("plan")
+    redact_capabilities = (
+        isinstance(plan, Mapping)
+        and bool(plan.get("retained_handle_ids"))
+        and not bool(plan.get("legacy_resource_handles"))
+    )
+    lease = _public_lease(raw.get("lease"), redact_capabilities=redact_capabilities)
     if lease is not None:
         result["lease"] = lease
 
