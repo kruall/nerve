@@ -25,6 +25,7 @@ from nerve.executions.backend import (
     NoResourceLeaseManager,
     ResourceLeaseManager,
 )
+from nerve.executions.ssh import SshTransportError
 from nerve.executions.catalog import CompiledExecutionPlan, ExecutionCatalog
 from nerve.executions.public import public_execution
 from nerve.executions.ydb import snapshot as ydb_snapshot, validate_worktree
@@ -337,16 +338,14 @@ class ExecutionService:
                 # than classifying the execution as a lost remote process.
                 self._spawn_runner(row["id"])
                 continue
-            recovery = await self.backend.recover(row)
             if status == "cancelling":
-                if recovery.state == "reattachable":
-                    task = asyncio.create_task(self._recover_and_cancel(row))
-                    self._track(self._tasks, row["id"], task)
-                else:
-                    await self._quarantine_or_release(row, recovery)
-                    await self.db.finalize_execution_cancelled(row["id"])
-                    await self._broadcast(row["id"])
+                # Cancellation recovery must make its own durable status RPC
+                # and log its disposition before a host is released or
+                # quarantined; never infer it from a stale startup snapshot.
+                task = asyncio.create_task(self._recover_and_cancel(row))
+                self._track(self._tasks, row["id"], task)
                 continue
+            recovery = await self.backend.recover(row)
             if recovery.state == "reattachable":
                 task = asyncio.create_task(self._reattach(row))
                 self._track(self._tasks, row["id"], task)
@@ -572,6 +571,30 @@ class ExecutionService:
                 await self._broadcast(execution_id)
                 if won:
                     self._schedule_continuation(execution_id)
+        except SshTransportError as exc:
+            # A broken SSH RPC is ambiguous until the durable supervisor job
+            # says otherwise.  Reconnect by handle before any lease decision.
+            current = await self.db.get_execution(execution_id)
+            confirmed = bool(current and await self._cancel_with_quiescence(current))
+            if not self._stopping:
+                if confirmed:
+                    await self.resource_manager.release(execution_id=execution_id, leases=leases)
+                    leases = []
+                    await self.db.append_execution_log(execution_id, stream="stdout", text="stage=resource_release quiescence=confirmed\n")
+                else:
+                    await self.resource_manager.quarantine(
+                        execution_id=execution_id, leases=leases,
+                        reason="remote transport failed and quiescence could not be proven",
+                    )
+                    leases = []
+                    await self.db.append_execution_log(execution_id, stream="stdout", text="stage=resource_quarantine quiescence=unproven\n")
+                won = await self.db.finish_execution(
+                    execution_id, status="failed",
+                    result={"outcome": "failed", "summary": str(exc), "error": "remote_transport_ambiguous"},
+                )
+                await self._broadcast(execution_id)
+                if won:
+                    self._schedule_continuation(execution_id)
         except Exception as exc:
             if not self._stopping:
                 logger.warning("Execution %s failed in lifecycle (%s)", execution_id, type(exc).__name__)
@@ -765,24 +788,73 @@ class ExecutionService:
             )
 
     async def _recover_and_cancel(self, row: Mapping[str, Any]) -> None:
-        policy = row.get("plan", {}).get("cancellation", {})
-        confirmed = await self.backend.cancel(
-            execution_id=row["id"],
-            grace_seconds=int(policy.get("grace_seconds", 5)),
-            mode=str(policy.get("mode", "terminate")),
-        )
+        confirmed = await self._cancel_with_quiescence(row, recovery_required=True)
         leases = row.get("selected_leases") or []
         if confirmed:
             await self.resource_manager.release(
                 execution_id=row["id"], leases=leases,
+            )
+            await self.db.append_execution_log(
+                row["id"], stream="stdout", text="stage=resource_release quiescence=confirmed\n",
             )
         elif leases:
             await self.resource_manager.quarantine(
                 execution_id=row["id"], leases=leases,
                 reason="cancellation could not confirm backend quiescence",
             )
+            await self.db.append_execution_log(
+                row["id"], stream="stdout", text="stage=resource_quarantine quiescence=unproven\n",
+            )
         await self.db.finalize_execution_cancelled(row["id"])
         await self._broadcast(row["id"])
+
+    async def _cancel_with_quiescence(
+        self, row: Mapping[str, Any], *, recovery_required: bool = False,
+    ) -> bool:
+        """Request cancellation only after reconnecting a durable remote handle.
+
+        The SSH supervisor is one-shot by design, so losing its transport must
+        not turn an in-memory map miss into permission to free a host.  Its
+        durable job handle is status-checked first, then cancellation is sent
+        to that exact fenced job.  Other backends retain their established
+        cancellation contract.
+        """
+        execution_id = str(row["id"])
+
+        async def log(stage: str, **fields: Any) -> None:
+            detail = " ".join(f"{key}={value}" for key, value in fields.items())
+            await self.db.append_execution_log(
+                execution_id, stream="stdout", text=f"stage={stage}{(' ' + detail) if detail else ''}\n",
+            )
+
+        await log("cancellation_requested", execution=execution_id)
+        policy = row.get("plan", {}).get("cancellation", {})
+        if self.backend.name == "ssh-supervisor" or recovery_required:
+            await log("remote_reconnect_status", handle="durable")
+            try:
+                recovery = await self.backend.recover(row)
+            except Exception as exc:
+                await log("remote_reconnect_status", outcome="ambiguous", error=type(exc).__name__)
+                return False
+            await log("remote_reconnect_status", outcome=recovery.state)
+            if recovery.state == "finished":
+                await log("remote_quiescence_confirmed", source="terminal_status")
+                return True
+            if recovery.state != "reattachable":
+                return False
+        try:
+            confirmed = await self.backend.cancel(
+                execution_id=execution_id,
+                grace_seconds=int(policy.get("grace_seconds", 5)),
+                mode=str(policy.get("mode", "terminate")),
+            )
+        except Exception as exc:
+            await log("remote_cancel_acknowledgement", outcome="ambiguous", error=type(exc).__name__)
+            return False
+        await log("remote_cancel_acknowledgement", acknowledged=str(bool(confirmed)).lower())
+        if confirmed:
+            await log("remote_quiescence_confirmed", source="cancel_acknowledgement")
+        return confirmed
 
     async def _quarantine_or_release(
         self, row: Mapping[str, Any], recovery: BackendRecovery,
@@ -976,12 +1048,14 @@ class ExecutionService:
         if accepted and continuation_task is not None:
             continuation_task.cancel()
         if accepted and row["status"] in ACTIVE_EXECUTION_STATUSES:
-            policy = row.get("plan", {}).get("cancellation", {})
-            cancelled = await self.backend.cancel(
-                execution_id=execution_id,
-                grace_seconds=int(policy.get("grace_seconds", 5)),
-                mode=str(policy.get("mode", "terminate")),
-            )
+            cancelled = await self._cancel_with_quiescence(row)
+            if cancelled and row.get("selected_leases"):
+                await self.resource_manager.release(
+                    execution_id=execution_id, leases=row["selected_leases"],
+                )
+                await self.db.append_execution_log(
+                    execution_id, stream="stdout", text="stage=resource_release quiescence=confirmed\n",
+                )
             if not cancelled and row.get("selected_leases"):
                 # A timeout/cancel acknowledgement is not proof that remote
                 # work stopped.  Keep the physical host unavailable until an
@@ -991,7 +1065,10 @@ class ExecutionService:
                     leases=row["selected_leases"],
                     reason="cancellation could not confirm backend quiescence",
                 )
-            if not cancelled and row["status"] in {"queued", "starting"}:
+                await self.db.append_execution_log(
+                    execution_id, stream="stdout", text="stage=resource_quarantine quiescence=unproven\n",
+                )
+            if cancelled or (not row.get("selected_leases") and row["status"] in {"queued", "starting"}):
                 await self.db.finalize_execution_cancelled(execution_id)
         await self._broadcast(execution_id)
         current = await self.db.get_execution(execution_id)
@@ -1014,7 +1091,9 @@ class ExecutionService:
         accepted = await self.db.request_execution_cancel(execution_id, reason=reason)
         if not accepted:
             raise ValueError("queued execution state changed before cancellation")
-        await self.db.cancel_resource_requests(execution_id)
+        # Finalization settles queued requests in the same transaction as the
+        # terminal execution state, so a restart cannot leave an orphaned
+        # queue entry between these two durable transitions.
         await self.db.finalize_execution_cancelled(execution_id)
         await self._broadcast(execution_id)
         current = await self.db.get_execution(execution_id)
@@ -1032,19 +1111,18 @@ class ExecutionService:
             row = await self.db.get_execution(execution_id)
             if row is None:
                 continue
-            policy = row.get("plan", {}).get("cancellation", {})
-            cancelled = await self.backend.cancel(
-                execution_id=execution_id,
-                grace_seconds=int(policy.get("grace_seconds", 5)),
-                mode=str(policy.get("mode", "terminate")),
-            )
+            cancelled = await self._cancel_with_quiescence(row)
+            if cancelled and row.get("selected_leases"):
+                await self.resource_manager.release(execution_id=execution_id, leases=row["selected_leases"])
+                await self.db.append_execution_log(execution_id, stream="stdout", text="stage=resource_release quiescence=confirmed\n")
             if not cancelled and row.get("selected_leases"):
                 await self.resource_manager.quarantine(
                     execution_id=execution_id,
                     leases=row["selected_leases"],
                     reason="session cancellation could not confirm backend quiescence",
                 )
-            if not cancelled and row["status"] == "cancelling":
+                await self.db.append_execution_log(execution_id, stream="stdout", text="stage=resource_quarantine quiescence=unproven\n")
+            if cancelled or (not row.get("selected_leases") and row["status"] == "cancelling"):
                 await self.db.finalize_execution_cancelled(execution_id)
             await self._broadcast(execution_id)
         return True

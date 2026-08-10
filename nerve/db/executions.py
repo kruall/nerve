@@ -280,15 +280,42 @@ class ExecutionStore:
     async def finalize_execution_cancelled(
         self, execution_id: str, *, result: Mapping[str, Any] | None = None,
     ) -> bool:
+        """Terminally cancel an execution and settle only its unleased queue work.
+
+        A selected lease is durable evidence that remote work might have
+        started, and callers must establish quiescence (or quarantine it)
+        before reaching this transition.  Conversely, a queued request with
+        no selected lease can never have reached a resource backend; settling
+        it in the same transaction prevents an orphaned queue entry from
+        surviving a crash between the execution and queue updates.
+        """
         now = utc_now_iso()
-        update = await self._write(
-            """UPDATE executions
-               SET status = 'cancelled', result = ?, finished_at = ?, updated_at = ?,
-                   revision = revision + 1, continuation_state = 'suppressed'
-               WHERE id = ? AND status = 'cancelling'""",
-            (json.dumps(dict(result or {"outcome": "cancelled"})), now, now, execution_id),
-        )
-        return (update.rowcount or 0) == 1
+        async with self._atomic():
+            update = await self.db.execute(
+                """UPDATE executions
+                   SET status = 'cancelled', result = ?, finished_at = ?, updated_at = ?,
+                       revision = revision + 1, continuation_state = 'suppressed'
+                   WHERE id = ? AND status = 'cancelling'
+                     AND NOT EXISTS (
+                         SELECT 1 FROM resource_leases
+                         WHERE execution_id=? AND state IN ('active', 'revoking')
+                     )""",
+                (json.dumps(dict(result or {"outcome": "cancelled"})), now, now,
+                 execution_id, execution_id),
+            )
+            if not update.rowcount:
+                return False
+            await self.db.execute(
+                """UPDATE resource_lease_requests SET state='cancelled', settled_at=?
+                   WHERE execution_id=? AND state='queued'""",
+                (now, execution_id),
+            )
+            await self.db.execute(
+                """UPDATE resource_lease_bundles SET state='cancelled', settled_at=?
+                   WHERE execution_id=? AND state='queued'""",
+                (now, execution_id),
+            )
+        return True
 
     async def suppress_session_executions(
         self, session_id: str, *, reason: str,

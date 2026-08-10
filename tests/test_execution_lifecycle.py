@@ -1025,6 +1025,101 @@ async def test_operator_cancels_only_unleased_queued_execution(db, owner, tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_confirmed_remote_cancellation_releases_selected_lease(db, owner, tmp_path):
+    plan = StubPlan().as_dict(redact_secrets=False)
+    plan["session_id"] = owner
+    row = await db.create_execution(
+        "exec-confirmed-cancel", session_id=owner, kind="test.wait",
+        profile_version="1", profile_hash="hash", profile_snapshot={}, plan=plan,
+        resource_requests=[],
+    )
+    lease = {"id": "lease-confirmed", "host_id": "host-1", "fencing_token": 9}
+    assert await db.transition_execution(row["id"], to_status="starting", expect=("queued",), fields={"selected_leases": [lease]})
+    assert await db.transition_execution(row["id"], to_status="running", expect=("starting",))
+    leases = SimpleNamespace(release=AsyncMock(), quarantine=AsyncMock())
+    service = ExecutionService(db=db, engine=_engine(), workspace=tmp_path, catalog=SimpleNamespace(),
+                               backend=ControlledBackend(), resource_manager=leases)
+
+    cancelled = await service.cancel_execution(execution_id=row["id"], requested_by="owner", reason="stop")
+
+    assert cancelled["status"] == "cancelled"
+    leases.release.assert_awaited_once_with(execution_id=row["id"], leases=[lease])
+    leases.quarantine.assert_not_awaited()
+    tail = await db.tail_execution_logs(row["id"], limit=20)
+    assert "stage=remote_quiescence_confirmed" in "".join(x["text"] for x in tail["entries"])
+
+
+@pytest.mark.asyncio
+async def test_reconnect_terminal_status_releases_without_new_cancel_rpc(db, owner, tmp_path):
+    plan = StubPlan().as_dict(redact_secrets=False)
+    plan["session_id"] = owner
+    row = await db.create_execution(
+        "exec-terminal-recovery", session_id=owner, kind="test.wait",
+        profile_version="1", profile_hash="hash", profile_snapshot={}, plan=plan,
+        resource_requests=[],
+    )
+    lease = {"id": "lease-recovery", "host_id": "host-1", "fencing_token": 10}
+    assert await db.transition_execution(row["id"], to_status="starting", expect=("queued",), fields={"selected_leases": [lease]})
+    assert await db.transition_execution(row["id"], to_status="running", expect=("starting",))
+    assert await db.request_execution_cancel(row["id"], reason="restart")
+
+    backend = ControlledBackend(recovery=BackendRecovery("finished", BackendResult(1, summary="remote terminal")))
+    backend.name = "ssh-supervisor"
+    leases = SimpleNamespace(release=AsyncMock(), quarantine=AsyncMock())
+    service = ExecutionService(db=db, engine=_engine(), workspace=tmp_path, catalog=SimpleNamespace(),
+                               backend=backend, resource_manager=leases)
+    await service._recover_and_cancel(await db.get_execution(row["id"]))
+
+    leases.release.assert_awaited_once_with(execution_id=row["id"], leases=[lease])
+    assert (await db.get_execution(row["id"]))["status"] == "cancelled"
+    assert backend.cancelled is False
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_remote_reconnect_quarantines_selected_lease(db, owner, tmp_path):
+    plan = StubPlan().as_dict(redact_secrets=False)
+    plan["session_id"] = owner
+    row = await db.create_execution(
+        "exec-ambiguous-cancel", session_id=owner, kind="test.wait",
+        profile_version="1", profile_hash="hash", profile_snapshot={}, plan=plan,
+        resource_requests=[],
+    )
+    lease = {"id": "lease-ambiguous", "host_id": "host-1", "fencing_token": 11}
+    assert await db.transition_execution(row["id"], to_status="starting", expect=("queued",), fields={"selected_leases": [lease]})
+    assert await db.transition_execution(row["id"], to_status="running", expect=("starting",))
+    backend = ControlledBackend(recovery=BackendRecovery("orphaned")); backend.name = "ssh-supervisor"
+    leases = SimpleNamespace(release=AsyncMock(), quarantine=AsyncMock())
+    service = ExecutionService(db=db, engine=_engine(), workspace=tmp_path, catalog=SimpleNamespace(),
+                               backend=backend, resource_manager=leases)
+
+    cancelled = await service.cancel_execution(execution_id=row["id"], requested_by="owner", reason="stop")
+
+    assert cancelled["status"] == "cancelling"
+    leases.release.assert_not_awaited()
+    leases.quarantine.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_terminal_unleased_cancellation_settles_stale_queue_atomically(db, owner):
+    plan = StubPlan().as_dict(redact_secrets=False)
+    plan["session_id"] = owner
+    row = await db.create_execution(
+        "exec-stale-queue", session_id=owner, kind="test.wait",
+        profile_version="1", profile_hash="hash", profile_snapshot={}, plan=plan,
+        resource_requests=[{"slot": "worker", "pool": "builders", "state": "requested"}],
+    )
+    await db.enqueue_resource_request(
+        request_id="request-stale-queue", execution_id=row["id"],
+        session_id=owner, slot="worker", pool="builders",
+    )
+    assert await db.request_execution_cancel(row["id"], reason="recovery")
+    assert await db.finalize_execution_cancelled(row["id"])
+
+    requests = await db.list_resource_requests()
+    assert not [request for request in requests if request["execution_id"] == row["id"]]
+
+
+@pytest.mark.asyncio
 async def test_session_archive_invokes_execution_cancellation_hook(db, owner):
     from nerve.agent.sessions import SessionManager
 

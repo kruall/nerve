@@ -594,7 +594,9 @@ class SshExecutionBackend:
         connection, job_id, token, root = job
         try: reply = await self.supervisor.cancel(connection, job_id, token, grace_seconds, mode, root)
         except SshTransportError: return False
-        return reply.get("quiescent") is True and reply.get("state") in {"cancelled", "finished"}
+        return reply.get("quiescent") is True and reply.get("state") in {
+            "succeeded", "failed", "cancelled", "finished",
+        }
 
     async def recover(self, execution: Mapping[str, Any]) -> BackendRecovery:
         if execution.get("kind") == "artifact_transfer":
@@ -614,6 +616,11 @@ class SshExecutionBackend:
             root = _remote_path(str(execution["plan"].get("remote_root", connection.remote_roots[0])), connection.remote_roots)
             status = await self.supervisor.status(connection, str(job_id), int(token), root)
         except (SshTransportError, KeyError, ValueError): return BackendRecovery("orphaned")
+        # A reconnect deliberately reconstructs the in-memory convenience
+        # cache from the durable fenced handle.  This lets the subsequent
+        # cancel RPC address the same supervisor job; it never starts a new
+        # command or selects another host.
+        self._jobs[str(execution["id"])] = (connection, str(job_id), int(token), root)
         if status.get("state") in {"running", "starting"}: return BackendRecovery("reattachable")
         state = str(status.get("state"))
         return BackendRecovery("finished", BackendResult(None if state == "finished" else status.get("exit_code"), summary=str(status.get("summary", "remote job finished")), error=status.get("error")))
