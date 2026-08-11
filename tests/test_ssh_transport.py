@@ -519,7 +519,7 @@ def test_remote_supervisor_artifact_transfer_receive_uses_transfer_user_in_ssh_a
     }
     response = remote_supervisor._artifact_transfer_receive(request)
     assert response["ok"] is True
-    assert "builder@2001:db8::55" in captured["argv"]
+    assert "builder@[2001:db8::55]" in captured["argv"]
     known_hosts = Path(next(item.split("=", 1)[1] for item in captured["argv"] if item.startswith("UserKnownHostsFile=")))
     assert known_hosts.read_text() == "[2001:db8::55]:32456 ssh-ed25519 KEY\n"
     assert all("nerve-transfer@" not in str(item) for item in map(str, captured["argv"]))
@@ -559,6 +559,9 @@ def test_remote_supervisor_artifact_transfer_receive_reports_verification_reason
     }
     with pytest.raises(ValueError, match=expected):
         remote_supervisor._artifact_transfer_receive(request)
+    state = json.loads((directory / "state.json").read_text())
+    assert state["state"] == "failed"
+    assert expected in state["error"]
 
 
 def test_remote_supervisor_artifact_transfer_receive_reports_ssh_exit_and_stderr(tmp_path, monkeypatch):
@@ -863,6 +866,71 @@ async def test_ssh_backend_artifact_transfer_orchestrates_two_slots_and_addresse
     assert calls[2][2] == "10.10.10.10"
     assert calls[2][3] == "source-transfer"
     assert [entry[0] for entry in calls if entry[0] == "cleanup"] == ["cleanup", "cleanup"]
+
+
+@pytest.mark.asyncio
+async def test_ssh_backend_artifact_transfer_returns_receive_error_after_quiescent_cleanup(tmp_path):
+    known_source = tmp_path / "source_known_hosts"; known_source.write_text("worker ssh-ed25519 AAAA\n")
+    known_destination = tmp_path / "destination_known_hosts"; known_destination.write_text("worker ssh-ed25519 AAAA\n")
+    catalog = SshConnectionCatalog({"ssh_connections": {
+        "source": {
+            "host": "2001:db8::10", "user": "root", "known_hosts": str(known_source),
+            "remote_roots": [str(tmp_path / "source")], "artifact_roots": ["source-artifacts"],
+        },
+        "destination": {
+            "host": "2001:db8::20", "user": "root", "known_hosts": str(known_destination),
+            "remote_roots": [str(tmp_path / "destination")], "artifact_roots": ["destination-artifacts"],
+        },
+    }})
+
+    class Supervisor:
+        async def artifact_transfer_prepare_destination(self, _connection, _request):
+            return {"client_public_key": "CLIENT_KEY"}
+
+        async def artifact_transfer_prepare_source(self, _connection, request):
+            return {
+                "address": "2001:db8::10", "port": 40123, "host_public_key": "HOST_KEY",
+                "size": 3, "sha256": hashlib.sha256(b"abc").hexdigest(),
+                "transfer_user": request["transfer_user"],
+            }
+
+        async def artifact_transfer_receive(self, _connection, _request):
+            raise SshTransportError("ValueError: direct artifact transfer checksum mismatch\n" + "x" * 1000)
+
+        async def artifact_transfer_cleanup(self, _connection, _request):
+            return {"ok": True, "quiescent": True}
+
+    backend = SshExecutionBackend(
+        inventory=type("inventory", (), {"hosts": {
+            "1": {"connection_ref": "source"}, "2": {"connection_ref": "destination"},
+        }})(), connections=catalog, supervisor=Supervisor(),
+    )
+    plan = {
+        "kind": "artifact_transfer",
+        "selected_leases": [
+            {"slot": "source", "host_id": "1", "fencing_token": 11, "id": "lease-source"},
+            {"slot": "destination", "host_id": "2", "fencing_token": 13, "id": "lease-destination"},
+        ],
+        "artifact_transfer": {
+            "transfer_id": "transfer-error", "source_root": "source-artifacts",
+            "source_path": "input.bin", "destination_root": "destination-artifacts",
+            "destination_path": "output.bin",
+        },
+    }
+    emitted = []
+    async def emit(stream, text):
+        emitted.append((stream, text))
+    async def started(_payload):
+        return None
+    result = await backend.run(
+        execution_id="exec-transfer-error", plan=plan, workspace=tmp_path,
+        execution_dir=tmp_path, emit=emit, started=started,
+    )
+    assert result.exit_code == 1
+    assert result.error == "artifact_transfer_failed"
+    assert len(result.summary) == 512
+    assert "checksum mismatch" in result.summary
+    assert emitted[-1][0] == "stderr"
 
 
 @pytest.mark.asyncio

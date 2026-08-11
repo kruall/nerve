@@ -764,6 +764,11 @@ def _transfer_load(request: Mapping[str, Any]) -> tuple[Path, dict[str, Any]]:
     if state.get("fencing_token") != int(request["fencing_token"]): raise PermissionError("stale fencing token")
     return directory, state
 
+def _transfer_error(exc: BaseException) -> str:
+    detail = str(exc).replace("\x00", "?")
+    detail = "".join(character if ord(character) >= 0x20 else "?" for character in detail)
+    return detail[:300] or type(exc).__name__
+
 def _artifact_transfer_prepare_destination(request: Mapping[str, Any]) -> dict[str, Any]:
     _advance_artifact_fence(_artifact_root(request), request)
     directory = _transfer_dir(_safe_root(str(request["root"])), request.get("transfer_id")); key = directory / "client_key"; keygen = str(request.get("ssh_keygen_path"))
@@ -818,7 +823,8 @@ def _artifact_transfer_receive(request: Mapping[str, Any]) -> dict[str, Any]:
     try:
         with open(temporary,"xb",buffering=0) as output, open(stderr_path,"xb",buffering=0) as error:
             os.chmod(stderr_path, 0o600)
-            proc=subprocess.Popen([ssh,"-T","-o","BatchMode=yes","-o","StrictHostKeyChecking=yes","-o","UserKnownHostsFile="+str(known),"-o","GlobalKnownHostsFile=/dev/null","-o","IdentitiesOnly=yes","-o","ForwardAgent=no","-o","ClearAllForwardings=yes","-o","RequestTTY=no","-i",state["client_key"],"-p",str(port),transfer_user+"@"+address],stdin=subprocess.DEVNULL,stdout=output,stderr=error,start_new_session=True)
+            destination = transfer_user + "@" + ("[" + address + "]" if ":" in address else address)
+            proc=subprocess.Popen([ssh,"-T","-o","BatchMode=yes","-o","StrictHostKeyChecking=yes","-o","UserKnownHostsFile="+str(known),"-o","GlobalKnownHostsFile=/dev/null","-o","IdentitiesOnly=yes","-o","ForwardAgent=no","-o","ClearAllForwardings=yes","-o","RequestTTY=no","-i",state["client_key"],"-p",str(port),destination],stdin=subprocess.DEVNULL,stdout=output,stderr=error,start_new_session=True)
             state["state"]="receiving"; state["pid"]=proc.pid; state["process_group"]=os.getpgid(proc.pid); _transfer_save(directory,state)
             returncode=proc.wait()
         try:
@@ -839,6 +845,12 @@ def _artifact_transfer_receive(request: Mapping[str, Any]) -> dict[str, Any]:
         if actual_sha != expected_sha:
             raise ValueError("direct artifact transfer checksum mismatch (expected "+str(expected_sha)+", received "+actual_sha+")")
         temporary.replace(target); state["state"]="succeeded"; _transfer_save(directory,state); return {"ok":True,"size":request["size"],"sha256":request["sha256"]}
+    except Exception as exc:
+        state["state"] = "failed"
+        state["error"] = _transfer_error(exc)
+        with contextlib.suppress(Exception):
+            _transfer_save(directory, state)
+        raise
     finally:
         with contextlib.suppress(FileNotFoundError): temporary.unlink()
         with contextlib.suppress(FileNotFoundError): stderr_path.unlink()
@@ -868,7 +880,7 @@ def _artifact_transfer_cleanup(request: Mapping[str, Any]) -> dict[str, Any]:
 
 def _artifact_transfer_cancel(request: Mapping[str, Any]) -> dict[str, Any]: return _artifact_transfer_cleanup(request)
 def _artifact_transfer_status(request: Mapping[str, Any]) -> dict[str, Any]:
-    _,state=_transfer_load(request); return {"ok":True,"state":state.get("state"),"quiescent":state.get("state") in {"succeeded","cleaned","cancelled"}}
+    _,state=_transfer_load(request); return {"ok":True,"state":state.get("state"),"quiescent":state.get("state") in {"succeeded","cleaned","cancelled"}, **({"error": state["error"]} if isinstance(state.get("error"), str) else {})}
 
 def _reconcile_host(request: Mapping[str, Any]) -> dict[str, Any]:
     """Fenced host-wide proof over every durable job and transfer lineage."""

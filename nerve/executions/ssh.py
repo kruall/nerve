@@ -439,6 +439,13 @@ class SshExecutionBackend:
         self._jobs: dict[str, tuple[SshConnection, str, int, str]] = {}
         self._transfers: dict[str, tuple[SshConnection, Mapping[str, Any], SshConnection, Mapping[str, Any], str]] = {}
 
+    @staticmethod
+    def _transfer_failure(exc: BaseException) -> str:
+        """Keep remote transfer diagnostics useful without exposing unbounded data."""
+        detail = str(exc).replace("\x00", "?")
+        detail = "".join(character if ord(character) >= 0x20 else "?" for character in detail)
+        return detail[:512] or type(exc).__name__
+
     async def provision_all_supervisors(self) -> dict[str, str]:
         """Best-effort startup rollout to every enabled configured host."""
         async def provision(host_id: str, host: Mapping[str, Any]) -> tuple[str, str]:
@@ -705,6 +712,7 @@ class SshExecutionBackend:
         common = {"transfer_id": transfer_id, "execution_id": execution_id}
         self._transfers[execution_id] = (source_connection, source_lease, destination_connection, destination_lease, transfer_id)
         cleanup_targets = []
+        transfer_failure: str | None = None
         try:
             destination_key = await self.supervisor.artifact_transfer_prepare_destination(destination_connection, {**common, "root": root_destination, "artifact_root": spec["destination_root"], "path": spec["destination_path"], "lease_id": destination_lease["id"], "fencing_token": int(destination_lease["fencing_token"]), "ssh_keygen_path": destination_connection.ssh_keygen_path})
             cleanup_targets.append((destination_connection, root_destination, destination_lease))
@@ -716,6 +724,11 @@ class SshExecutionBackend:
             await self.supervisor.artifact_transfer_receive(destination_connection, {**common, "root": root_destination, "artifact_root": spec["destination_root"], "path": spec["destination_path"], "lease_id": destination_lease["id"], "fencing_token": int(destination_lease["fencing_token"]), "source_address": prepared["address"], "source_port": prepared["port"], "source_host_key": prepared["host_public_key"], "size": prepared["size"], "sha256": prepared["sha256"], "transfer_user": prepared["transfer_user"], "ssh_path": destination_connection.ssh_path})
             await emit("stdout", "direct artifact transfer completed\n")
             return BackendResult(0, summary="artifact transferred directly")
+        except (SshTransportError, ValueError) as exc:
+            # A framed remote operation error is a completed transfer attempt,
+            # not an unknown lifecycle state.  Cleanup below proves whether
+            # both temporary transfer processes are quiescent.
+            transfer_failure = self._transfer_failure(exc)
         finally:
             cleanup = await asyncio.gather(
                 *(self.supervisor.artifact_transfer_cleanup(connection, {
@@ -728,9 +741,15 @@ class SshExecutionBackend:
                 isinstance(item, BaseException) or item.get("quiescent") is not True
                 for item in cleanup
             ):
+                suffix = (": " + transfer_failure) if transfer_failure else ""
                 raise ExecutionBackendUncertain(
-                    "artifact transfer cleanup could not prove quiescence"
+                    "artifact transfer cleanup could not prove quiescence" + suffix
                 )
+        if transfer_failure is not None:
+            await emit("stderr", transfer_failure + "\n")
+            return BackendResult(
+                1, summary=transfer_failure, error="artifact_transfer_failed",
+            )
 
     async def _run_local_to_remote(self, execution_id, plan, spec, emit, started):
         lease = next((x for x in plan.get("selected_leases", []) if x.get("slot") == "destination"), None)
@@ -801,10 +820,15 @@ class SshExecutionBackend:
                 plan = {**execution["plan"], "selected_leases": execution.get("selected_leases") or []}
                 (source, source_lease), (destination, destination_lease) = self._transfer_endpoints(plan)
                 transfer_id = plan["artifact_transfer"]["transfer_id"]
-                _source_status = await self.supervisor.artifact_transfer_status(source, {"root": source.remote_roots[0], "transfer_id": transfer_id, "fencing_token": int(source_lease["fencing_token"])})
+                source_status = await self.supervisor.artifact_transfer_status(source, {"root": source.remote_roots[0], "transfer_id": transfer_id, "fencing_token": int(source_lease["fencing_token"])})
                 destination_status = await self.supervisor.artifact_transfer_status(destination, {"root": destination.remote_roots[0], "transfer_id": transfer_id, "fencing_token": int(destination_lease["fencing_token"])})
             except (SshTransportError, KeyError, ValueError): return BackendRecovery("orphaned")
             if destination_status.get("state") == "succeeded": return BackendRecovery("finished", BackendResult(0, summary="artifact transferred directly"))
+            failure = destination_status.get("error") or source_status.get("error")
+            if (isinstance(failure, str) and failure
+                    and destination_status.get("quiescent") is True
+                    and source_status.get("quiescent") is True):
+                return BackendRecovery("finished", BackendResult(1, summary=failure, error="artifact_transfer_failed"))
             return BackendRecovery("orphaned")
         handle = execution.get("backend_handle") or {}; job_id = handle.get("job_id"); token = handle.get("fencing_token")
         if not job_id or token is None: return BackendRecovery("missing")
