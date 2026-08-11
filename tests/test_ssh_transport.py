@@ -332,6 +332,56 @@ def test_remote_supervisor_rejects_stale_fencing_token(tmp_path):
     assert cancelled["state"] == "cancelled"
 
 
+def test_remote_supervisor_start_is_idempotent_after_a_lost_reply(tmp_path, monkeypatch):
+    calls = []
+
+    class Process:
+        pid = 1234
+
+    monkeypatch.setattr(remote_supervisor.subprocess, "Popen", lambda *args, **kwargs: calls.append((args, kwargs)) or Process())
+    request = {
+        "root": str(tmp_path), "execution_id": "exec-retry", "fencing_token": 7,
+        "argv": [sys.executable, "-c", "import time; time.sleep(10)"],
+        "cwd": "execution_dir", "environment": {},
+    }
+    first = remote_supervisor._start(request)
+    second = remote_supervisor._start(request)
+    assert second["job_id"] == first["job_id"]
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_ssh_backend_retries_ambiguous_start_to_recover_remote_handle(tmp_path):
+    supervisor = SimpleNamespace(
+        start=AsyncMock(side_effect=[SshTransportError("reply lost"), {
+            "job_id": "job-recovered", "process_group": 1234,
+            "fencing_token": 7,
+        }]),
+        tail=AsyncMock(return_value={"entries": [], "cursor": 0}),
+        status=AsyncMock(return_value={"state": "succeeded", "exit_code": 0, "summary": "ok"}),
+    )
+    backend, _local_root = _artifact_backend(tmp_path, supervisor)
+    plan = {
+        "kind": "test.remote",
+        "resources": {"worker": "workers"},
+        "selected_leases": [{"slot": "worker", "host_id": "worker-1", "fencing_token": 7, "id": "lease-a"}],
+        "steps": [{"transport": "resource", "resource_slot": "worker",
+                    "executable": "/bin/true", "argv": [], "cwd": "job"}],
+        "arguments": {},
+    }
+    started = AsyncMock()
+    result = await backend.run(
+        execution_id="exec-retry", plan=plan, workspace=tmp_path,
+        execution_dir=tmp_path / "run", emit=AsyncMock(), started=started,
+    )
+    assert result.exit_code == 0
+    assert supervisor.start.await_count == 2
+    started.assert_awaited_once_with({
+        "job_id": "job-recovered", "process_group": 1234,
+        "fencing_token": 7, "reattachable": True,
+    })
+
+
 def test_remote_supervisor_files_are_fenced_relative_and_text_only(tmp_path):
     session = "session-a"; ident = remote_supervisor.hashlib.sha256(session.encode()).hexdigest()[:24]
     checkout = tmp_path / ".nerve-ydb-worktrees" / ident; checkout.mkdir(parents=True)
@@ -418,12 +468,12 @@ def test_artifact_endpoint_validation_rejects_unknown_root_before_lease(tmp_path
 
 
 def test_remote_supervisor_monitor_records_success_and_failure_exit_codes(tmp_path):
-    for argv, expected_state, expected_exit_code in (
+    for iteration, (argv, expected_state, expected_exit_code) in enumerate((
         ([sys.executable, "-c", "raise SystemExit(0)"], "succeeded", 0),
         ([sys.executable, "-c", "raise SystemExit(1)"], "failed", 1),
-    ):
+    )):
         started = remote_supervisor._start({
-            "root": str(tmp_path), "execution_id": "exec-a", "fencing_token": 7,
+            "root": str(tmp_path), "execution_id": f"exec-a-{iteration}", "fencing_token": 7,
             "argv": argv, "cwd": "execution_dir", "environment": {},
         })
         request = {"root": str(tmp_path), "job_id": started["job_id"], "fencing_token": 7}

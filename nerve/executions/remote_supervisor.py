@@ -124,6 +124,28 @@ def _write(job: Path, state: Mapping[str, Any]) -> None:
     temp.replace(job / "state.json")
 
 
+def _existing_job(root: Path, execution_id: str, token: int) -> dict[str, Any] | None:
+    """Find a previously accepted start after its RPC reply was lost."""
+    jobs = root / ".nerve-jobs"
+    if not jobs.is_dir():
+        return None
+    for job in jobs.iterdir():
+        if not job.is_dir():
+            continue
+        try:
+            state = json.loads((job / "state.json").read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(state, dict):
+            continue
+        if state.get("execution_id") != execution_id:
+            continue
+        if state.get("fencing_token") != token:
+            raise PermissionError("stale fencing token")
+        return state
+    return None
+
+
 def _cas_state(job: Path, token: int, expected_state: str, updates: Mapping[str, Any]) -> dict[str, Any]:
     with open(job / ".state.lock", "a+") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
@@ -277,12 +299,19 @@ def _start(request: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(argv, list) or not argv or not all(isinstance(x, str) and "\0" not in x for x in argv):
         raise ValueError("invalid structured argv")
     token = int(request["fencing_token"]); execution_id = str(request["execution_id"])
+    existing = _existing_job(root, execution_id, token)
+    if existing is not None:
+        return {"ok": True, **existing}
     job_id = "job-" + os.urandom(12).hex(); job = _job_dir(root, job_id); job.mkdir(parents=True)
     lock = open(root / ".nerve-host.lock", "a+")
     try:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        lock.close(); raise RuntimeError("host lock is held")
+        lock.close()
+        existing = _existing_job(root, execution_id, token)
+        if existing is not None:
+            return {"ok": True, **existing}
+        raise RuntimeError("host lock is held")
     supplied_cwd = request.get("cwd")
     if supplied_cwd == "workspace":
         cwd = root

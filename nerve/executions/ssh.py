@@ -624,7 +624,16 @@ class SshExecutionBackend:
         else:
             request = {"execution_id": execution_id, "lease_id": next(x["id"] for x in plan["selected_leases"] if x.get("slot") == step.get("resource_slot")), "fencing_token": token,
                        "root": root, "argv": self._argv(step, plan), "cwd": remote_workspace if step.get("cwd") == "workspace" else "job", "environment": {k: os.environ[k] for k in connection.environment_allowlist if k in os.environ}}
-            reply = await self.supervisor.start(connection, request)
+            try:
+                reply = await self.supervisor.start(connection, request)
+            except SshSupervisorRejectedError:
+                raise
+            except SshTransportError:
+                # start is idempotent by execution_id on the supervisor.  A
+                # lost reply therefore gets one bounded retry that either
+                # recovers the accepted job handle or starts it if the first
+                # request never arrived.
+                reply = await self.supervisor.start(connection, request)
             job_id = str(reply.get("job_id") or "")
             if not job_id or int(reply.get("fencing_token", -1)) != token:
                 raise SshTransportError("remote supervisor did not return a matching fenced job")
