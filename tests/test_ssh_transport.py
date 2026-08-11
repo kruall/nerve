@@ -7,6 +7,7 @@ import struct
 import hashlib
 import base64
 import os
+from unittest.mock import AsyncMock, call
 from typing import Any
 from types import SimpleNamespace
 
@@ -36,6 +37,20 @@ def _artifact_backend(tmp_path, supervisor):
     return SshExecutionBackend(
         inventory=inventory, connections=catalog, supervisor=supervisor,
     ), local_root
+
+
+@pytest.mark.asyncio
+async def test_backend_provisions_every_enabled_host():
+    supervisor = SimpleNamespace(provision=AsyncMock())
+    connections = SimpleNamespace(resolve=lambda name: name + "-connection")
+    inventory = SimpleNamespace(hosts={
+        "host-a": {"connection_ref": "a", "enabled": True},
+        "host-b": {"connection_ref": "b"},
+        "host-disabled": {"connection_ref": "c", "enabled": False},
+    })
+    backend = SshExecutionBackend(inventory=inventory, connections=connections, supervisor=supervisor)
+    assert await backend.provision_all_supervisors() == {"host-a": "ready", "host-b": "ready"}
+    assert supervisor.provision.await_args_list == [call("a-connection"), call("b-connection")]
 
 
 def test_connection_catalog_requires_pinned_named_connection(tmp_path):

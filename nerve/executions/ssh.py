@@ -307,6 +307,10 @@ class OpenSshSupervisor:
                 raise SshTransportError("remote supervisor has an incompatible pack limit")
         self._compatible_connections.add(connection.name)
 
+    async def provision(self, connection: SshConnection) -> None:
+        """Install or update the reviewed supervisor before remote work."""
+        await self._ensure_compatible(connection)
+
     async def _rpc(self, connection: SshConnection, operation: str, payload: Mapping[str, Any], *, ensure_compatible: bool = True) -> Mapping[str, Any]:
         # Never log connection coordinates, payload fields, or artifact data.
         if operation not in self._OPERATIONS:
@@ -420,6 +424,25 @@ class SshExecutionBackend:
         self.poll_seconds = poll_seconds
         self._jobs: dict[str, tuple[SshConnection, str, int, str]] = {}
         self._transfers: dict[str, tuple[SshConnection, Mapping[str, Any], SshConnection, Mapping[str, Any], str]] = {}
+
+    async def provision_all_supervisors(self) -> dict[str, str]:
+        """Best-effort startup rollout to every enabled configured host."""
+        async def provision(host_id: str, host: Mapping[str, Any]) -> tuple[str, str]:
+            try:
+                connection = self.connections.resolve(str(host["connection_ref"]))
+                method = getattr(self.supervisor, "provision", None)
+                if not callable(method):
+                    raise SshTransportError("SSH supervisor does not support provisioning")
+                await method(connection)
+                return host_id, "ready"
+            except Exception as exc:
+                logger.warning("ssh_supervisor_provision failed host=%s error=%s", host_id, type(exc).__name__)
+                return host_id, "failed"
+
+        hosts = [(host_id, host) for host_id, host in self.inventory.hosts.items()
+                 if host.get("enabled", True)]
+        results = await asyncio.gather(*(provision(host_id, host) for host_id, host in hosts))
+        return dict(results)
 
     async def reconcile_host(self, host_id: str, generation: int) -> bool:
         """Require every configured supervisor root to prove its host lock idle."""

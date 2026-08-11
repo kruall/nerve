@@ -599,6 +599,10 @@ class AgentEngine:
             from nerve.executions.ssh import SshConnectionCatalog, SshExecutionBackend
             backend = SshExecutionBackend(inventory=inventory, connections=SshConnectionCatalog(getattr(self.config, "resources", {})))
             resource_service._recovery_probe = backend.reconcile_host
+            provisioned = await backend.provision_all_supervisors()
+            failed = sorted(host_id for host_id, state in provisioned.items() if state != "ready")
+            if failed:
+                logger.warning("Remote supervisor provisioning failed hosts=%s", ",".join(failed))
         execution_service = ExecutionService(
             db=self.db,
             engine=self,
