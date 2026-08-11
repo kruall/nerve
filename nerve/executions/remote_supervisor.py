@@ -30,7 +30,9 @@ from typing import Any, Mapping
 _MAGIC = b"NRS1"
 _VERSION = 1
 _MAX_HEADER = 64 * 1024
-_MAX_PACK = 512 * 1024 * 1024
+# YDB source-tree provisioning needs one bounded but large Git pack. Keep the
+# same limit in OpenSshSupervisor; NRS1 still buffers a complete frame.
+_MAX_PACK = 4 * 1024 * 1024 * 1024
 # artifact_get is deliberately bounded until the streaming NRS extension is
 # deployed everywhere.  It is not advertised as a large-artifact operation.
 _MAX_ARTIFACT_GET = 32 * 1024

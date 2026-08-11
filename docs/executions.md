@@ -196,7 +196,7 @@ response frame is JSON-only. Larger copies fail explicitly rather than being
 silently buffered in the control process.
 
 Local-to-remote uploads use the existing authenticated supervisor channel and
-are capped by the 512 MiB NRS1 binary-frame limit; the control process buffers
+are capped by the 4 GiB NRS1 binary-frame limit; the control process buffers
 that frame. Large benchmark artifacts should therefore use direct
 remote-to-remote transfer rather than staging through localhost.
 

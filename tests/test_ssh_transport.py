@@ -123,6 +123,11 @@ def test_framed_protocol_round_trips_binary_pack_and_rejects_bad_frames():
             remote_supervisor._decode_frame(frame)
 
 
+def test_supervisor_and_client_share_four_gib_pack_limit():
+    assert remote_supervisor._MAX_PACK == 4 * 1024 * 1024 * 1024
+    assert OpenSshSupervisor._MAX_PACK == remote_supervisor._MAX_PACK
+
+
 def test_reconcile_host_rejects_durable_active_job_and_transfer_lineages(tmp_path):
     root = tmp_path / "remote"; root.mkdir()
     job = root / ".nerve-jobs" / "job-active"; job.mkdir(parents=True)

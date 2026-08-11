@@ -193,7 +193,7 @@ class OpenSshSupervisor:
     """One-shot framed client for the fixed standalone remote supervisor."""
     _MAGIC = b"NRS1"
     _MAX_HEADER = 64 * 1024
-    _MAX_PACK = 512 * 1024 * 1024
+    _MAX_PACK = 4 * 1024 * 1024 * 1024
     # This must match remote_supervisor._FRAME_OPERATIONS.  Validate before
     # opening SSH so backend additions (for example a mistaken ``spin_run``)
     # fail locally rather than being misclassified as transport ambiguity.
