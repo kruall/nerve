@@ -166,12 +166,18 @@ class ExecutionService:
             ).hexdigest()[:32] + "/" + publish_path.name,
         })
         pack = snap.pop("pack")
+        base_pack = snap.pop("base_pack", b"")
         if not isinstance(pack, bytes):
             raise ValueError("YDB snapshot did not produce a binary pack")
+        if not isinstance(base_pack, bytes):
+            raise ValueError("YDB snapshot did not produce a binary base pack")
         packs = self.execution_root / "ydb-packs"
         packs.mkdir(parents=True, exist_ok=True)
         pack_path = packs / (
             str(snap["snapshot_id"]) + "-" + uuid.uuid4().hex + ".pack"
+        )
+        base_pack_path = packs / (
+            str(snap["head"]) + "-" + uuid.uuid4().hex + ".base.pack"
         )
         # This control-plane-local file is not a request field sent to the
         # worker.  Keeping the binary outside SQLite avoids JSON/base64 growth
@@ -180,9 +186,13 @@ class ExecutionService:
         try:
             with os.fdopen(fd, "wb") as stream:
                 stream.write(pack)
+            with open(base_pack_path, "xb") as stream:
+                stream.write(base_pack)
         except BaseException:
             with contextlib.suppress(OSError):
                 pack_path.unlink()
+            with contextlib.suppress(OSError):
+                base_pack_path.unlink()
             # Only unwind the compatibility handle created by this failed
             # start.  A pre-existing YDB handle is session-owned and must not
             # be released merely because a later operation could not start.
@@ -194,6 +204,9 @@ class ExecutionService:
         snap["pack_path"] = str(pack_path)
         snap["pack_length"] = len(pack)
         snap["pack_sha256"] = hashlib.sha256(pack).hexdigest()
+        snap["base_pack_path"] = str(base_pack_path)
+        snap["base_pack_length"] = len(base_pack)
+        snap["base_pack_sha256"] = hashlib.sha256(base_pack).hexdigest()
         test = kind == "ydb_test"
         argv = ["make", "--build", build_type, "--output", output_dir] + (["-tA"] if test else []) + list(args)
         plan = {"kind": kind, "profile_version": "1", "profile_hash": "built-in-ydb-v1",
@@ -219,6 +232,8 @@ class ExecutionService:
         except BaseException:
             with contextlib.suppress(OSError):
                 pack_path.unlink()
+            with contextlib.suppress(OSError):
+                base_pack_path.unlink()
             if created_ydb_handle:
                 with contextlib.suppress(Exception):
                     await self.resource_manager.release_handle(session_id, str(ydb_handle["id"]))

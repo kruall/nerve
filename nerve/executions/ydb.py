@@ -41,7 +41,7 @@ def validate_worktree(value: str, allowed_root: Path | None) -> Path:
 
 
 def snapshot(worktree: Path) -> dict[str, str | bytes]:
-    """Create a deterministic, unreferenced commit and a thin delta pack.
+    """Create a deterministic snapshot plus a self-provisioning base pack.
 
     All objects and the index used to construct the commit live in a temporary
     object directory.  The real index, refs and worktree are read only.
@@ -80,6 +80,12 @@ def snapshot(worktree: Path) -> dict[str, str | bytes]:
                       input=b"Nerve YDB snapshot\n", env=env).decode().strip()
         pack = _git(worktree, "pack-objects", "--thin", "--stdout", "--revs",
                     input=(commit + "\n^" + head + "\n").encode(), env=env)
+        # Include HEAD's complete reachable history.  The snapshot commit has
+        # HEAD as parent, so Git's connectivity check must be able to follow
+        # that ancestry on an empty builder cache.
+        base_pack = _git(worktree, "pack-objects", "--stdout", "--revs",
+                         input=(head + "\n").encode())
     # The pack deliberately remains bytes.  The caller persists it outside the
     # JSON execution plan and sends it in the SSH binary frame.
-    return {"head": head, "snapshot_id": commit, "pack": pack}
+    return {"head": head, "snapshot_id": commit, "pack": pack,
+            "base_pack": base_pack}

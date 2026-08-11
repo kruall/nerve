@@ -211,7 +211,11 @@ worktree.
 
 Before each command, Nerve snapshots `HEAD`, tracked changes, and non-ignored
 untracked files without touching the index or worktree. The named SSH
-supervisor receives a thin object pack above a pre-provisioned bare cache,
+supervisor receives a thin object pack and, when its cache lacks that `HEAD`,
+an automatically transferred Git base containing the commit and its reachable
+history.
+It records that base in its bare cache, so every builder self-provisions on
+first use without a manual cache seed. The supervisor then
 atomically switches a session-specific checkout under its configured root,
 preserves ignored build cache, and removes stale non-ignored files. It then
 executes literal argv:

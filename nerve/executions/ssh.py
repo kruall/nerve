@@ -313,6 +313,21 @@ class OpenSshSupervisor:
             except OSError as exc: raise SshTransportError("YDB snapshot pack is unavailable") from exc
             if len(pack) != length or hashlib.sha256(pack).hexdigest() != expected:
                 raise SshTransportError("YDB snapshot pack verification failed")
+            base_path = snapshot.pop("base_pack_path", None)
+            base_expected = snapshot.pop("base_pack_sha256", None)
+            base_length = snapshot.pop("base_pack_length", None)
+            if base_path is not None or base_expected is not None or base_length is not None:
+                if not isinstance(base_path, str) or not isinstance(base_expected, str) or not isinstance(base_length, int):
+                    raise SshTransportError("YDB snapshot has no verified local base pack")
+                try: base = Path(base_path).read_bytes()
+                except OSError as exc: raise SshTransportError("YDB snapshot base pack is unavailable") from exc
+                if len(base) != base_length or hashlib.sha256(base).hexdigest() != base_expected:
+                    raise SshTransportError("YDB snapshot base pack verification failed")
+                # The remote supervisor consumes two concatenated Git packs
+                # only for sync.  Length-prefixing prevents an ambiguous pack
+                # boundary and preserves the generic NRS binary frame.
+                pack = struct.pack(">QQ", len(base), len(pack)) + base + pack
+                snapshot["base_pack"] = True
             request["snapshot"] = snapshot
         elif operation == "artifact_put":
             source = request.pop("source_path", None)
@@ -518,6 +533,7 @@ class SshExecutionBackend:
             request = {"execution_id": execution_id, "lease_id": next(x["id"] for x in plan["selected_leases"] if x.get("slot") == step.get("resource_slot")),
                        "fencing_token": token, "root": root, "session_id": str(plan.get("session_id", "")), "snapshot": dict(snapshot)}
             pack_path = snapshot.get("pack_path")
+            base_pack_path = snapshot.get("base_pack_path")
             try:
                 reply = await self.supervisor.sync(connection, request)
             finally:
@@ -530,6 +546,9 @@ class SshExecutionBackend:
                         raise SshTransportError(
                             "could not remove the consumed YDB snapshot pack"
                         ) from exc
+                if isinstance(base_pack_path, str):
+                    with contextlib.suppress(FileNotFoundError):
+                        Path(base_pack_path).unlink()
             remote_workspace = _remote_path(str(reply.get("workspace") or ""), connection.remote_roots)
         existing = plan.get("_remote_existing_job")
         if existing:

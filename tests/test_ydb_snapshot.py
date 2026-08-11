@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import struct
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,13 @@ def _repo(tmp_path):
     (repo / "tracked").write_text("base")
     _git(repo, "add", "tracked"); _git(repo, "commit", "-m", "base")
     return repo
+
+
+def _sync_pack(result):
+    pack = result.pop("pack")
+    base = result.pop("base_pack")
+    result["base_pack"] = True
+    return struct.pack(">QQ", len(base), len(pack)) + base + pack
 
 
 def test_snapshot_is_deterministic_and_leaves_real_index_and_status_unchanged(tmp_path):
@@ -84,22 +92,33 @@ def test_remote_materializes_snapshot_from_preseeded_cache_and_preserves_ignored
     result = snapshot(repo); root = tmp_path / "remote"
     cache = root / ".nerve-ydb-object-cache"
     cache.parent.mkdir(); _git(repo, "clone", "--bare", str(repo), str(cache))
-    pack = result.pop("pack")
+    pack = _sync_pack(result)
     request = {"root": str(root), "session_id": "session-1", "fencing_token": 1, "snapshot": result}
     reply = _sync(request, pack); tree = Path(reply["workspace"])
     assert (tree / "tracked").read_text() == "changed" and (tree / "new").read_text() == "new"
     (tree / "cache").mkdir(); (tree / "cache" / "saved").write_text("keep")
     (repo / "new").unlink(); (repo / "tracked").write_text("again")
-    next_snapshot = snapshot(repo); next_pack = next_snapshot.pop("pack")
+    next_snapshot = snapshot(repo); next_pack = _sync_pack(next_snapshot)
     reply = _sync({**request, "fencing_token": 2, "snapshot": next_snapshot}, next_pack)
     tree = Path(reply["workspace"])
     assert not (tree / "new").exists() and (tree / "cache" / "saved").read_text() == "keep"
 
 
-def test_remote_missing_base_cache_fails_without_full_history_fallback(tmp_path):
+def test_remote_missing_base_cache_is_provisioned_from_snapshot(tmp_path):
     repo = _repo(tmp_path); result = snapshot(repo); root = tmp_path / "remote"
-    with pytest.raises(ValueError, match="object cache lacks requested base HEAD"):
-        _sync({"root": str(root), "session_id": "session-1", "fencing_token": 1, "snapshot": result}, result["pack"])
+    reply = _sync({"root": str(root), "session_id": "session-1", "fencing_token": 1,
+                   "snapshot": result}, _sync_pack(result))
+    assert Path(reply["workspace"]).is_dir()
+
+
+def test_remote_provisioning_needs_no_head_history(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / "tracked").write_text("next")
+    _git(repo, "add", "tracked"); _git(repo, "commit", "-m", "next")
+    result = snapshot(repo)
+    reply = _sync({"root": str(tmp_path / "remote"), "session_id": "session-1",
+                   "fencing_token": 1, "snapshot": result}, _sync_pack(result))
+    assert (Path(reply["workspace"]) / "tracked").read_text() == "next"
 
 
 def test_worktree_must_be_allowlisted_git_top_level(tmp_path):
