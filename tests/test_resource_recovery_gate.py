@@ -85,7 +85,7 @@ async def test_gate_replays_every_pending_intent_before_execution_recovery(db):
     intents = await db.list_resource_recovery_intents()
     assert {row["state"] for row in intents} == {"failed"}
     recovered_lease = await db.get_resource_lease("lease-1")
-    assert recovered_lease is not None and recovered_lease["state"] == "quarantined"
+    assert recovered_lease is not None and recovered_lease["state"] == "released"
     assert probe.calls == 1 and gate.ready
 
 
@@ -215,7 +215,7 @@ async def test_processing_intent_with_handle_quarantines_its_host(db):
     intent = await db.get_resource_recovery_intent("handle-intent")
     recovered = await db.get_resource_lease(lease["id"])
     assert intent is not None and intent["state"] == "failed"
-    assert recovered is not None and recovered["state"] == "quarantined"
+    assert recovered is not None and recovered["state"] == "released"
 
 
 @pytest.mark.asyncio
@@ -238,7 +238,7 @@ async def test_payload_only_acquire_intent_quarantines_allocator_lease(db):
     intent = await db.get_resource_recovery_intent("payload-only-acquire")
     recovered = await db.get_resource_lease("lease-payload-only")
     assert intent is not None and intent["operation_id"] is None and intent["state"] == "failed"
-    assert recovered is not None and recovered["state"] == "quarantined"
+    assert recovered is not None and recovered["state"] == "released"
 
 
 @pytest.mark.asyncio

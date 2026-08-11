@@ -498,7 +498,7 @@ async def test_attach_after_atomic_begin_release_cannot_reference_handle(db):
 
 
 @pytest.mark.asyncio
-async def test_unknown_handle_quiescence_quarantines_host_lease_and_handle(db, monkeypatch):
+async def test_unknown_handle_quiescence_quarantines_host_and_handle_but_releases_lease(db, monkeypatch):
     service = await _handle_service(db)
     handle = (await service.acquire_handles("session-a", [{"pool": "only-a"}]))[0]
     private = await service._resolve_handle_lease("session-a", handle["id"])
@@ -509,7 +509,10 @@ async def test_unknown_handle_quiescence_quarantines_host_lease_and_handle(db, m
     monkeypatch.setattr(service, "_reconcile_handle_quiescence", unknown_quiescence)
     assert await service.release_handle("session-a", handle["id"])
     assert (await db.get_session_resource_handle(handle["id"]))["state"] == "quarantined"
-    assert (await db.get_resource_lease(private["lease_id"]))["state"] == "quarantined"
+    lease = await db.get_resource_lease(private["lease_id"])
+    assert lease["state"] == "released"
+    assert lease["released_at"] is not None
+    assert lease["quarantine_reason"] == "handle release could not prove remote quiescence"
     assert (await db.get_resource_host("host-a"))["quarantined"] == 1
 
     waiter = asyncio.create_task(service.acquire_handles("session-b", [{"pool": "only-a"}]))

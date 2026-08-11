@@ -201,7 +201,7 @@ async def test_startup_quarantines_legacy_reservation_when_host_fence_is_stale(d
     settled = await db.get_session_resource_reservation("session-a")
     lease = await db.get_resource_lease(reservation["lease_id"])
     assert settled is not None and settled["state"] == "quarantined"
-    assert lease is not None and lease["state"] == "quarantined"
+    assert lease is not None and lease["state"] == "released"
     assert (await db.get_resource_host(reservation["host_id"]))["quarantined"] == 1
     assert await db.list_session_resource_handles("session-a", states=("active",)) == []
 
@@ -247,7 +247,7 @@ async def test_startup_quarantines_legacy_reservation_for_unavailable_host(
     lease = await db.get_resource_lease(reservation["lease_id"])
     host = await db.get_resource_host(reservation["host_id"])
     assert settled is not None and settled["state"] == "quarantined"
-    assert lease is not None and lease["state"] == "quarantined"
+    assert lease is not None and lease["state"] == "released"
     assert host is not None and host["quarantined"] == 1
     if permanent_loss:
         assert host["enabled"] == 0 and host["permanently_unavailable"] == 1
@@ -278,7 +278,7 @@ async def test_startup_quarantines_legacy_reservation_when_existing_handle_workt
     lease = await db.get_resource_lease(reservation["lease_id"])
     handle = await db.get_session_resource_handle("handle-mismatched-worktree")
     assert settled is not None and settled["state"] == "quarantined"
-    assert lease is not None and lease["state"] == "quarantined"
+    assert lease is not None and lease["state"] == "released"
     assert handle is not None and handle["state"] == "quarantined"
     assert await db.list_session_resource_handles("session-a", states=("active",)) == []
 
@@ -301,7 +301,7 @@ async def test_startup_quarantines_running_ydb_reservation(db, tmp_path):
     settled = await db.get_session_resource_reservation("session-a")
     assert settled is not None and settled["state"] == "quarantined"
     lease = await db.get_resource_lease(reservation["lease_id"])
-    assert lease is not None and lease["state"] == "quarantined"
+    assert lease is not None and lease["state"] == "released"
     handles = await db.list_session_resource_handles("session-a", states=("active",))
     assert await db.list_session_resource_handles("session-a", states=("active",)) == []
 

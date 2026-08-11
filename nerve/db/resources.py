@@ -1167,10 +1167,19 @@ class ResourceStore:
         return bool(result.rowcount)
 
     async def quarantine_resource_lease(self, *, lease_id: str, execution_id: str, fencing_token: int, reason: str) -> bool:
+        """Fence the host and retire the lease when remote state is uncertain.
+
+        Host quarantine, rather than an indefinitely active lease, is the
+        exclusion boundary after an ambiguous remote operation.  Keeping the
+        lease active used to make recovery depend on a second, unrelated
+        cleanup path and left capacity shown as permanently leased.
+        """
         now = utc_now_iso()
         async with self._atomic():
-            result = await self.db.execute("""UPDATE resource_leases SET state='quarantined', revoking_at=COALESCE(revoking_at, ?), quarantine_reason=?
-                WHERE id=? AND execution_id=? AND fencing_token=? AND state IN ('active','revoking')""", (now, reason[:500], lease_id, execution_id, fencing_token))
+            result = await self.db.execute("""UPDATE resource_leases
+                SET state='released', released_at=COALESCE(released_at, ?),
+                    revoking_at=COALESCE(revoking_at, ?), quarantine_reason=?
+                WHERE id=? AND execution_id=? AND fencing_token=? AND state IN ('active','revoking')""", (now, now, reason[:500], lease_id, execution_id, fencing_token))
             if not result.rowcount:
                 return False
             async with self.db.execute("SELECT host_id FROM resource_leases WHERE id=?", (lease_id,)) as c:

@@ -1198,6 +1198,31 @@ async def test_ambiguous_remote_reconnect_quarantines_selected_lease(db, owner, 
 
 
 @pytest.mark.asyncio
+async def test_lifecycle_error_releases_selected_lease(db, owner, tmp_path):
+    plan = StubPlan().as_dict(redact_secrets=False)
+    plan["session_id"] = owner
+    row = await db.create_execution(
+        "exec-lifecycle-error", session_id=owner, kind="test.wait",
+        profile_version="1", profile_hash="hash", profile_snapshot={}, plan=plan,
+        resource_requests=[],
+    )
+    lease = {"id": "lease-lifecycle-error", "host_id": "host-1", "fencing_token": 12}
+    class ExplodingBackend(ControlledBackend):
+        async def run(self, **_kwargs):
+            raise RuntimeError("unexpected backend error")
+
+    leases = SimpleNamespace(
+        acquire=AsyncMock(return_value=[lease]), release=AsyncMock(), quarantine=AsyncMock(),
+    )
+    service = ExecutionService(db=db, engine=_engine(), workspace=tmp_path, catalog=SimpleNamespace(),
+                               backend=ExplodingBackend(), resource_manager=leases)
+    await service._run(row["id"])
+
+    leases.release.assert_awaited_once_with(execution_id=row["id"], leases=[lease])
+    assert (await db.get_execution(row["id"]))["status"] == "failed"
+
+
+@pytest.mark.asyncio
 async def test_terminal_unleased_cancellation_settles_stale_queue_atomically(db, owner):
     plan = StubPlan().as_dict(redact_secrets=False)
     plan["session_id"] = owner
