@@ -783,15 +783,36 @@ def _artifact_transfer_receive(request: Mapping[str, Any]) -> dict[str, Any]:
     known = directory/"known_hosts"
     known.write_text("["+address+"]:"+str(port)+" "+str(request["source_host_key"])+"\n")
     temporary=target.with_name("."+target.name+".nerve-transfer-"+os.urandom(8).hex())
+    # Keep SSH diagnostics out of the protocol and expose only a sanitized
+    # bounded tail; a file also avoids deadlocking on a full stderr pipe.
+    stderr_path=directory/(".ssh-stderr-"+os.urandom(8).hex())
     try:
-        with open(temporary,"xb",buffering=0) as output:
-            proc=subprocess.Popen([ssh,"-T","-o","BatchMode=yes","-o","StrictHostKeyChecking=yes","-o","UserKnownHostsFile="+str(known),"-o","GlobalKnownHostsFile=/dev/null","-o","IdentitiesOnly=yes","-o","ForwardAgent=no","-o","ClearAllForwardings=yes","-o","RequestTTY=no","-i",state["client_key"],"-p",str(port),transfer_user+"@"+address],stdin=subprocess.DEVNULL,stdout=output,stderr=subprocess.DEVNULL,start_new_session=True)
+        with open(temporary,"xb",buffering=0) as output, open(stderr_path,"xb",buffering=0) as error:
+            os.chmod(stderr_path, 0o600)
+            proc=subprocess.Popen([ssh,"-T","-o","BatchMode=yes","-o","StrictHostKeyChecking=yes","-o","UserKnownHostsFile="+str(known),"-o","GlobalKnownHostsFile=/dev/null","-o","IdentitiesOnly=yes","-o","ForwardAgent=no","-o","ClearAllForwardings=yes","-o","RequestTTY=no","-i",state["client_key"],"-p",str(port),transfer_user+"@"+address],stdin=subprocess.DEVNULL,stdout=output,stderr=error,start_new_session=True)
             state["state"]="receiving"; state["pid"]=proc.pid; state["process_group"]=os.getpgid(proc.pid); _transfer_save(directory,state)
             returncode=proc.wait()
-        if returncode or temporary.stat().st_size != request.get("size") or _stream_sha256(temporary)!=request.get("sha256"): raise ValueError("direct artifact transfer verification failed")
+        try:
+            detail=stderr_path.read_bytes()[-4096:].decode(errors="replace").strip()
+        except OSError:
+            detail=""
+        detail="".join(character if ord(character) >= 0x20 else "?" for character in detail)
+        with contextlib.suppress(OSError): stderr_path.unlink()
+        if returncode:
+            suffix=(": "+detail[-300:]) if detail else ""
+            raise ValueError("direct artifact transfer SSH failed (exit code "+str(returncode)+")"+suffix)
+        actual_size=temporary.stat().st_size
+        expected_size=request.get("size")
+        if actual_size != expected_size:
+            raise ValueError("direct artifact transfer size mismatch (expected "+str(expected_size)+", received "+str(actual_size)+")")
+        actual_sha=_stream_sha256(temporary)
+        expected_sha=request.get("sha256")
+        if actual_sha != expected_sha:
+            raise ValueError("direct artifact transfer checksum mismatch (expected "+str(expected_sha)+", received "+actual_sha+")")
         temporary.replace(target); state["state"]="succeeded"; _transfer_save(directory,state); return {"ok":True,"size":request["size"],"sha256":request["sha256"]}
     finally:
         with contextlib.suppress(FileNotFoundError): temporary.unlink()
+        with contextlib.suppress(FileNotFoundError): stderr_path.unlink()
 
 def _artifact_transfer_cleanup(request: Mapping[str, Any]) -> dict[str, Any]:
     directory,state=_transfer_load(request)

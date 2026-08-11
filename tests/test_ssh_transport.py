@@ -463,14 +463,82 @@ def test_remote_supervisor_artifact_transfer_receive_uses_transfer_user_in_ssh_a
     monkeypatch.setattr(remote_supervisor.subprocess, "Popen", fake_popen)
     request = {
         "root": str(tmp_path), "artifact_root": "artifacts", "path": "result.bin",
-        "transfer_id": transfer_id, "fencing_token": 7, "source_address": "192.0.2.55", "source_port": 32456,
+        "transfer_id": transfer_id, "fencing_token": 7, "source_address": "2001:db8::55", "source_port": 32456,
         "source_host_key": "ssh-ed25519 KEY", "ssh_path": "/usr/bin/ssh", "transfer_user": "builder",
         "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
     }
     response = remote_supervisor._artifact_transfer_receive(request)
     assert response["ok"] is True
-    assert "builder@192.0.2.55" in captured["argv"]
+    assert "builder@2001:db8::55" in captured["argv"]
+    known_hosts = Path(next(item.split("=", 1)[1] for item in captured["argv"] if item.startswith("UserKnownHostsFile=")))
+    assert known_hosts.read_text() == "[2001:db8::55]:32456 ssh-ed25519 KEY\n"
     assert all("nerve-transfer@" not in str(item) for item in map(str, captured["argv"]))
+
+
+@pytest.mark.parametrize("failure,expected", [
+    ("size", "size mismatch"),
+    ("checksum", "checksum mismatch"),
+])
+def test_remote_supervisor_artifact_transfer_receive_reports_verification_reason(tmp_path, monkeypatch, failure, expected):
+    transfer_id = "transfer-" + failure
+    directory = remote_supervisor._transfer_dir(tmp_path, transfer_id)
+    payload = b"artifact-data"
+    client_key = directory / "client_key"; client_key.write_text("secret")
+    remote_supervisor._transfer_save(directory, {
+        "role": "source", "state": "serving", "fencing_token": 7,
+        "process_group": 1234, "client_key": str(client_key),
+    })
+
+    class Process:
+        pid = os.getpid()
+
+        def wait(self):
+            return 0
+
+    def fake_popen(*args, **kwargs):
+        kwargs["stdout"].write(payload)
+        return Process()
+
+    monkeypatch.setattr(remote_supervisor.subprocess, "Popen", fake_popen)
+    request = {
+        "root": str(tmp_path), "artifact_root": "artifacts", "path": "result.bin",
+        "transfer_id": transfer_id, "fencing_token": 7, "source_address": "2001:db8::55", "source_port": 32456,
+        "source_host_key": "ssh-ed25519 KEY", "ssh_path": "/usr/bin/ssh", "transfer_user": "builder",
+        "size": len(payload) if failure == "checksum" else len(payload) + 1,
+        "sha256": hashlib.sha256(payload).hexdigest() if failure == "size" else "0" * 64,
+    }
+    with pytest.raises(ValueError, match=expected):
+        remote_supervisor._artifact_transfer_receive(request)
+
+
+def test_remote_supervisor_artifact_transfer_receive_reports_ssh_exit_and_stderr(tmp_path, monkeypatch):
+    transfer_id = "transfer-ssherror"
+    directory = remote_supervisor._transfer_dir(tmp_path, transfer_id)
+    client_key = directory / "client_key"; client_key.write_text("secret")
+    remote_supervisor._transfer_save(directory, {
+        "role": "source", "state": "serving", "fencing_token": 7,
+        "process_group": 1234, "client_key": str(client_key),
+    })
+
+    class Process:
+        pid = os.getpid()
+
+        def wait(self):
+            return 255
+
+    def fake_popen(*args, **kwargs):
+        kwargs["stderr"].write(b"Permission denied (publickey).\\n")
+        return Process()
+
+    monkeypatch.setattr(remote_supervisor.subprocess, "Popen", fake_popen)
+    request = {
+        "root": str(tmp_path), "artifact_root": "artifacts", "path": "result.bin",
+        "transfer_id": transfer_id, "fencing_token": 7, "source_address": "2001:db8::55", "source_port": 32456,
+        "source_host_key": "ssh-ed25519 KEY", "ssh_path": "/usr/bin/ssh", "transfer_user": "builder",
+        "size": 1, "sha256": "0" * 64,
+    }
+    with pytest.raises(ValueError, match=r"SSH failed.*exit code 255.*Permission denied"):
+        remote_supervisor._artifact_transfer_receive(request)
 
 
 def test_remote_supervisor_artifact_transfer_source_snapshots_before_serving(tmp_path, monkeypatch):
