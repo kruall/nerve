@@ -158,7 +158,7 @@ async def artifact_transfer_handler(ctx: ToolContext, args: dict) -> ToolResult:
         if not args.get("detached", False): row = await service.join_execution(execution_id=str(row["id"]), session_id=ctx.session_id)
     except Exception as exc:
         logger.warning("artifact transfer rejected (%s)", type(exc).__name__)
-        return ToolResult.text("Could not start direct artifact transfer.", is_error=True)
+        return ToolResult.text("Could not start artifact transfer via control host.", is_error=True)
     return _json({"kind": "artifact_transfer", "execution": public_execution(row)})
 
 

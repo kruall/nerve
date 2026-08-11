@@ -700,56 +700,56 @@ class SshExecutionBackend:
             return await self._run_local_to_remote(execution_id, plan, spec, emit, started)
         if spec.get("destination_local"):
             return await self._run_remote_to_local(execution_id, plan, spec, emit, started)
+        return await self._run_remote_via_local(execution_id, plan, spec, emit, started)
+
+    async def _run_remote_via_local(self, execution_id, plan, spec, emit, started):
         (source_connection, source_lease), (destination_connection, destination_lease) = self._transfer_endpoints(plan)
-        transfer_id = str(spec.get("transfer_id") or "")
         source_root = spec.get("source_root")
         destination_root = spec.get("destination_root")
         if source_root not in source_connection.artifact_roots:
             raise SshTransportError("source artifact root is not configured for source connection")
         if destination_root not in destination_connection.artifact_roots:
             raise SshTransportError("destination artifact root is not configured for destination connection")
-        root_source, root_destination = source_connection.remote_roots[0], destination_connection.remote_roots[0]
-        common = {"transfer_id": transfer_id, "execution_id": execution_id}
-        self._transfers[execution_id] = (source_connection, source_lease, destination_connection, destination_lease, transfer_id)
-        cleanup_targets = []
-        transfer_failure: str | None = None
+        # scp runs on the control host for both legs.  The workers never need
+        # to reach one another or run a transfer-only SSH daemon.
+        descriptor, temporary_name = tempfile.mkstemp(prefix="nerve-artifact-relay-")
+        os.close(descriptor)
+        temporary = Path(temporary_name)
         try:
-            destination_key = await self.supervisor.artifact_transfer_prepare_destination(destination_connection, {**common, "root": root_destination, "artifact_root": spec["destination_root"], "path": spec["destination_path"], "lease_id": destination_lease["id"], "fencing_token": int(destination_lease["fencing_token"]), "ssh_keygen_path": destination_connection.ssh_keygen_path})
-            cleanup_targets.append((destination_connection, root_destination, destination_lease))
-            # Once source preparation is requested, a transport failure is
-            # ambiguous: sshd may have started even if its reply was lost.
-            cleanup_targets.append((source_connection, root_source, source_lease))
-            prepared = await self.supervisor.artifact_transfer_prepare_source(source_connection, {**common, "root": root_source, "artifact_root": spec["source_root"], "path": spec["source_path"], "lease_id": source_lease["id"], "fencing_token": int(source_lease["fencing_token"]), "client_public_key": destination_key["client_public_key"], "transfer_user": source_connection.transfer_user, "bind_address": source_connection.transfer_bind_address, "port": source_connection.transfer_port, "sshd_path": source_connection.sshd_path, "ssh_keygen_path": source_connection.ssh_keygen_path, "supervisor_path": source_connection.supervisor_path})
-            await started({"transfer_id": transfer_id, "source_fencing_token": int(source_lease["fencing_token"]), "destination_fencing_token": int(destination_lease["fencing_token"]), "reattachable": False})
-            await self.supervisor.artifact_transfer_receive(destination_connection, {**common, "root": root_destination, "artifact_root": spec["destination_root"], "path": spec["destination_path"], "lease_id": destination_lease["id"], "fencing_token": int(destination_lease["fencing_token"]), "source_address": prepared["address"], "source_port": prepared["port"], "source_host_key": prepared["host_public_key"], "size": prepared["size"], "sha256": prepared["sha256"], "transfer_user": prepared["transfer_user"], "ssh_path": destination_connection.ssh_path})
-            await emit("stdout", "direct artifact transfer completed\n")
-            return BackendResult(0, summary="artifact transferred directly")
-        except (SshTransportError, ValueError) as exc:
-            # A framed remote operation error is a completed transfer attempt,
-            # not an unknown lifecycle state.  Cleanup below proves whether
-            # both temporary transfer processes are quiescent.
-            transfer_failure = self._transfer_failure(exc)
+            await self._scp(source_connection, self._artifact_remote_path(source_connection, source_root, spec["source_path"]), str(temporary), source_remote=True)
+            self._file_digest(temporary)
+            await started({"source_fencing_token": int(source_lease["fencing_token"]), "destination_fencing_token": int(destination_lease["fencing_token"]), "reattachable": False})
+            await self._scp(destination_connection, str(temporary), self._artifact_remote_path(destination_connection, destination_root, spec["destination_path"]), source_remote=False)
+            await emit("stdout", "artifact relayed through local host\n")
+            return BackendResult(0, summary="artifact relayed through local host")
         finally:
-            cleanup = await asyncio.gather(
-                *(self.supervisor.artifact_transfer_cleanup(connection, {
-                    **common, "root": root, "fencing_token": int(lease["fencing_token"]),
-                }) for connection, root, lease in cleanup_targets),
-                return_exceptions=True,
-            )
-            self._transfers.pop(execution_id, None)
-            if any(
-                isinstance(item, BaseException) or item.get("quiescent") is not True
-                for item in cleanup
-            ):
-                suffix = (": " + transfer_failure) if transfer_failure else ""
-                raise ExecutionBackendUncertain(
-                    "artifact transfer cleanup could not prove quiescence" + suffix
-                )
-        if transfer_failure is not None:
-            await emit("stderr", transfer_failure + "\n")
-            return BackendResult(
-                1, summary=transfer_failure, error="artifact_transfer_failed",
-            )
+            with contextlib.suppress(FileNotFoundError):
+                temporary.unlink()
+
+    @staticmethod
+    def _artifact_remote_path(connection: SshConnection, artifact_root: Any, path: Any) -> str:
+        if not isinstance(artifact_root, str) or not isinstance(path, str):
+            raise SshTransportError("artifact transfer path is invalid")
+        relative = PurePosixPath(artifact_root) / PurePosixPath(path)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise SshTransportError("artifact transfer path escapes configured root")
+        return _remote_path(str(PurePosixPath(connection.remote_roots[0]) / relative), connection.remote_roots)
+
+    async def _scp(self, connection: SshConnection, source: str, destination: str, *, source_remote: bool) -> None:
+        if shutil.which("scp") is None:
+            raise SshTransportError("OpenSSH scp client is not installed")
+        host = "[" + connection.host + "]" if ":" in connection.host else connection.host
+        remote = connection.user + "@" + host + ":" + (source if source_remote else destination)
+        argv = OpenSshSupervisor._scp_argv(connection, remote if source_remote else source, destination if source_remote else remote)
+        proc = await asyncio.create_subprocess_exec(*argv, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), connection.connect_timeout_seconds + 3600)
+        except (TimeoutError, OSError) as exc:
+            proc.kill()
+            await proc.wait()
+            raise SshTransportError("artifact relay scp is unreachable") from exc
+        if proc.returncode != 0:
+            raise SshTransportError("artifact relay scp failed: " + stderr.decode(errors="replace")[-300:])
 
     async def _run_local_to_remote(self, execution_id, plan, spec, emit, started):
         lease = next((x for x in plan.get("selected_leases", []) if x.get("slot") == "destination"), None)

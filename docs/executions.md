@@ -199,7 +199,10 @@ Local-to-remote uploads use the existing authenticated supervisor channel and
 are capped by the 4 GiB NRS1 binary-frame limit; the control process buffers
 that frame. Upload timeouts scale with frame size at a conservative 1 MiB/s
 floor. Large benchmark artifacts should therefore use direct
-remote-to-remote transfer rather than staging through localhost.
+remote-to-remote transfer through the control host: Nerve invokes `scp` from
+the control host to download the source into a temporary local file and then
+invokes `scp` again to upload it to the destination. The remote hosts do not
+need network access to one another.
 
 ## Session-sticky YDB builders
 

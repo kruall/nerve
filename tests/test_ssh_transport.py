@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import io
+import asyncio
 import json
+import shutil
 import sys
 import time
 import struct
@@ -782,7 +784,7 @@ async def test_ssh_backend_rejects_unconfigured_artifact_roots_before_transfer_r
 
 
 @pytest.mark.asyncio
-async def test_ssh_backend_artifact_transfer_orchestrates_two_slots_and_addresses_and_cleanup(tmp_path):
+async def test_ssh_backend_artifact_transfer_relays_two_remote_slots_through_local_host(tmp_path, monkeypatch):
     known_source = tmp_path / "source_known_hosts"; known_source.write_text("worker ssh-ed25519 AAAA\n")
     known_destination = tmp_path / "destination_known_hosts"; known_destination.write_text("worker ssh-ed25519 AAAA\n")
     catalog = SshConnectionCatalog({"ssh_connections": {
@@ -798,30 +800,6 @@ async def test_ssh_backend_artifact_transfer_orchestrates_two_slots_and_addresse
     }})
     calls: list[tuple[str, Any]] = []
 
-    class Supervisor:
-        async def artifact_transfer_prepare_destination(self, connection, request):
-            calls.append(("prepare_destination", connection.name, request["artifact_root"]))
-            return {"client_public_key": "CLIENT_KEY"}
-
-        async def artifact_transfer_prepare_source(self, connection, request):
-            calls.append(("prepare_source", connection.name, request["transfer_user"], request["bind_address"]))
-            return {
-                "address": "10.10.10.10",
-                "port": 40123,
-                "host_public_key": "HOST_KEY",
-                "size": 3,
-                "sha256": hashlib.sha256(b"abc").hexdigest(),
-                "transfer_user": request["transfer_user"],
-            }
-
-        async def artifact_transfer_receive(self, connection, request):
-            calls.append(("receive", connection.name, request["source_address"], request["transfer_user"]))
-            return {"ok": True}
-
-        async def artifact_transfer_cleanup(self, connection, request):
-            calls.append(("cleanup", connection.name, request["transfer_id"]))
-            return {"ok": True, "quiescent": True}
-
     backend = SshExecutionBackend(
         inventory=type("inventory", (), {
             "hosts": {
@@ -830,7 +808,7 @@ async def test_ssh_backend_artifact_transfer_orchestrates_two_slots_and_addresse
             },
         })(),
         connections=catalog,
-        supervisor=Supervisor(),
+        supervisor=object(),
     )
     plan = {
         "kind": "artifact_transfer",
@@ -854,22 +832,28 @@ async def test_ssh_backend_artifact_transfer_orchestrates_two_slots_and_addresse
     async def started(payload: dict[str, Any]) -> None:
         started_calls.append(payload)
 
+    class Process:
+        returncode = 0
+        async def communicate(self): return b"", b""
+    async def create_subprocess_exec(*args, **_kwargs):
+        calls.append(("scp", *args[1:]))
+        return Process()
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess_exec)
+    monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/scp")
     result = await backend.run(
         execution_id="exec-transfer-dual", plan=plan, workspace=tmp_path,
         execution_dir=tmp_path, emit=emit, started=started,
     )
     assert result.exit_code == 0
-    assert started_calls == [{"transfer_id": "transfer-dual", "source_fencing_token": 11, "destination_fencing_token": 13, "reattachable": False}]
-    assert calls[0][0] == "prepare_destination"
-    assert calls[1][0] == "prepare_source"
-    assert calls[2][0] == "receive"
-    assert calls[2][2] == "10.10.10.10"
-    assert calls[2][3] == "source-transfer"
-    assert [entry[0] for entry in calls if entry[0] == "cleanup"] == ["cleanup", "cleanup"]
+    assert started_calls == [{"source_fencing_token": 11, "destination_fencing_token": 13, "reattachable": False}]
+    assert calls[0][0] == "scp"
+    assert calls[0][-2] == "root@127.0.0.1:" + str(tmp_path / "source" / "source-artifacts" / "input.bin")
+    assert calls[1][0] == "scp"
+    assert calls[1][-1] == "root@127.0.0.1:" + str(tmp_path / "destination" / "destination-artifacts" / "output.bin")
 
 
 @pytest.mark.asyncio
-async def test_ssh_backend_artifact_transfer_returns_receive_error_after_quiescent_cleanup(tmp_path):
+async def test_ssh_backend_artifact_transfer_reports_scp_failure(tmp_path, monkeypatch):
     known_source = tmp_path / "source_known_hosts"; known_source.write_text("worker ssh-ed25519 AAAA\n")
     known_destination = tmp_path / "destination_known_hosts"; known_destination.write_text("worker ssh-ed25519 AAAA\n")
     catalog = SshConnectionCatalog({"ssh_connections": {
@@ -883,27 +867,10 @@ async def test_ssh_backend_artifact_transfer_returns_receive_error_after_quiesce
         },
     }})
 
-    class Supervisor:
-        async def artifact_transfer_prepare_destination(self, _connection, _request):
-            return {"client_public_key": "CLIENT_KEY"}
-
-        async def artifact_transfer_prepare_source(self, _connection, request):
-            return {
-                "address": "2001:db8::10", "port": 40123, "host_public_key": "HOST_KEY",
-                "size": 3, "sha256": hashlib.sha256(b"abc").hexdigest(),
-                "transfer_user": request["transfer_user"],
-            }
-
-        async def artifact_transfer_receive(self, _connection, _request):
-            raise SshTransportError("ValueError: direct artifact transfer checksum mismatch\n" + "x" * 1000)
-
-        async def artifact_transfer_cleanup(self, _connection, _request):
-            return {"ok": True, "quiescent": True}
-
     backend = SshExecutionBackend(
         inventory=type("inventory", (), {"hosts": {
             "1": {"connection_ref": "source"}, "2": {"connection_ref": "destination"},
-        }})(), connections=catalog, supervisor=Supervisor(),
+        }})(), connections=catalog, supervisor=object(),
     )
     plan = {
         "kind": "artifact_transfer",
@@ -917,20 +884,18 @@ async def test_ssh_backend_artifact_transfer_returns_receive_error_after_quiesce
             "destination_path": "output.bin",
         },
     }
-    emitted = []
-    async def emit(stream, text):
-        emitted.append((stream, text))
+    class Process:
+        returncode = 1
+        async def communicate(self): return b"", b"scp failed"
+    async def create_subprocess_exec(*_args, **_kwargs): return Process()
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess_exec)
+    monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/scp")
+    async def emit(_stream, _text): return None
     async def started(_payload):
         return None
-    result = await backend.run(
-        execution_id="exec-transfer-error", plan=plan, workspace=tmp_path,
-        execution_dir=tmp_path, emit=emit, started=started,
-    )
-    assert result.exit_code == 1
-    assert result.error == "artifact_transfer_failed"
-    assert len(result.summary) == 512
-    assert "checksum mismatch" in result.summary
-    assert emitted[-1][0] == "stderr"
+    with pytest.raises(SshTransportError, match="scp failed"):
+        await backend.run(execution_id="exec-transfer-error", plan=plan, workspace=tmp_path,
+                          execution_dir=tmp_path, emit=emit, started=started)
 
 
 @pytest.mark.asyncio

@@ -339,7 +339,7 @@ class ExecutionService:
                 "cancellation": {"mode": "terminate", "grace_seconds": 10, "run_cleanup": False}}
         if handle_ids:
             plan["retained_handle_ids"] = handle_ids
-        return await self._start_serialized(session_id=session_id, plan=plan, profile_snapshot={"kind": "artifact_transfer", "title": "direct artifact transfer", "source": "built-in reviewed transfer"}, auto_continue=auto_continue)
+        return await self._start_serialized(session_id=session_id, plan=plan, profile_snapshot={"kind": "artifact_transfer", "title": "artifact transfer via control host", "source": "built-in reviewed transfer"}, auto_continue=auto_continue)
 
     async def start_resource_command(
         self, *, session_id: str, executable: Any, args: Any,
