@@ -283,13 +283,19 @@ class OpenSshSupervisor:
     async def _ensure_compatible(self, connection: SshConnection) -> None:
         if connection.name in self._compatible_connections:
             return
+        reply: Mapping[str, Any]
         try:
-            await self._rpc(connection, self._COMPATIBILITY_OPERATION, {}, ensure_compatible=False)
+            reply = await self._rpc(connection, self._COMPATIBILITY_OPERATION, {}, ensure_compatible=False)
         except SshSupervisorRejectedError as exc:
             if "invalid frame operation" not in str(exc):
                 raise
             await self._bootstrap_supervisor(connection)
-            await self._rpc(connection, self._COMPATIBILITY_OPERATION, {}, ensure_compatible=False)
+            reply = await self._rpc(connection, self._COMPATIBILITY_OPERATION, {}, ensure_compatible=False)
+        if reply.get("max_pack") != self._MAX_PACK:
+            await self._bootstrap_supervisor(connection)
+            reply = await self._rpc(connection, self._COMPATIBILITY_OPERATION, {}, ensure_compatible=False)
+            if reply.get("max_pack") != self._MAX_PACK:
+                raise SshTransportError("remote supervisor has an incompatible pack limit")
         self._compatible_connections.add(connection.name)
 
     async def _rpc(self, connection: SshConnection, operation: str, payload: Mapping[str, Any], *, ensure_compatible: bool = True) -> Mapping[str, Any]:

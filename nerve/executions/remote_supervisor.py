@@ -859,7 +859,7 @@ def _reconcile_host(request: Mapping[str, Any]) -> dict[str, Any]:
 
 def _capabilities(request: Mapping[str, Any]) -> dict[str, Any]:
     """Compatibility probe; no root, fence, or remote state is touched."""
-    return {"ok": True, "operations": sorted(_FRAME_OPERATIONS)}
+    return {"ok": True, "operations": sorted(_FRAME_OPERATIONS), "max_pack": _MAX_PACK}
 
 def _artifact_send(ident: str, root: str) -> None:
     directory=_transfer_dir(_safe_root(root),ident); state=json.loads((directory/"state.json").read_text())

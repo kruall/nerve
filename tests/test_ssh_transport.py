@@ -165,7 +165,25 @@ async def test_incompatible_supervisor_is_bootstrapped_once_before_the_request(m
         calls.append((operation, ensure_compatible))
         if operation == "capabilities" and len(calls) == 1:
             raise SshSupervisorRejectedError("SSH supervisor rejected request: ValueError: invalid frame operation")
-        return {"ok": True}
+        return {"ok": True, "max_pack": OpenSshSupervisor._MAX_PACK}
+
+    async def bootstrap(_connection):
+        calls.append(("bootstrap", None))
+
+    monkeypatch.setattr(supervisor, "_rpc", rpc)
+    monkeypatch.setattr(supervisor, "_bootstrap_supervisor", bootstrap)
+    await supervisor._ensure_compatible(SimpleNamespace(name="worker"))
+    assert calls == [("capabilities", False), ("bootstrap", None), ("capabilities", False)]
+
+
+@pytest.mark.asyncio
+async def test_supervisor_with_stale_pack_limit_is_bootstrapped(monkeypatch):
+    supervisor = OpenSshSupervisor()
+    calls = []
+
+    async def rpc(_connection, operation, _payload, *, ensure_compatible=True):
+        calls.append((operation, ensure_compatible))
+        return {"ok": True, "max_pack": OpenSshSupervisor._MAX_PACK if len(calls) > 1 else 512 * 1024 * 1024}
 
     async def bootstrap(_connection):
         calls.append(("bootstrap", None))
