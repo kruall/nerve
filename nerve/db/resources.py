@@ -992,6 +992,19 @@ class ResourceStore:
         async with self.db.execute("SELECT * FROM resource_hosts WHERE id=?", (host_id,)) as c:
             return _row(await c.fetchone())
 
+    async def record_supervisor_provision(self, host_id: str, *, status: str,
+                                          error: str | None = None) -> None:
+        if status not in {"ready", "failed"}:
+            raise ValueError("invalid supervisor provisioning status")
+        result = await self._write(
+            """UPDATE resource_hosts SET supervisor_provisioned_at=?, supervisor_provision_status=?,
+               supervisor_provision_error=?, updated_at=? WHERE id=?""",
+            (utc_now_iso(), status, None if status == "ready" else (error or "unknown")[:500],
+             utc_now_iso(), host_id),
+        )
+        if not result.rowcount:
+            raise KeyError(host_id)
+
     async def set_resource_host_state(self, host_id: str, *, draining: bool | None = None, quarantined: bool | None = None, reason: str | None = None) -> dict[str, Any]:
         sets, args = ["updated_at=?"], [utc_now_iso()]
         if draining is not None:

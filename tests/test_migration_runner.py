@@ -86,7 +86,7 @@ async def test_v49_database_applies_later_migrations(tmp_path):
         )
         await db.commit()
 
-        assert await runner.run_migrations(db) == 61
+        assert await runner.run_migrations(db) == 62
         async with db.execute(
             "SELECT name FROM sqlite_master "
             "WHERE type='table' AND name='session_resource_reservations'"

@@ -434,9 +434,18 @@ class SshExecutionBackend:
                 if not callable(method):
                     raise SshTransportError("SSH supervisor does not support provisioning")
                 await method(connection)
+                database = getattr(self.inventory, "db", None)
+                if database is not None:
+                    await database.record_supervisor_provision(host_id, status="ready")
                 return host_id, "ready"
             except Exception as exc:
                 logger.warning("ssh_supervisor_provision failed host=%s error=%s", host_id, type(exc).__name__)
+                database = getattr(self.inventory, "db", None)
+                if database is not None:
+                    with contextlib.suppress(Exception):
+                        await database.record_supervisor_provision(
+                            host_id, status="failed", error=type(exc).__name__,
+                        )
                 return host_id, "failed"
 
         hosts = [(host_id, host) for host_id, host in self.inventory.hosts.items()

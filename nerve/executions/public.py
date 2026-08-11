@@ -264,6 +264,7 @@ def public_resource_snapshot(raw: Mapping[str, Any]) -> dict[str, Any]:
         for key in (
             "id", "display_name", "state", "enabled", "draining", "offline",
             "quarantined", "quarantine_reason", "last_seen_at",
+            "supervisor_provisioned_at", "supervisor_provision_status", "supervisor_provision_error",
         ):
             value = _scalar(host.get(key))
             if value is not None:
