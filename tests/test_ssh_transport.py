@@ -114,6 +114,28 @@ def test_connection_catalog_requires_a_fixed_normalized_supervisor_path(tmp_path
         }}})
 
 
+@pytest.mark.asyncio
+async def test_supervisor_bootstrap_creates_configured_parent(monkeypatch, tmp_path):
+    known = tmp_path / "known_hosts"; known.write_text("worker ssh-ed25519 AAAA\n")
+    connection = SshConnectionCatalog({"ssh_connections": {"worker": {
+        "host": "127.0.0.1", "user": "worker", "known_hosts": str(known),
+        "remote_roots": ["/srv/nerve"], "supervisor_path": "/home/worker/.local/libexec/nerve-remote-supervisor",
+    }}}).resolve("worker")
+    calls = []
+
+    class Process:
+        returncode = 0
+        async def communicate(self, _input=None): return b"", b""
+
+    async def create(*args, **_kwargs):
+        calls.append(args)
+        return Process()
+
+    monkeypatch.setattr("nerve.executions.ssh.asyncio.create_subprocess_exec", create)
+    await OpenSshSupervisor()._bootstrap_supervisor(connection)
+    assert calls[0][-3:] == ("/bin/mkdir", "-p", "/home/worker/.local/libexec")
+
+
 def test_connection_catalog_defaults_transfer_user_to_connection_user(tmp_path):
     known = tmp_path / "known_hosts"; known.write_text("x")
     catalog = SshConnectionCatalog({"ssh_connections": {"worker": {

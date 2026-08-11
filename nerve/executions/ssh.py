@@ -268,6 +268,12 @@ class OpenSshSupervisor:
             source.write(artifact)
             local_path = source.name
         try:
+            parent = str(PurePosixPath(connection.supervisor_path).parent)
+            prepare = await asyncio.create_subprocess_exec(*connection.ssh_argv(), "/bin/mkdir", "-p", parent,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            _, stderr = await asyncio.wait_for(prepare.communicate(), connection.connect_timeout_seconds + 30)
+            if prepare.returncode != 0:
+                raise SshTransportError("SSH supervisor bootstrap mkdir failed: " + stderr.decode(errors="replace")[-300:])
             upload = await asyncio.create_subprocess_exec(*self._scp_argv(
                 connection, local_path, f"{connection.user}@{connection.host}:{remote_temp}"),
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
