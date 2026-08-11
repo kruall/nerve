@@ -499,9 +499,9 @@ class TestConfigMemoryModels:
         config = MemoryConfig.from_dict({})
         assert config.semantic_dedup_threshold == 0.85
 
-    def test_codex_workers_are_clamped(self):
-        assert MemoryConfig.from_dict({"codex_workers": 0}).codex_workers == 1
-        assert MemoryConfig.from_dict({"codex_workers": 99}).codex_workers == 4
+    def test_codex_workers_are_coerced_without_hiding_the_configured_value(self):
+        assert MemoryConfig.from_dict({"codex_workers": "3"}).codex_workers == 3
+        assert MemoryConfig.from_dict({"codex_workers": 99}).codex_workers == 99
 
 
 class TestCodexMemoryInjection:

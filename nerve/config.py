@@ -1496,9 +1496,11 @@ class MemoryConfig:
                 d.get("fast_model", "claude-haiku-4-5-20251001") or "",
             ).strip(),
             embed_model=str(d.get("embed_model", "") or "").strip(),
-            codex_workers=max(
-                1, min(4, _lenient_int(d.get("codex_workers"), 2)),
-            ),
+            # Keep the config boundary responsible only for type coercion.
+            # CodexMemoryPool applies the operational 1..4 bound when it
+            # creates workers; clamping here would turn an interpolated string
+            # into an int before @_coerced can validate the declared type.
+            codex_workers=d.get("codex_workers", 2),
             codex_effort=str(d.get("codex_effort", "low")).strip().lower(),
             sqlite_dsn=d.get("sqlite_dsn", default_dsn),
             semantic_dedup_threshold=d.get("semantic_dedup_threshold", 0.85),
@@ -2525,7 +2527,9 @@ def _env_value(name: str, fallback: Any) -> Any:
 
 def _strict_bool(value: Any, *, field_name: str, default: bool) -> bool:
     if value is None:
-        return default
+        # An explicit blank YAML value has always meant "off" at the config
+        # boundary. Callers pass the declared default when a key is absent.
+        return False
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
@@ -2557,12 +2561,12 @@ class LangfuseCodexConfig:
         d = raw or {}
         env_enabled = os.environ.get("TRACE_TO_LANGFUSE")
         enabled = _strict_bool(
-            env_enabled if env_enabled is not None else d.get("enabled"),
+            env_enabled if env_enabled is not None else d.get("enabled", False),
             field_name="langfuse.codex.enabled/TRACE_TO_LANGFUSE",
             default=False,
         )
         auto_install = _strict_bool(
-            d.get("auto_install"),
+            d.get("auto_install", True),
             field_name="langfuse.codex.auto_install",
             default=True,
         )
