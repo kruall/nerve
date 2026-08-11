@@ -18,6 +18,8 @@ import os
 import re
 import shutil
 import struct
+import tempfile
+import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -30,6 +32,10 @@ logger = logging.getLogger(__name__)
 
 class SshTransportError(ExecutionBackendError):
     """The control plane cannot safely establish or use a trusted connection."""
+
+
+class SshSupervisorRejectedError(SshTransportError):
+    """A known validation rejection that proves no remote job was started."""
 
 
 @dataclass(frozen=True)
@@ -197,8 +203,13 @@ class OpenSshSupervisor:
         "reconcile_host",
         "artifact_transfer_prepare_source", "artifact_transfer_receive",
         "artifact_transfer_status", "artifact_transfer_cancel",
-        "artifact_transfer_cleanup", "status", "cancel", "tail", "files",
+        "artifact_transfer_cleanup", "status", "cancel", "tail", "files", "capabilities",
     })
+
+    _COMPATIBILITY_OPERATION = "capabilities"
+
+    def __init__(self) -> None:
+        self._compatible_connections: set[str] = set()
 
     @classmethod
     def _frame(cls, request: Mapping[str, Any], pack: bytes = b"") -> bytes:
@@ -226,10 +237,67 @@ class OpenSshSupervisor:
             raise SshTransportError("SSH supervisor returned an unsupported frame version")
         return response
 
-    async def _rpc(self, connection: SshConnection, operation: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    @staticmethod
+    def _scp_argv(connection: SshConnection, source: str, destination: str) -> list[str]:
+        args = ["scp", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+                "-o", "UserKnownHostsFile=" + str(connection.known_hosts),
+                "-o", "GlobalKnownHostsFile=/dev/null", "-o", "ProxyCommand=none",
+                "-o", f"ConnectTimeout={connection.connect_timeout_seconds}", "-P", str(connection.port)]
+        if connection.identity_file:
+            args.extend(["-i", str(connection.identity_file), "-o", "IdentitiesOnly=yes"])
+        return [*args, source, destination]
+
+    async def _bootstrap_supervisor(self, connection: SshConnection) -> None:
+        """Install only this reviewed artifact at the fixed configured path.
+
+        SCP supplies bytes without a remote shell; the two SSH calls use fixed
+        absolute tools and paths derived solely from reviewed connection data.
+        """
+        artifact = Path(__file__).with_name("remote_supervisor.py").read_bytes()
+        remote_temp = connection.supervisor_path + ".new-" + uuid.uuid4().hex
+        with tempfile.NamedTemporaryFile(prefix="nerve-supervisor-", delete=False) as source:
+            source.write(artifact)
+            local_path = source.name
+        try:
+            upload = await asyncio.create_subprocess_exec(*self._scp_argv(
+                connection, local_path, f"{connection.user}@{connection.host}:{remote_temp}"),
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            _, stderr = await asyncio.wait_for(upload.communicate(), connection.connect_timeout_seconds + 30)
+            if upload.returncode != 0:
+                raise SshTransportError("SSH supervisor bootstrap upload failed: " + stderr.decode(errors="replace")[-300:])
+            install = await asyncio.create_subprocess_exec(*connection.ssh_argv(), "/bin/chmod", "0755", remote_temp,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            _, stderr = await asyncio.wait_for(install.communicate(), connection.connect_timeout_seconds + 30)
+            if install.returncode != 0:
+                raise SshTransportError("SSH supervisor bootstrap chmod failed: " + stderr.decode(errors="replace")[-300:])
+            replace = await asyncio.create_subprocess_exec(*connection.ssh_argv(), "/bin/mv", "-f", remote_temp, connection.supervisor_path,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            _, stderr = await asyncio.wait_for(replace.communicate(), connection.connect_timeout_seconds + 30)
+            if replace.returncode != 0:
+                raise SshTransportError("SSH supervisor bootstrap replace failed: " + stderr.decode(errors="replace")[-300:])
+        except (TimeoutError, OSError) as exc:
+            raise SshTransportError("SSH supervisor bootstrap is unreachable") from exc
+        finally:
+            with contextlib.suppress(OSError): Path(local_path).unlink()
+
+    async def _ensure_compatible(self, connection: SshConnection) -> None:
+        if connection.name in self._compatible_connections:
+            return
+        try:
+            await self._rpc(connection, self._COMPATIBILITY_OPERATION, {}, ensure_compatible=False)
+        except SshSupervisorRejectedError as exc:
+            if "invalid frame operation" not in str(exc):
+                raise
+            await self._bootstrap_supervisor(connection)
+            await self._rpc(connection, self._COMPATIBILITY_OPERATION, {}, ensure_compatible=False)
+        self._compatible_connections.add(connection.name)
+
+    async def _rpc(self, connection: SshConnection, operation: str, payload: Mapping[str, Any], *, ensure_compatible: bool = True) -> Mapping[str, Any]:
         # Never log connection coordinates, payload fields, or artifact data.
         if operation not in self._OPERATIONS:
             raise SshTransportError("unsupported SSH supervisor operation")
+        if ensure_compatible and operation != self._COMPATIBILITY_OPERATION:
+            await self._ensure_compatible(connection)
         logger.info("ssh_rpc started operation=%s connection=%s", operation, connection.name)
         if shutil.which("ssh") is None:
             logger.warning("ssh_rpc failed operation=%s connection=%s reason=no_client", operation, connection.name)
@@ -282,7 +350,13 @@ class OpenSshSupervisor:
         if not isinstance(response, Mapping) or response.get("ok") is not True:
             detail = str(response.get("error", ""))[:300] if isinstance(response, Mapping) else ""
             logger.warning("ssh_rpc failed operation=%s connection=%s reason=rejected detail=%s", operation, connection.name, detail)
-            raise SshTransportError("SSH supervisor rejected request" + (": " + detail if detail else ""))
+            error = "SSH supervisor rejected request" + (": " + detail if detail else "")
+            # A generic framed error can follow a started job (for example a
+            # failed status/tail RPC), so it remains transport-ambiguous. Only
+            # these validation paths are proven to precede remote work.
+            if operation == self._COMPATIBILITY_OPERATION or detail == "ValueError: invalid sync identity":
+                raise SshSupervisorRejectedError(error)
+            raise SshTransportError(error)
         logger.info("ssh_rpc completed operation=%s connection=%s", operation, connection.name)
         return response
 

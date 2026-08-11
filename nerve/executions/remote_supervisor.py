@@ -45,7 +45,7 @@ _FRAME_OPERATIONS = frozenset({
     "artifact_transfer_prepare_source", "artifact_transfer_receive",
     "artifact_transfer_status", "artifact_transfer_cancel",
     "artifact_transfer_cleanup", "status", "cancel", "tail", "files",
-    "reconcile_host",
+    "reconcile_host", "capabilities",
 })
 _PACK_OPERATIONS = frozenset({"sync", "artifact_put"})
 
@@ -838,6 +838,11 @@ def _reconcile_host(request: Mapping[str, Any]) -> dict[str, Any]:
     finally:
         lock.close()
 
+
+def _capabilities(request: Mapping[str, Any]) -> dict[str, Any]:
+    """Compatibility probe; no root, fence, or remote state is touched."""
+    return {"ok": True, "operations": sorted(_FRAME_OPERATIONS)}
+
 def _artifact_send(ident: str, root: str) -> None:
     directory=_transfer_dir(_safe_root(root),ident); state=json.loads((directory/"state.json").read_text())
     if state.get("role")!="source" or state.get("state")!="serving": raise SystemExit(1)
@@ -848,7 +853,7 @@ def rpc() -> None:
         request, pack = _decode_frame(sys.stdin.buffer.read())
         operation = request.pop("operation")
         request.pop("version")
-        handlers = {"start": _start, "spin_prepare": _spin_prepare, "status": _status, "cancel": _cancel, "tail": _tail, "files": _files, "artifact_get": _artifact_get, "ydb_publish": _ydb_publish, "artifact_transfer_prepare_destination": _artifact_transfer_prepare_destination, "artifact_transfer_prepare_source": _artifact_transfer_prepare_source, "artifact_transfer_receive": _artifact_transfer_receive, "artifact_transfer_status": _artifact_transfer_status, "artifact_transfer_cancel": _artifact_transfer_cancel, "artifact_transfer_cleanup": _artifact_transfer_cleanup, "reconcile_host": _reconcile_host}
+        handlers = {"start": _start, "spin_prepare": _spin_prepare, "status": _status, "cancel": _cancel, "tail": _tail, "files": _files, "artifact_get": _artifact_get, "ydb_publish": _ydb_publish, "artifact_transfer_prepare_destination": _artifact_transfer_prepare_destination, "artifact_transfer_prepare_source": _artifact_transfer_prepare_source, "artifact_transfer_receive": _artifact_transfer_receive, "artifact_transfer_status": _artifact_transfer_status, "artifact_transfer_cancel": _artifact_transfer_cancel, "artifact_transfer_cleanup": _artifact_transfer_cleanup, "reconcile_host": _reconcile_host, "capabilities": _capabilities}
         result = _sync(request, pack) if operation == "sync" else (_artifact_put(request, pack) if operation == "artifact_put" else handlers[operation](request))
     except Exception as exc:
         # Keep errors useful to the control plane without turning this fixed

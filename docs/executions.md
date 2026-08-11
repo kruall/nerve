@@ -335,6 +335,16 @@ particular, remote SPIN uses the metadata-only `spin_prepare` RPC before the
 normal fenced `start`; install the reviewed supervisor artifact before enabling
 remote SPIN on a host.
 
+Before its first RPC to a named SSH connection, Nerve probes the supervisor's
+fixed `capabilities` operation. An older worker that rejects that operation is
+bootstrapped automatically: Nerve uploads only its bundled standalone artifact
+through pinned SCP and atomically replaces only the configured
+`supervisor_path` with fixed `chmod` and `mv` argv. It never sends shell text or
+model-provided remote commands. Known pre-start validation rejections (for
+example an invalid snapshot identity) fail the Operation without quarantining
+its host; all other rejection, lost, or malformed transport remains ambiguous
+and is quarantined.
+
 The shipped `ydb.build` and `ydb.test` examples select only `ydb-build` and
 `ydb-test` pools. The test profile requires `GOOD` and final `Ok`, and rejects
 known build/test failure markers; a zero exit status alone is not success.

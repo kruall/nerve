@@ -25,7 +25,7 @@ from nerve.executions.backend import (
     NoResourceLeaseManager,
     ResourceLeaseManager,
 )
-from nerve.executions.ssh import SshTransportError
+from nerve.executions.ssh import SshSupervisorRejectedError, SshTransportError
 from nerve.executions.catalog import CompiledExecutionPlan, ExecutionCatalog
 from nerve.executions.public import public_execution
 from nerve.executions.ydb import snapshot as ydb_snapshot, validate_worktree
@@ -806,6 +806,17 @@ class ExecutionService:
                     execution_id,
                     status="failed",
                     result={"outcome": "failed", "summary": str(exc), "error": "remote_quiescence_unknown"},
+                )
+                await self._broadcast(execution_id)
+                if won:
+                    self._schedule_continuation(execution_id)
+        except SshSupervisorRejectedError as exc:
+            # A framed rejection is an authoritative statement that this RPC
+            # did not start remote work.  It must not poison a healthy host.
+            if not self._stopping:
+                won = await self.db.finish_execution(
+                    execution_id, status="failed",
+                    result={"outcome": "failed", "summary": str(exc), "error": "remote_request_rejected"},
                 )
                 await self._broadcast(execution_id)
                 if won:

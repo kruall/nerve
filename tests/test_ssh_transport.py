@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from nerve.executions import remote_supervisor
-from nerve.executions.ssh import OpenSshSupervisor, SshConnectionCatalog, SshTransportError
+from nerve.executions.ssh import OpenSshSupervisor, SshConnectionCatalog, SshSupervisorRejectedError, SshTransportError
 from nerve.executions.ssh import SshExecutionBackend
 
 
@@ -149,6 +149,46 @@ async def test_ssh_supervisor_operations_match_the_remote_frame_contract():
     with pytest.raises(SshTransportError, match="unsupported SSH supervisor operation"):
         # A typo or an unimplemented operation must not become an SSH request.
         await OpenSshSupervisor()._rpc(None, "spin_run", {})
+
+
+@pytest.mark.asyncio
+async def test_incompatible_supervisor_is_bootstrapped_once_before_the_request(monkeypatch):
+    supervisor = OpenSshSupervisor()
+    calls = []
+
+    async def rpc(_connection, operation, _payload, *, ensure_compatible=True):
+        calls.append((operation, ensure_compatible))
+        if operation == "capabilities" and len(calls) == 1:
+            raise SshSupervisorRejectedError("SSH supervisor rejected request: ValueError: invalid frame operation")
+        return {"ok": True}
+
+    async def bootstrap(_connection):
+        calls.append(("bootstrap", None))
+
+    monkeypatch.setattr(supervisor, "_rpc", rpc)
+    monkeypatch.setattr(supervisor, "_bootstrap_supervisor", bootstrap)
+    await supervisor._ensure_compatible(SimpleNamespace(name="worker"))
+    assert calls == [("capabilities", False), ("bootstrap", None), ("capabilities", False)]
+    await supervisor._ensure_compatible(SimpleNamespace(name="worker"))
+    assert calls == [("capabilities", False), ("bootstrap", None), ("capabilities", False)]
+
+
+@pytest.mark.asyncio
+async def test_deterministic_supervisor_rejection_is_not_a_transport_error(monkeypatch, tmp_path):
+    known = tmp_path / "known_hosts"; known.write_text("worker ssh-ed25519 AAAA\\n")
+    connection = SshConnectionCatalog({"ssh_connections": {"worker": {
+        "host": "127.0.0.1", "user": "worker", "known_hosts": str(known), "remote_roots": ["/srv/nerve"],
+    }}}).resolve("worker")
+
+    class Process:
+        returncode = 0
+        async def communicate(self, _request):
+            return OpenSshSupervisor._frame({"version": 1, "ok": False, "error": "invalid sync identity"}), b""
+
+    monkeypatch.setattr("nerve.executions.ssh.shutil.which", lambda _name: "/usr/bin/ssh")
+    monkeypatch.setattr("nerve.executions.ssh.asyncio.create_subprocess_exec", lambda *_args, **_kwargs: __import__("asyncio").sleep(0, result=Process()))
+    with pytest.raises(SshSupervisorRejectedError, match="invalid sync identity"):
+        await OpenSshSupervisor()._rpc(connection, "capabilities", {}, ensure_compatible=False)
 
 
 def test_remote_rpc_stdout_is_a_single_framed_response(monkeypatch):
