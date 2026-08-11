@@ -197,7 +197,8 @@ silently buffered in the control process.
 
 Local-to-remote uploads use the existing authenticated supervisor channel and
 are capped by the 4 GiB NRS1 binary-frame limit; the control process buffers
-that frame. Large benchmark artifacts should therefore use direct
+that frame. Upload timeouts scale with frame size at a conservative 1 MiB/s
+floor. Large benchmark artifacts should therefore use direct
 remote-to-remote transfer rather than staging through localhost.
 
 ## Session-sticky YDB builders

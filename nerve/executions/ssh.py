@@ -194,6 +194,7 @@ class OpenSshSupervisor:
     _MAGIC = b"NRS1"
     _MAX_HEADER = 64 * 1024
     _MAX_PACK = 4 * 1024 * 1024 * 1024
+    _UPLOAD_BYTES_PER_SECOND_FLOOR = 1024 * 1024
     # This must match remote_supervisor._FRAME_OPERATIONS.  Validate before
     # opening SSH so backend additions (for example a mistaken ``spin_run``)
     # fail locally rather than being misclassified as transport ambiguity.
@@ -210,6 +211,14 @@ class OpenSshSupervisor:
 
     def __init__(self) -> None:
         self._compatible_connections: set[str] = set()
+
+    @classmethod
+    def _rpc_timeout_seconds(cls, connection: SshConnection, frame_length: int) -> int:
+        """Keep large bounded NRS1 uploads from using the connect timeout."""
+        return max(
+            connection.connect_timeout_seconds + 30,
+            60 + (frame_length + cls._UPLOAD_BYTES_PER_SECOND_FLOOR - 1) // cls._UPLOAD_BYTES_PER_SECOND_FLOOR,
+        )
 
     @classmethod
     def _frame(cls, request: Mapping[str, Any], pack: bytes = b"") -> bytes:
@@ -353,7 +362,9 @@ class OpenSshSupervisor:
         proc = await asyncio.create_subprocess_exec(*connection.ssh_argv(), connection.supervisor_path, "rpc",
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(request), connection.connect_timeout_seconds + 30)
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(request), self._rpc_timeout_seconds(connection, len(request)),
+            )
         except (TimeoutError, OSError) as exc:
             proc.kill()
             await proc.wait()

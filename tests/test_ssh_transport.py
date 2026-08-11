@@ -128,6 +128,13 @@ def test_supervisor_and_client_share_four_gib_pack_limit():
     assert OpenSshSupervisor._MAX_PACK == remote_supervisor._MAX_PACK
 
 
+def test_supervisor_upload_timeout_scales_with_frame_size():
+    connection = SimpleNamespace(connect_timeout_seconds=20)
+    assert OpenSshSupervisor._rpc_timeout_seconds(connection, 0) == 60
+    assert OpenSshSupervisor._rpc_timeout_seconds(connection, 408 * 1024 * 1024) == 468
+    assert OpenSshSupervisor._rpc_timeout_seconds(connection, 4 * 1024 * 1024 * 1024) == 4156
+
+
 def test_reconcile_host_rejects_durable_active_job_and_transfer_lineages(tmp_path):
     root = tmp_path / "remote"; root.mkdir()
     job = root / ".nerve-jobs" / "job-active"; job.mkdir(parents=True)
