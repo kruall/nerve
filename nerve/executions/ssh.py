@@ -428,6 +428,7 @@ class SshExecutionBackend:
     async def provision_all_supervisors(self) -> dict[str, str]:
         """Best-effort startup rollout to every enabled configured host."""
         async def provision(host_id: str, host: Mapping[str, Any]) -> tuple[str, str]:
+            connection: SshConnection | None = None
             try:
                 connection = self.connections.resolve(str(host["connection_ref"]))
                 method = getattr(self.supervisor, "provision", None)
@@ -440,11 +441,15 @@ class SshExecutionBackend:
                 return host_id, "ready"
             except Exception as exc:
                 logger.warning("ssh_supervisor_provision failed host=%s error=%s", host_id, type(exc).__name__)
+                detail = str(exc)
+                if connection is not None:
+                    detail = detail.replace(connection.host, "<host>")
+                    detail = detail.replace(connection.user + "@", "<user>@")
                 database = getattr(self.inventory, "db", None)
                 if database is not None:
                     with contextlib.suppress(Exception):
                         await database.record_supervisor_provision(
-                            host_id, status="failed", error=type(exc).__name__,
+                            host_id, status="failed", error=detail or type(exc).__name__,
                         )
                 return host_id, "failed"
 

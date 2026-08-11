@@ -57,6 +57,23 @@ async def test_backend_provisions_every_enabled_host():
     ]
 
 
+@pytest.mark.asyncio
+async def test_backend_provision_failure_persists_redacted_detail():
+    async def fail(_connection):
+        raise SshTransportError("SSH supervisor bootstrap upload failed: host.example")
+
+    database = SimpleNamespace(record_supervisor_provision=AsyncMock())
+    inventory = SimpleNamespace(db=database, hosts={"host-a": {"connection_ref": "a"}})
+    connection = SimpleNamespace(host="host.example", user="nerve")
+    backend = SshExecutionBackend(inventory=inventory,
+                                  connections=SimpleNamespace(resolve=lambda _name: connection),
+                                  supervisor=SimpleNamespace(provision=fail))
+    assert await backend.provision_all_supervisors() == {"host-a": "failed"}
+    database.record_supervisor_provision.assert_awaited_once_with(
+        "host-a", status="failed", error="SSH supervisor bootstrap upload failed: <host>",
+    )
+
+
 def test_connection_catalog_requires_pinned_named_connection(tmp_path):
     known = tmp_path / "known_hosts"; known.write_text("worker ssh-ed25519 AAAA\n")
     catalog = SshConnectionCatalog({"ssh_connections": {"worker": {
