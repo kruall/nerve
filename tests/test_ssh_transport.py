@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import io
+import json
 import sys
 import time
 import struct
 import hashlib
 import base64
 import os
+from pathlib import Path
 from unittest.mock import AsyncMock, call
 from typing import Any
 from types import SimpleNamespace
@@ -469,6 +471,36 @@ def test_remote_supervisor_artifact_transfer_receive_uses_transfer_user_in_ssh_a
     assert response["ok"] is True
     assert "builder@192.0.2.55" in captured["argv"]
     assert all("nerve-transfer@" not in str(item) for item in map(str, captured["argv"]))
+
+
+def test_remote_supervisor_artifact_transfer_source_snapshots_before_serving(tmp_path, monkeypatch):
+    artifact_root = tmp_path / "artifacts"; artifact_root.mkdir()
+    source = artifact_root / "input.bin"; source.write_bytes(b"published-v1")
+    def fake_run(argv, **_kwargs):
+        key = Path(argv[argv.index("-f") + 1])
+        key.write_text("private")
+        key.with_suffix(".pub").write_text("ssh-ed25519 SOURCE_KEY")
+
+    class Process:
+        pid = 1234
+
+    monkeypatch.setattr(remote_supervisor.subprocess, "run", fake_run)
+    monkeypatch.setattr(remote_supervisor.subprocess, "Popen", lambda *args, **kwargs: Process())
+    monkeypatch.setattr(remote_supervisor.os, "getpgid", lambda _pid: 1234)
+    monkeypatch.setattr(remote_supervisor, "_wait_for_transfer_listener", lambda *_args: True)
+    request = {
+        "root": str(tmp_path), "artifact_root": "artifacts", "path": "input.bin",
+        "transfer_id": "transfer-snapshot", "lease_id": "lease-source", "fencing_token": 7,
+        "client_public_key": "ssh-ed25519 CLIENT_KEY", "transfer_user": "builder",
+        "bind_address": "192.0.2.10", "port": 31999, "sshd_path": "/usr/sbin/sshd",
+        "ssh_keygen_path": "/usr/bin/ssh-keygen", "supervisor_path": "/usr/local/bin/supervisor",
+    }
+    prepared = remote_supervisor._artifact_transfer_prepare_source(request)
+    source.write_bytes(b"published-v2")
+    state = json.loads((tmp_path / ".nerve-transfers" / "transfer-snapshot" / "state.json").read_text())
+    assert state["source"] != str(source)
+    assert state["size"] == len(b"published-v1")
+    assert state["sha256"] == prepared["sha256"] == hashlib.sha256(b"published-v1").hexdigest()
 
 
 def test_remote_supervisor_preserves_remote_account_identity(tmp_path, monkeypatch):

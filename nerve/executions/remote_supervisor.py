@@ -748,8 +748,19 @@ def _artifact_transfer_prepare_source(request: Mapping[str, Any]) -> dict[str, A
     root = _safe_root(str(request["root"])); directory = _transfer_dir(root, request.get("transfer_id")); source = _artifact_target(_artifact_root(request), request.get("path"))
     public, sshd, supervisor = request.get("client_public_key"), str(request.get("sshd_path")), str(request.get("supervisor_path"))
     transfer_user = _validate_unix_account(request.get("transfer_user"), "transfer_user")
-    if not source.is_file() or not isinstance(public, str) or not public.startswith("ssh-ed25519 ") or "\n" in public or not all(x.startswith("/") and ".." not in PurePosixPath(x).parts for x in (sshd, supervisor)): raise ValueError("invalid direct transfer setup")
+    if not source.is_file() or source.is_symlink() or not isinstance(public, str) or not public.startswith("ssh-ed25519 ") or "\n" in public or not all(x.startswith("/") and ".." not in PurePosixPath(x).parts for x in (sshd, supervisor)): raise ValueError("invalid direct transfer setup")
     address, port = str(request.get("bind_address")), int(request.get("port")); host_key, authorized, config = directory/"host_key", directory/"authorized_keys", directory/"sshd_config"
+    # The artifact may be replaced by a publisher after this RPC returns.  A
+    # digest of the live path is not a promise about the bytes that the
+    # forced helper will read later, so serve a private immutable snapshot.
+    snapshot_tmp = directory / ".source.tmp"
+    snapshot = directory / "source"
+    with source.open("rb") as input_stream, snapshot_tmp.open("wb") as output_stream:
+        shutil.copyfileobj(input_stream, output_stream)
+        output_stream.flush(); os.fsync(output_stream.fileno())
+    os.chmod(snapshot_tmp, 0o600)
+    snapshot_tmp.replace(snapshot)
+    size, sha256 = snapshot.stat().st_size, _stream_sha256(snapshot)
     subprocess.run([str(request.get("ssh_keygen_path") or "/usr/bin/ssh-keygen"), "-q", "-t", "ed25519", "-N", "", "-f", str(host_key)], check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     forced = " ".join(shlex.quote(value) for value in (
         supervisor, "artifact-send", str(request["transfer_id"]), str(root),
@@ -758,11 +769,11 @@ def _artifact_transfer_prepare_source(request: Mapping[str, Any]) -> dict[str, A
     config.write_text("\n".join(["Port "+str(port), "ListenAddress "+address, "HostKey "+str(host_key), "AuthorizedKeysFile "+str(authorized), "PidFile "+str(directory/"sshd.pid"), "AuthenticationMethods publickey", "PubkeyAuthentication yes", "PasswordAuthentication no", "KbdInteractiveAuthentication no", "PermitRootLogin prohibit-password", "PermitTTY no", "AllowUsers "+transfer_user, "ForceCommand "+forced, "DisableForwarding yes", "AllowTcpForwarding no", "AllowAgentForwarding no", "X11Forwarding no", "PermitTunnel no", "GatewayPorts no", "UsePAM no", "LogLevel ERROR"]) + "\n")
     proc = subprocess.Popen([sshd, "-D", "-f", str(config), "-E", str(directory/"sshd.log")], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     process_group = os.getpgid(proc.pid)
-    state={"role":"source", "state":"serving", "fencing_token":int(request["fencing_token"]), "pid":proc.pid, "process_group":process_group, "source":str(source), "size":source.stat().st_size, "sha256":_stream_sha256(source), "transfer_user":transfer_user}; _transfer_save(directory,state)
+    state={"role":"source", "state":"serving", "fencing_token":int(request["fencing_token"]), "pid":proc.pid, "process_group":process_group, "source":str(snapshot), "size":size, "sha256":sha256, "transfer_user":transfer_user}; _transfer_save(directory,state)
     if not _wait_for_transfer_listener(address, port, process_group):
         _kill_process_group(process_group, 0)
         raise RuntimeError("direct transfer source did not start listening")
-    return {"ok":True,"address":address,"port":port,"host_public_key":host_key.with_suffix(".pub").read_text().strip(),"size":state["size"],"sha256":state["sha256"],"transfer_user":transfer_user}
+    return {"ok":True,"address":address,"port":port,"host_public_key":host_key.with_suffix(".pub").read_text().strip(),"size":size,"sha256":sha256,"transfer_user":transfer_user}
 
 def _artifact_transfer_receive(request: Mapping[str, Any]) -> dict[str, Any]:
     directory,state=_transfer_load(request)
