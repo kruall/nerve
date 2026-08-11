@@ -76,16 +76,20 @@ def snapshot(worktree: Path) -> dict[str, str | bytes]:
             # while respecting .gitignore, but writes only the temporary index.
             _git(worktree, "add", "-A", env=env)
             tree = _git(worktree, "write-tree", env=env).decode().strip()
-        commit = _git(worktree, "commit-tree", tree, "-p", head,
+        base = _git(worktree, "commit-tree", _git(worktree, "rev-parse", "HEAD^{tree}").decode().strip(),
+                    input=b"Nerve YDB base\n", env=env).decode().strip()
+        # Keep the materialized snapshot as a root commit.  This makes the
+        # checkout self-contained once its tree is present, without requiring
+        # every ancestor of HEAD on a newly selected builder.
+        commit = _git(worktree, "commit-tree", tree,
                       input=b"Nerve YDB snapshot\n", env=env).decode().strip()
         pack = _git(worktree, "pack-objects", "--thin", "--stdout", "--revs",
-                    input=(commit + "\n^" + head + "\n").encode(), env=env)
-        # Include HEAD's complete reachable history.  The snapshot commit has
-        # HEAD as parent, so Git's connectivity check must be able to follow
-        # that ancestry on an empty builder cache.
+                    input=(commit + "\n^" + base + "\n").encode(), env=env)
+        # The parentless base commit retains all HEAD tree objects while
+        # omitting the repository's unrelated commit history.
         base_pack = _git(worktree, "pack-objects", "--stdout", "--revs",
-                         input=(head + "\n").encode())
+                         input=(base + "\n").encode(), env=env)
     # The pack deliberately remains bytes.  The caller persists it outside the
     # JSON execution plan and sends it in the SSH binary frame.
-    return {"head": head, "snapshot_id": commit, "pack": pack,
+    return {"head": head, "base_id": base, "snapshot_id": commit, "pack": pack,
             "base_pack": base_pack}

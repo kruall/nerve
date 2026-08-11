@@ -56,8 +56,9 @@ def test_snapshot_pack_is_delta_only_not_repository_history(tmp_path):
     assert isinstance(pack, bytes)
     assert len(pack) < 2000
     cache = tmp_path / "cache"; _git(repo, "clone", "--bare", str(repo), str(cache))
+    _git(cache, "index-pack", "--stdin", "--fix-thin", input=result["base_pack"])
     _git(cache, "index-pack", "--stdin", "--fix-thin", input=pack)
-    commits = _git(cache, "rev-list", result["snapshot_id"], "--not", result["head"]).stdout.splitlines()
+    commits = _git(cache, "rev-list", result["snapshot_id"]).stdout.splitlines()
     assert commits == [result["snapshot_id"].encode()]
 
 

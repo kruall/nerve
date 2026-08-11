@@ -341,9 +341,12 @@ def _sync(request: Mapping[str, Any], pack: bytes) -> dict[str, Any]:
         raise ValueError("invalid sync identity")
     ident = str(snapshot.get("snapshot_id") or "")
     head = str(snapshot.get("head") or "")
+    base_id = str(snapshot.get("base_id") or head)
     if len(ident) not in {40, 64} or any(c not in "0123456789abcdef" for c in ident):
         raise ValueError("invalid snapshot")
     if len(head) not in {40, 64} or any(c not in "0123456789abcdef" for c in head):
+        raise ValueError("invalid snapshot base")
+    if len(base_id) not in {40, 64} or any(c not in "0123456789abcdef" for c in base_id):
         raise ValueError("invalid snapshot base")
     if not isinstance(pack, bytes) or len(pack) > _MAX_PACK:
         raise ValueError("invalid sync pack")
@@ -375,15 +378,15 @@ def _sync(request: Mapping[str, Any], pack: bytes) -> dict[str, Any]:
         if not cache.exists():
             subprocess.run(["git", "init", "--bare", str(cache)], check=True,
                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        base = subprocess.run(["git", "--git-dir", str(cache), "cat-file", "-e", head + "^{commit}"], stderr=subprocess.DEVNULL)
+        base = subprocess.run(["git", "--git-dir", str(cache), "cat-file", "-e", base_id + "^{commit}"], stderr=subprocess.DEVNULL)
         if base.returncode:
             if not base_pack:
                 raise ValueError("remote YDB object cache lacks requested base HEAD")
             subprocess.run(["git", "--git-dir", str(cache), "index-pack", "--stdin", "--fix-thin", "--keep"],
                            input=base_pack, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-            base = subprocess.run(["git", "--git-dir", str(cache), "cat-file", "-e", head + "^{commit}"], stderr=subprocess.DEVNULL)
+            base = subprocess.run(["git", "--git-dir", str(cache), "cat-file", "-e", base_id + "^{commit}"], stderr=subprocess.DEVNULL)
             if base.returncode:
-                raise ValueError("automatic YDB cache provisioning did not contain requested base HEAD")
+                raise ValueError("automatic YDB cache provisioning did not contain requested base tree")
         subprocess.run(["git", "--git-dir", str(cache), "index-pack", "--stdin", "--fix-thin", "--keep"],
                        input=pack, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         subprocess.run(["git", "--git-dir", str(cache), "fsck", "--connectivity-only", ident],
