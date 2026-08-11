@@ -235,6 +235,27 @@ async def test_supervisor_with_stale_pack_limit_is_bootstrapped(monkeypatch):
     monkeypatch.setattr(supervisor, "_bootstrap_supervisor", bootstrap)
     await supervisor._ensure_compatible(SimpleNamespace(name="worker"))
     assert calls == [("capabilities", False), ("bootstrap", None), ("capabilities", False)]
+
+
+@pytest.mark.asyncio
+async def test_missing_configured_supervisor_is_bootstrapped(monkeypatch):
+    supervisor = OpenSshSupervisor()
+    calls = []
+    connection = SimpleNamespace(name="worker", supervisor_path="/srv/nerve/supervisor")
+
+    async def rpc(_connection, operation, _payload, *, ensure_compatible=True):
+        calls.append((operation, ensure_compatible))
+        if operation == "capabilities" and len(calls) == 1:
+            raise SshTransportError("SSH supervisor request failed: /srv/nerve/supervisor: No such file or directory")
+        return {"ok": True, "max_pack": OpenSshSupervisor._MAX_PACK}
+
+    async def bootstrap(_connection):
+        calls.append(("bootstrap", None))
+
+    monkeypatch.setattr(supervisor, "_rpc", rpc)
+    monkeypatch.setattr(supervisor, "_bootstrap_supervisor", bootstrap)
+    await supervisor._ensure_compatible(connection)
+    assert calls == [("capabilities", False), ("bootstrap", None), ("capabilities", False)]
     await supervisor._ensure_compatible(SimpleNamespace(name="worker"))
     assert calls == [("capabilities", False), ("bootstrap", None), ("capabilities", False)]
 

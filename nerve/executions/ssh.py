@@ -300,6 +300,14 @@ class OpenSshSupervisor:
                 raise
             await self._bootstrap_supervisor(connection)
             reply = await self._rpc(connection, self._COMPATIBILITY_OPERATION, {}, ensure_compatible=False)
+        except SshTransportError as exc:
+            # The configured path is reviewed. A shell-level ENOENT for that
+            # exact path means the supervisor was not deployed yet; bootstrap
+            # it rather than treating a first-use host as unreachable.
+            if connection.supervisor_path not in str(exc) or "No such file or directory" not in str(exc):
+                raise
+            await self._bootstrap_supervisor(connection)
+            reply = await self._rpc(connection, self._COMPATIBILITY_OPERATION, {}, ensure_compatible=False)
         if reply.get("max_pack") != self._MAX_PACK:
             await self._bootstrap_supervisor(connection)
             reply = await self._rpc(connection, self._COMPATIBILITY_OPERATION, {}, ensure_compatible=False)
