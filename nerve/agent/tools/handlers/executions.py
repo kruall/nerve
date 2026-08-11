@@ -29,7 +29,9 @@ from nerve.agent.tools.schemas import (
     SPIN_VERIFY_REMOTE_SCHEMA, SPIN_REPLAY_REMOTE_SCHEMA,
 )
 from nerve.executions import ExecutionCatalog, OperationValidationError
+from nerve.executions.ydb import YdbWorktreeError
 from nerve.executions.public import DEFAULT_LOG_TAIL_LINES, public_execution, public_log_tail
+from nerve.resources import ResourceInventoryError
 
 logger = logging.getLogger(__name__)
 
@@ -141,9 +143,15 @@ async def _ydb_handler(ctx: ToolContext, args: dict, kind: str) -> ToolResult:
                                           auto_continue=bool(args.get("detached", False)))
         if not bool(args.get("detached", False)):
             started = await service.join_execution(execution_id=str(started["id"]), session_id=ctx.session_id)
+    except (YdbWorktreeError, ResourceInventoryError) as exc:
+        # These errors are produced from fixed local validation and lease state;
+        # unlike arbitrary backend failures, their text cannot include argv or
+        # other execution secrets and is actionable for the caller.
+        logger.warning("YDB operation rejected: %s", exc)
+        return ToolResult.text("Could not start YDB operation: {}".format(exc), is_error=True)
     except Exception as exc:
-        logger.warning("YDB operation rejected (%s)", type(exc).__name__)
-        return ToolResult.text("Could not start YDB operation: worktree or reviewed YDB service rejected the request.", is_error=True)
+        logger.warning("YDB operation rejected (%s)", type(exc).__name__, exc_info=True)
+        return ToolResult.text("Could not start YDB operation: reviewed YDB service rejected the request ({}).".format(type(exc).__name__), is_error=True)
     return _json({"kind": kind, "execution": public_execution(started)})
 
 
