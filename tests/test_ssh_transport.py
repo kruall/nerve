@@ -222,6 +222,21 @@ def test_reconcile_host_ignores_unreadable_and_stale_lineages(tmp_path):
     assert reply == {"ok": True, "quiescent": True, "generation": 1}
 
 
+def test_reconcile_host_force_cancels_known_live_job(tmp_path, monkeypatch):
+    root = tmp_path / "remote"; root.mkdir()
+    job = root / ".nerve-jobs" / "job-active"; job.mkdir(parents=True)
+    job.joinpath("state.json").write_text('{"state":"running","process_group":42}')
+    alive = {42: True}
+    monkeypatch.setattr(remote_supervisor, "_alive", lambda pgid: alive.get(pgid, False))
+    monkeypatch.setattr(remote_supervisor, "_kill_process_group", lambda pgid, grace: not alive.pop(pgid))
+
+    reply = remote_supervisor._reconcile_host({
+        "root": str(root), "recovery_generation": 1, "force_cancel": True,
+    })
+
+    assert reply == {"ok": True, "quiescent": True, "generation": 1}
+
+
 @pytest.mark.asyncio
 async def test_ssh_supervisor_operations_match_the_remote_frame_contract():
     assert OpenSshSupervisor._OPERATIONS == remote_supervisor._FRAME_OPERATIONS

@@ -70,6 +70,7 @@ async def recover(ctx: ToolContext, args: dict) -> ToolResult:
     try:
         host = await _service(ctx).recover_host(
             host_id=host_id, requested_by=f"session:{ctx.session_id}",
+            force_cancel=bool(args.get("force_cancel")),
         )
     except Exception:
         return ToolResult.text("Host recovery was rejected.", is_error=True)
@@ -209,7 +210,7 @@ RESOURCE_SPECS = [
     ToolSpec("resource_leases", "List current and historical fenced leases and queued requests.", RESOURCE_EMPTY_SCHEMA, leases),
     ToolSpec("resource_host_drain", "Drain or un-drain a host after confirming its id.", RESOURCE_DRAIN_SCHEMA, drain),
     ToolSpec("resource_host_quarantine", "Quarantine a host globally across every pool after confirming its id.", RESOURCE_QUARANTINE_SCHEMA, quarantine),
-    ToolSpec("resource_host_recover", "Recover a quarantined host only after supervisor proof of quiescence.", RESOURCE_RECOVER_SCHEMA, recover),
+    ToolSpec("resource_host_recover", "Recover a quarantined host after supervisor proof of quiescence; force_cancel terminates known remote work first.", RESOURCE_RECOVER_SCHEMA, recover),
     ToolSpec("resource_host_permanently_unavailable", "Authoritatively permanently lose an exact confirmed host.", RESOURCE_PERMANENT_LOSS_SCHEMA, permanently_lose),
     ToolSpec("resource_diagnostics", "Inspect resource state and durable lease audit events.", RESOURCE_DIAGNOSTICS_SCHEMA, diagnostics),
     ToolSpec("resource_handle_acquire", "Retain one atomic bundle of pooled or exact-host handles; detached waits resume durably.", RESOURCE_HANDLE_ACQUIRE_SCHEMA, handle_acquire),

@@ -479,14 +479,14 @@ class SshExecutionBackend:
         results = await asyncio.gather(*(provision(host_id, host) for host_id, host in hosts))
         return dict(results)
 
-    async def reconcile_host(self, host_id: str, generation: int) -> bool:
+    async def reconcile_host(self, host_id: str, generation: int, *, force_cancel: bool = False) -> bool:
         """Require every configured supervisor root to prove its host lock idle."""
         host = self.inventory.hosts.get(host_id)
         if host is None:
             return False
         connection = self.connections.resolve(str(host["connection_ref"]))
         replies = await asyncio.gather(*(self.supervisor.reconcile_host(connection, {
-            "root": root, "recovery_generation": generation,
+            "root": root, "recovery_generation": generation, "force_cancel": force_cancel,
         }) for root in connection.remote_roots))
         return bool(replies) and all(reply.get("quiescent") is True and int(reply.get("generation", -1)) == generation for reply in replies)
 

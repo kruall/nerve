@@ -1264,10 +1264,28 @@ class LeaseService:
         assert current is not None
         return current
     async def recover_host(self, *, host_id: str, requested_by: str,
-                           remote_quiescence_confirmed: bool | None = None) -> Mapping[str, Any]:
+                           remote_quiescence_confirmed: bool | None = None,
+                           force_cancel: bool = False) -> Mapping[str, Any]:
         """Manual recovery is the same fenced path as periodic reconciliation."""
         if remote_quiescence_confirmed:
             return await self.db.recover_resource_host(host_id)
+        if force_cancel:
+            if self._recovery_probe is None:
+                raise ResourceInventoryError("remote supervisor is unavailable")
+            claim = await self.db.claim_host_recovery(host_id, lease_seconds=self._recovery_claim_seconds)
+            if claim is None:
+                raise ResourceInventoryError("host recovery is already in progress")
+            try:
+                quiescent = bool(await self._recovery_probe(
+                    host_id, int(claim["recovery_generation"]), force_cancel=True,
+                ))
+            except Exception as exc:
+                await self.db.fail_host_recovery(host_id, int(claim["recovery_generation"]))
+                raise ResourceInventoryError("remote supervisor force cancellation failed") from exc
+            if not quiescent:
+                await self.db.fail_host_recovery(host_id, int(claim["recovery_generation"]))
+                raise ResourceInventoryError("remote supervisor still has active work")
+            return await self.db.complete_host_recovery(host_id, int(claim["recovery_generation"]))
         result = await self._recover_host_once(host_id)
         if result is None:
             raise ResourceInventoryError("remote supervisor did not prove host quiescence")

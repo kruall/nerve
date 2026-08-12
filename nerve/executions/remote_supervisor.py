@@ -882,10 +882,30 @@ def _artifact_transfer_cancel(request: Mapping[str, Any]) -> dict[str, Any]: ret
 def _artifact_transfer_status(request: Mapping[str, Any]) -> dict[str, Any]:
     _,state=_transfer_load(request); return {"ok":True,"state":state.get("state"),"quiescent":state.get("state") in {"succeeded","cleaned","cancelled"}, **({"error": state["error"]} if isinstance(state.get("error"), str) else {})}
 
+def _force_stop_lineages(root: Path) -> None:
+    """Terminate every known live process group below one quarantined root."""
+    for parent, states in ((root / ".nerve-jobs", {"running"}),
+                           (root / ".nerve-transfers", {"serving", "receiving"})):
+        if not parent.is_dir():
+            continue
+        for directory in parent.iterdir():
+            try:
+                state = json.loads((directory / "state.json").read_text())
+                if state.get("state") not in states:
+                    continue
+                process_group = state.get("process_group", state.get("pid"))
+                if isinstance(process_group, int) and _alive(process_group):
+                    _kill_process_group(process_group, 0)
+            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+                continue
+
+
 def _reconcile_host(request: Mapping[str, Any]) -> dict[str, Any]:
     """Fenced host-wide check that rejects only known live work."""
     root = _safe_root(str(request["root"])); root.mkdir(parents=True, exist_ok=True)
     generation = int(request["recovery_generation"])
+    if request.get("force_cancel") is True:
+        _force_stop_lineages(root)
     fence = root / ".nerve-recovery-fence.json"
     if fence.exists() and int(json.loads(fence.read_text()).get("generation", -1)) > generation:
         raise PermissionError("stale recovery generation")
