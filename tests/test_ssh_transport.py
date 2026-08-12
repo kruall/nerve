@@ -197,6 +197,19 @@ def test_supervisor_upload_timeout_scales_with_frame_size():
     assert OpenSshSupervisor._rpc_timeout_seconds(connection, 4 * 1024 * 1024 * 1024) == 4156
 
 
+@pytest.mark.asyncio
+async def test_provision_replaces_compatible_supervisor(monkeypatch):
+    supervisor = OpenSshSupervisor()
+    connection = SimpleNamespace(name="worker")
+    bootstrap = AsyncMock()
+    monkeypatch.setattr(supervisor, "_bootstrap_supervisor", bootstrap)
+
+    await supervisor.provision(connection)
+
+    bootstrap.assert_awaited_once_with(connection)
+    assert "worker" in supervisor._compatible_connections
+
+
 def test_reconcile_host_rejects_durable_active_job_and_transfer_lineages(tmp_path):
     root = tmp_path / "remote"; root.mkdir()
     job = root / ".nerve-jobs" / "job-active"; job.mkdir(parents=True)

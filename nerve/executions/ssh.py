@@ -322,8 +322,9 @@ class OpenSshSupervisor:
         self._compatible_connections.add(connection.name)
 
     async def provision(self, connection: SshConnection) -> None:
-        """Install or update the reviewed supervisor before remote work."""
-        await self._ensure_compatible(connection)
+        """Replace the remote supervisor with the current reviewed artifact."""
+        await self._bootstrap_supervisor(connection)
+        self._compatible_connections.add(connection.name)
 
     async def _rpc(self, connection: SshConnection, operation: str, payload: Mapping[str, Any], *, ensure_compatible: bool = True) -> Mapping[str, Any]:
         # Never log connection coordinates, payload fields, or artifact data.
