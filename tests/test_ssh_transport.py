@@ -210,6 +210,18 @@ def test_reconcile_host_rejects_durable_active_job_and_transfer_lineages(tmp_pat
     assert reply["quiescent"] is False and reply["lineage"] == "transfer"
 
 
+def test_reconcile_host_ignores_unreadable_and_stale_lineages(tmp_path):
+    root = tmp_path / "remote"; root.mkdir()
+    job = root / ".nerve-jobs" / "job-stale"; job.mkdir(parents=True)
+    job.joinpath("state.json").write_text("not json")
+    transfer = root / ".nerve-transfers" / "transfer-stale"; transfer.mkdir(parents=True)
+    transfer.joinpath("state.json").write_text('{"state":"serving"}')
+
+    reply = remote_supervisor._reconcile_host({"root": str(root), "recovery_generation": 1})
+
+    assert reply == {"ok": True, "quiescent": True, "generation": 1}
+
+
 @pytest.mark.asyncio
 async def test_ssh_supervisor_operations_match_the_remote_frame_contract():
     assert OpenSshSupervisor._OPERATIONS == remote_supervisor._FRAME_OPERATIONS

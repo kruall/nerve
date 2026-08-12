@@ -883,7 +883,7 @@ def _artifact_transfer_status(request: Mapping[str, Any]) -> dict[str, Any]:
     _,state=_transfer_load(request); return {"ok":True,"state":state.get("state"),"quiescent":state.get("state") in {"succeeded","cleaned","cancelled"}, **({"error": state["error"]} if isinstance(state.get("error"), str) else {})}
 
 def _reconcile_host(request: Mapping[str, Any]) -> dict[str, Any]:
-    """Fenced host-wide proof over every durable job and transfer lineage."""
+    """Fenced host-wide check that rejects only known live work."""
     root = _safe_root(str(request["root"])); root.mkdir(parents=True, exist_ok=True)
     generation = int(request["recovery_generation"])
     fence = root / ".nerve-recovery-fence.json"
@@ -898,9 +898,9 @@ def _reconcile_host(request: Mapping[str, Any]) -> dict[str, Any]:
         temporary = fence.with_suffix(".tmp")
         temporary.write_text(json.dumps({"generation": generation}))
         temporary.replace(fence)
-        # A free lock alone is not proof: completed RPCs leave detached job and
-        # direct-transfer process groups behind.  Reconcile their durable state
-        # while holding the same lock used by start's monitor lineage.
+        # A free lock alone does not rule out detached work.  Inspect durable
+        # lineages while holding the same lock used by start's monitor lineage,
+        # but only reject a recovery when a process is known to be alive.
         jobs = root / ".nerve-jobs"
         if jobs.is_dir():
             for directory in jobs.iterdir():
@@ -910,8 +910,9 @@ def _reconcile_host(request: Mapping[str, Any]) -> dict[str, Any]:
                     if state.get("state") == "running" and _alive(int(state["process_group"])):
                         return {"ok": True, "quiescent": False, "lineage": "job"}
                 except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
-                    # An unreadable lineage is uncertainty, never quiescence.
-                    return {"ok": True, "quiescent": False, "lineage": "job-unknown"}
+                    # A stale or unreadable record is not evidence of live
+                    # work.  Recovery blocks only known active processes.
+                    continue
         transfers = root / ".nerve-transfers"
         if transfers.is_dir():
             for directory in transfers.iterdir():
@@ -921,10 +922,8 @@ def _reconcile_host(request: Mapping[str, Any]) -> dict[str, Any]:
                     process_group = state.get("process_group", state.get("pid"))
                     if state.get("state") in {"serving", "receiving"} and isinstance(process_group, int) and _alive(process_group):
                         return {"ok": True, "quiescent": False, "lineage": "transfer"}
-                    if state.get("state") in {"serving", "receiving"}:
-                        return {"ok": True, "quiescent": False, "lineage": "transfer-unknown"}
                 except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
-                    return {"ok": True, "quiescent": False, "lineage": "transfer-unknown"}
+                    continue
         return {"ok": True, "quiescent": True, "generation": generation}
     finally:
         lock.close()
