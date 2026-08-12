@@ -205,7 +205,7 @@ RESOURCE_RECOVER_SCHEMA = {
     "properties": {
         "host_id": {"type": "string"},
         "confirm_host_id": {"type": "string"},
-        "force_cancel": {"type": "boolean", "default": false},
+        "force_cancel": {"type": "boolean", "default": False},
     },
     "required": ["host_id", "confirm_host_id"],
     "additionalProperties": False,
