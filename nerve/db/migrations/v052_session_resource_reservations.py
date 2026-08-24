@@ -1,4 +1,4 @@
-"""V50: Durable, session-scoped reservations over the existing host lease pool."""
+"""V52: Durable, session-scoped reservations over the existing host lease pool."""
 import aiosqlite
 
 SQL = """

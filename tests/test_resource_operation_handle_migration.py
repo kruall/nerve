@@ -1,4 +1,4 @@
-"""Focused contract tests for V53-V56 retained-resource persistence."""
+"""Focused contract tests for V55-V58 retained-resource persistence."""
 
 import importlib
 
@@ -33,27 +33,27 @@ async def _schema(db: aiosqlite.Connection) -> dict[str, str]:
     return {name: " ".join(sql.split()) for name, sql in rows if sql}
 
 
-async def _apply_through_v52(db: aiosqlite.Connection) -> None:
+async def _apply_through_v54(db: aiosqlite.Connection) -> None:
     for version, module_name in runner.discover_migrations():
-        if version > 52:
+        if version > 54:
             break
         await importlib.import_module(f"nerve.db.migrations.{module_name}").up(db)
         await db.execute("INSERT INTO schema_version(version) VALUES (?)", (version,))
         await db.commit()
 
 
-async def _apply_through_v57(db: aiosqlite.Connection) -> None:
+async def _apply_through_v59(db: aiosqlite.Connection) -> None:
     for version, module_name in runner.discover_migrations():
-        if version > 57:
+        if version > 59:
             break
         await importlib.import_module(f"nerve.db.migrations.{module_name}").up(db)
         await db.execute("INSERT INTO schema_version(version) VALUES (?)", (version,))
         await db.commit()
 
 
-async def _apply_through_v58(db: aiosqlite.Connection) -> None:
+async def _apply_through_v60(db: aiosqlite.Connection) -> None:
     for version, module_name in runner.discover_migrations():
-        if version > 58:
+        if version > 60:
             break
         await importlib.import_module(f"nerve.db.migrations.{module_name}").up(db)
         await db.execute("INSERT INTO schema_version(version) VALUES (?)", (version,))
@@ -90,16 +90,16 @@ async def _legacy_snapshot(db: aiosqlite.Connection) -> tuple[tuple, tuple, tupl
 
 
 @pytest.mark.asyncio
-async def test_v062_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp_path):
+async def test_v065_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp_path):
     fresh = await aiosqlite.connect(tmp_path / "fresh.db")
     upgraded = await aiosqlite.connect(tmp_path / "upgrade.db")
     try:
         await runner.run_migrations(fresh)
-        await _apply_through_v52(upgraded)
+        await _apply_through_v54(upgraded)
         await _legacy_rows(upgraded)
         legacy_before = await _legacy_snapshot(upgraded)
 
-        assert await runner.run_migrations(upgraded) == 62
+        assert await runner.run_migrations(upgraded) == 65
         fresh_schema = await _schema(fresh)
         assert fresh_schema == await _schema(upgraded)
         assert (await (await fresh.execute("SELECT next_ticket FROM resource_wait_allocator")).fetchone())[0] == 1
@@ -107,7 +107,7 @@ async def test_v062_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp
         columns = {row[1] for row in await (await fresh.execute("PRAGMA table_info(resource_hosts)")).fetchall()}
         assert {"recovery_generation", "recovery_claimed_generation", "permanently_unavailable", "recovery_claim_state", "recovery_claim_expires_at", "recovery_retry_at", "supervisor_provisioned_at", "supervisor_provision_status", "supervisor_provision_error"} <= columns
         assert "idx_resource_hosts_recovery_claim" in fresh_schema
-        # V057/V058 only append defaulted columns; legacy values stay intact.
+        # V059/V060 only append defaulted columns; legacy values stay intact.
         after = await _legacy_snapshot(upgraded)
         assert after[0] == legacy_before[0] and after[2] == legacy_before[2]
         assert after[1][:len(legacy_before[1])] == legacy_before[1]
@@ -134,12 +134,12 @@ async def test_v062_fresh_and_upgrade_schemas_match_and_preserve_legacy_rows(tmp
 
 
 @pytest.mark.asyncio
-async def test_v058_backfills_deterministic_ref_positions_and_enforces_order_uniqueness(tmp_path):
-    db = await aiosqlite.connect(tmp_path / "v057.db")
+async def test_v060_backfills_deterministic_ref_positions_and_enforces_order_uniqueness(tmp_path):
+    db = await aiosqlite.connect(tmp_path / "v059.db")
     try:
-        await _apply_through_v57(db)
+        await _apply_through_v59(db)
         # Foreign-key enforcement is intentionally immaterial to this schema
-        # migration; V058 must deterministically order every historical row.
+        # migration; V060 must deterministically order every historical row.
         await db.executemany(
             "INSERT INTO operation_resource_refs(operation_id, handle_id, created_at) VALUES (?, ?, ?)",
             [
@@ -149,7 +149,7 @@ async def test_v058_backfills_deterministic_ref_positions_and_enforces_order_uni
             ],
         )
         await db.commit()
-        migration = importlib.import_module("nerve.db.migrations.v058_ordered_operation_resource_refs")
+        migration = importlib.import_module("nerve.db.migrations.v060_ordered_operation_resource_refs")
         await migration.up(db)
         rows = await (await db.execute(
             "SELECT handle_id, position FROM operation_resource_refs WHERE operation_id='operation-a' ORDER BY position",
@@ -164,10 +164,10 @@ async def test_v058_backfills_deterministic_ref_positions_and_enforces_order_uni
 
 
 @pytest.mark.asyncio
-async def test_v059_removes_terminal_refs_before_installing_handle_fence(tmp_path):
+async def test_v061_removes_terminal_refs_before_installing_handle_fence(tmp_path):
     db = await aiosqlite.connect(tmp_path / "terminal-refs.db")
     try:
-        await _apply_through_v58(db)
+        await _apply_through_v60(db)
         await db.execute(
             "INSERT INTO sessions(id, title, created_at, updated_at) VALUES ('s', 's', 'now', 'now')"
         )
@@ -187,7 +187,7 @@ async def test_v059_removes_terminal_refs_before_installing_handle_fence(tmp_pat
         )
         await db.commit()
 
-        migration = importlib.import_module("nerve.db.migrations.v059_concurrent_operation_handles")
+        migration = importlib.import_module("nerve.db.migrations.v061_concurrent_operation_handles")
         await migration.up(db)
 
         refs = await (await db.execute(
@@ -207,24 +207,24 @@ async def test_v059_removes_terminal_refs_before_installing_handle_fence(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_v55_backfills_pending_waits_and_queued_bundle_with_unique_tickets(tmp_path):
+async def test_v57_backfills_pending_waits_and_queued_bundle_with_unique_tickets(tmp_path):
     db = await aiosqlite.connect(tmp_path / "backfill.db")
     try:
-        await _apply_through_v52(db)
+        await _apply_through_v54(db)
         for ident in ("s", "ordinary"):
             await db.execute("INSERT INTO sessions(id, title, created_at, updated_at) VALUES (?, ?, 'now', 'now')", (ident, ident))
         for ident, session in (("wait-op", "s"), ("ordinary-op", "ordinary")):
             await db.execute("""INSERT INTO executions(id, session_id, kind, profile_version, profile_hash, profile_snapshot, plan, status, created_at, queued_at, updated_at)
                               VALUES (?, ?, 'remote', '1', 'h', '{}', '{}', 'queued', 'now', 'now', 'now')""", (ident, session))
-        await importlib.import_module("nerve.db.migrations.v053_resource_operation_handles").up(db)
-        await importlib.import_module("nerve.db.migrations.v054_resource_wait_outcomes").up(db)
+        await importlib.import_module("nerve.db.migrations.v055_resource_operation_handles").up(db)
+        await importlib.import_module("nerve.db.migrations.v056_resource_wait_outcomes").up(db)
         await db.execute("""INSERT INTO resource_wait_operations(id, session_id, operation_id, request_kind, requested_hosts_json, pool, queue_ticket, state, created_at, updated_at)
                           VALUES ('wait', 's', 'wait-op', 'host', '[{"pool":"p","host":"a"}]', 'p', 99, 'pending', '2000', '2000')""")
         await db.execute("INSERT INTO resource_lease_bundles(id, execution_id, session_id, state, requested_at) VALUES ('bundle', 'ordinary-op', 'ordinary', 'queued', '2001')")
         for ident in ("r1", "r2"):
             await db.execute("""INSERT INTO resource_lease_requests(id, execution_id, session_id, slot, pool, mode, state, requested_at, bundle_id)
                               VALUES (?, 'ordinary-op', 'ordinary', ?, 'p', 'exclusive', 'queued', '2001', 'bundle')""", (ident, ident))
-        await importlib.import_module("nerve.db.migrations.v055_resource_wait_fair_queue").up(db)
+        await importlib.import_module("nerve.db.migrations.v057_resource_wait_fair_queue").up(db)
         tickets = await (await db.execute("SELECT DISTINCT queue_ticket FROM resource_lease_requests WHERE bundle_id='bundle'")).fetchall()
         wait_ticket = (await (await db.execute("SELECT queue_ticket FROM resource_wait_operations WHERE id='wait'")).fetchone())[0]
         next_ticket = (await (await db.execute("SELECT next_ticket FROM resource_wait_allocator")).fetchone())[0]
@@ -234,12 +234,12 @@ async def test_v55_backfills_pending_waits_and_queued_bundle_with_unique_tickets
 
 
 @pytest.mark.asyncio
-async def test_v56_backfills_exact_host_and_reattaches_queued_bundle(tmp_path):
+async def test_v58_backfills_exact_host_and_reattaches_queued_bundle(tmp_path):
     database = Database(tmp_path / "restart.db")
     try:
         await database.connect()
         await database.db.execute("ALTER TABLE resource_lease_requests DROP COLUMN requested_host")
-        await database.db.execute("DELETE FROM schema_version WHERE version=56")
+        await database.db.execute("DELETE FROM schema_version WHERE version=58")
         await database.db.commit()
 
         await database.create_session("session-1")
@@ -269,7 +269,7 @@ async def test_v56_backfills_exact_host_and_reattaches_queued_bundle(tmp_path):
         )
         await database.db.commit()
 
-        migration = importlib.import_module("nerve.db.migrations.v056_resource_request_hosts")
+        migration = importlib.import_module("nerve.db.migrations.v058_resource_request_hosts")
         await migration.up(database.db)
         await database.db.commit()
         rows = await (
@@ -310,7 +310,7 @@ async def test_v56_backfills_exact_host_and_reattaches_queued_bundle(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_v53_rejects_invalid_states_and_duplicate_resource_references(tmp_path):
+async def test_v55_rejects_invalid_states_and_duplicate_resource_references(tmp_path):
     db = await aiosqlite.connect(tmp_path / "handles.db")
     try:
         await db.execute("PRAGMA foreign_keys = ON")
@@ -403,10 +403,10 @@ async def test_v53_rejects_invalid_states_and_duplicate_resource_references(tmp_
 
 
 @pytest.mark.asyncio
-async def test_v53_enforces_active_lease_and_foreign_keys_and_installs_lookup_indexes(tmp_path):
+async def test_v55_enforces_active_lease_and_foreign_keys_and_installs_lookup_indexes(tmp_path):
     # These names are part of the query contract: active handle lookup, reverse
     # operation lookup, FIFO waiter selection, and restart recovery scanning.
-    # All must remain partial indexes as declared by V53.
+    # All must remain partial indexes as declared by V55.
     # No resource lifecycle code is exercised here.
     db = await aiosqlite.connect(tmp_path / "constraints.db")
     try:

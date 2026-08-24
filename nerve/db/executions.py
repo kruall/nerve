@@ -208,7 +208,7 @@ class ExecutionStore:
                         (execution_id, now, now, stage_run_id),
                     )
         except sqlite3.IntegrityError as exc:
-            # V059's unique handle index is the final arbiter between separate
+            # V061's unique handle index is the final arbiter between separate
             # processes.  Return the same stable conflict with its Operation
             # ids rather than leaking SQLite's constraint text.
             if ("uq_operation_resource_refs_one_active_per_handle" in str(exc)

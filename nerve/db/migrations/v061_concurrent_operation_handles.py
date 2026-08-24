@@ -1,6 +1,6 @@
 """Allow concurrent Operations while fencing non-shareable retained handles.
 
-V058 made ``operation_resource_refs`` durable and ordered.  There is no
+V060 made ``operation_resource_refs`` durable and ordered.  There is no
 kind/profile shareability metadata in the retained-handle contract, so each
 handle is deliberately non-shareable.  The unique index is the cross-process
 serialization point: terminal transitions detach refs before a handle can be
@@ -9,7 +9,7 @@ used by another Operation.
 
 
 async def up(db):
-    # V058 databases could contain references left behind by terminal
+    # V060 databases could contain references left behind by terminal
     # executions. They are no longer ownership proofs and would make the new
     # unique fence reject an otherwise valid schema upgrade. Active refs are
     # deliberately untouched: a corrupt active overlap must fail migration

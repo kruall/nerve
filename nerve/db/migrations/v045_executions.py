@@ -72,4 +72,4 @@ CREATE INDEX IF NOT EXISTS idx_execution_logs_tail
 
 async def up(db: aiosqlite.Connection) -> None:
     await db.executescript(SQL)
-    logger.info("v043: executions and execution_logs tables created")
+    logger.info("v045: executions and execution_logs tables created")

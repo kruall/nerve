@@ -1,11 +1,27 @@
 """Tests for database migration discovery invariants."""
 
+import importlib
 from types import SimpleNamespace
 
 import aiosqlite
 import pytest
 
 from nerve.db.migrations import runner
+
+
+async def _apply_through(db: aiosqlite.Connection, ceiling: int) -> None:
+    for version, module_name in runner.discover_migrations():
+        if version > ceiling:
+            break
+        module = importlib.import_module(
+            f"nerve.db.migrations.{module_name}"
+        )
+        await module.up(db)
+        await db.execute(
+            "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
+            (version,),
+        )
+        await db.commit()
 
 
 def test_discover_migrations_rejects_duplicate_versions(monkeypatch):
@@ -31,7 +47,15 @@ async def test_v49_database_applies_later_migrations(tmp_path):
                 status TEXT NOT NULL, created_at TEXT NOT NULL
             )"""
         )
-        # V49 already includes the V45 resource queue. Keep this synthetic
+        await db.execute(
+            """CREATE TABLE tasks (
+                id TEXT PRIMARY KEY, title TEXT NOT NULL,
+                status TEXT NOT NULL, deadline TEXT,
+                created_at TEXT, updated_at TEXT
+            )"""
+        )
+        # Legacy fork V49 already includes its resource queue (now V47).
+        # Keep this synthetic
         # fixture minimal, but structurally valid for later ALTER migrations.
         await db.execute(
             """CREATE TABLE resource_lease_requests (
@@ -86,7 +110,7 @@ async def test_v49_database_applies_later_migrations(tmp_path):
         )
         await db.commit()
 
-        assert await runner.run_migrations(db) == 62
+        assert await runner.run_migrations(db) == 65
         async with db.execute(
             "SELECT name FROM sqlite_master "
             "WHERE type='table' AND name='session_resource_reservations'"
@@ -132,5 +156,60 @@ async def test_v49_database_applies_later_migrations(tmp_path):
             "uq_preset_workflows_parent_operation",
             "idx_preset_workflows_allocation_state",
         } <= workflow_indexes
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_upstream_v44_database_applies_shifted_fork_chain(tmp_path):
+    db = await aiosqlite.connect(tmp_path / "upstream-v44.db")
+    try:
+        await _apply_through(db, 44)
+        assert await runner.get_current_version(db) == 44
+        assert not await runner._table_exists(db, "executions")
+
+        assert await runner.run_migrations(db) == 65
+        assert await runner._table_exists(db, "executions")
+        assert await runner._table_exists(db, "task_events")
+        async with db.execute("PRAGMA table_info(tasks)") as cursor:
+            assert "position" in {row[1] async for row in cursor}
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_fork_v62_is_remapped_and_gets_task_board_schema(tmp_path):
+    db = await aiosqlite.connect(tmp_path / "legacy-fork-v62.db")
+    try:
+        await db.execute(
+            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY)"
+        )
+        await db.execute(
+            "INSERT INTO schema_version (version) VALUES (62)"
+        )
+        await db.execute("CREATE TABLE executions (id TEXT PRIMARY KEY)")
+        await db.execute(
+            """CREATE TABLE tasks (
+                id TEXT PRIMARY KEY, title TEXT NOT NULL,
+                status TEXT NOT NULL, deadline TEXT,
+                created_at TEXT, updated_at TEXT
+            )"""
+        )
+        await db.execute(
+            """INSERT INTO tasks (
+                id, title, status, created_at, updated_at
+            ) VALUES ('task-1', 'Legacy task', 'pending', '2000', '2000')"""
+        )
+        await db.commit()
+
+        assert await runner.run_migrations(db) == 65
+        async with db.execute("SELECT MAX(version) FROM schema_version") as cursor:
+            assert (await cursor.fetchone())[0] == 65
+        async with db.execute("SELECT position FROM tasks WHERE id='task-1'") as cursor:
+            assert (await cursor.fetchone())[0] == 1024.0
+        async with db.execute(
+            "SELECT task_id, actor FROM task_events"
+        ) as cursor:
+            assert await cursor.fetchall() == [("task-1", "backfill")]
     finally:
         await db.close()

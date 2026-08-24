@@ -173,12 +173,12 @@ class TestCallToolDispatch:
             approval_resolver=approval,
         )
 
-        result = await server.request_handlers[CallToolRequest](
-            _build_call_request("dangerous", {"value": 1}),
+        result = await _invoke_call_tool(
+            server, "dangerous", {"value": 1},
         )
 
-        assert result.root.isError is True
-        assert "declined" in result.root.content[0].text
+        assert result.is_error is True
+        assert "declined" in result.content[0].text
         assert called is False
         approval.assert_awaited_once()
 

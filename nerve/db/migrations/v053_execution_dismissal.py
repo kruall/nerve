@@ -15,4 +15,4 @@ async def up(db: aiosqlite.Connection) -> None:
         "CREATE INDEX idx_executions_session_visible_created "
         "ON executions(session_id, dismissed_at, created_at DESC)",
     )
-    logger.info("v051: execution UI dismissal state added")
+    logger.info("v053: execution dismissal state added")

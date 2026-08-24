@@ -1,4 +1,4 @@
-"""Enforce the durable resource-wait outcome vocabulary without rewriting V053."""
+"""Enforce the durable resource-wait outcome vocabulary without rewriting V055."""
 
 import aiosqlite
 _OUTCOMES = "'LEASE_GRANTED', 'HOST_PERMANENTLY_UNAVAILABLE', 'REQUEST_CANCELLED', 'DEADLOCK_REPLAN_REQUIRED'"
